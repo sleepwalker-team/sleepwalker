@@ -1,0 +1,7 @@
+numpy
+pandas
+pyedflib
+scipy
+torch
+tqdm
+xlrd

@@ -1,38 +1,8 @@
-from __future__ import annotations
-
-from abc import ABC, abstractmethod
-import random
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import numpy as np
 
 from scipy.signal import butter, filtfilt, iirnotch
 
-import numpy as np
-import pandas as pd
-
-import pyedflib
-from pyedflib import DO_NOT_READ_ANNOTATIONS, DO_NOT_CHECK_FILE_SIZE
-
-class Normalizer(ABC):
-    """
-    Abstract base class for per-channel normalization that may depend on
-    the EDF (source) sampling frequency and the (target) resample frequency.
-    """
-
-    @abstractmethod
-    def fit(self, X: np.ndarray, fs: float) -> "Normalizer":
-        """
-        Fit on a (N, 1) array at **EDF native** sampling rate.
-        """
-        ...
-
-    @abstractmethod
-    def transform(self, X: np.ndarray, fs: float) -> np.ndarray:
-        """
-        Transform a (N, 1) array. Unless documented otherwise, X is assumed to be
-        at **EDF native** sampling rate (before resampling).
-        """
-        ...
+from sleepwalker.datasets.normalizer import Normalizer
 
 class EEGFilterNormalizer(Normalizer):
     def __init__(self, lowcut=0.3, highcut=35.0, notch_freq=50.0, band_order=4, notch_q=30, **kwargs):

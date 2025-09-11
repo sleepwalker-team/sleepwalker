@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import List
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
-
+from typing import List, Optional, Sequence, Tuple
 
 def get_edf_files_in_repo(root: str, recursive: bool = True) -> List[str]:
     """List EDF files in a folder (optionally including subfolders).

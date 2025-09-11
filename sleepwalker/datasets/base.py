@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass
 from functools import partial
 import traceback
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -15,8 +15,8 @@ from torch.utils.data import Dataset
 import tqdm
 
 from sleepwalker.utils import logger
-from sleepwalker.core.signal import Normalizer, edf_to_df, read_edf_meta
-from sleepwalker.core.labels import window_labels, sequence_labels
+from sleepwalker.core.signal import edf_to_df, read_edf_meta
+from sleepwalker.datasets.normalizer import Normalizer
 import multiprocessing
 
 @dataclass
@@ -382,6 +382,8 @@ class BaseDataset(Dataset, ABC):
 
         if self.get_item_callback is not None:
             return self.get_item_callback(item)
+        else:
+            return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         edf_path, start_date = self.ids[idx]

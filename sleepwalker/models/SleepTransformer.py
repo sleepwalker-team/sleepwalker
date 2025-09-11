@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from sleepwalker.models.base import BaseModel
-from sleepwalker.transforms.preprocess.spectrogram import Spectrogram
+from sleepwalker.models.preprocessors import Spectrogram
 
 
 class SinusoidalPositionalEncoding(nn.Module):

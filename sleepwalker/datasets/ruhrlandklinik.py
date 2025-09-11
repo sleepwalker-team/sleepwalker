@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import os
 import traceback
-from typing import Any, Mapping, Optional
 from sleepwalker.utils import logger
 
 import pandas as pd
 import xlrd
 
-from sleepwalker.data.datasets.base import BaseDataset
-from sleepwalker.data.utils import get_edf_files_in_repo as list_edf
+from sleepwalker.datasets.base import BaseDataset
 
 class Ruhrlandklinik(BaseDataset):
     def __init__(self, 

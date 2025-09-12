@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 
 from sleepwalker.models.base import BaseModel
-from sleepwalker.models.preprocessors import Spectrogram
+from sleepwalker.models.preprocessors.Normalize import Normalize
+from sleepwalker.models.preprocessors.Spectogram import Spectogram
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -26,7 +27,6 @@ class SinusoidalPositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[: x.size(1)].unsqueeze(0)
 
-
 class AttentionPooling(nn.Module):
     def __init__(self, dim, attn_size):
         super().__init__()
@@ -40,7 +40,6 @@ class AttentionPooling(nn.Module):
         alpha = torch.softmax(e_t, dim=1)
         out = torch.sum(x * alpha.unsqueeze(-1), dim=1)
         return out, alpha
-
 
 class TransformerBlock(nn.Module):
     def __init__(
@@ -78,7 +77,6 @@ class TransformerBlock(nn.Module):
         else:
             return x
 
-
 class SleepTransformer(BaseModel):
     def __init__(
         self,
@@ -103,8 +101,8 @@ class SleepTransformer(BaseModel):
         output_strategy="center",
     ):
         # Attach spectrogram preprocessor exactly as in legacy
-        spec = Spectrogram(n_fft=2 * (ndim - 1), hop_length=hop_length, normalize=True)
-        super().__init__(preprocessors=[spec])
+        spec = [Spectogram(n_fft=2 * (ndim - 1), hop_length=hop_length), Normalize()]
+        super().__init__(preprocessors=spec)
         self.classes = list(classes)
 
         self.ndim = ndim

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import List, Optional, Sequence, Tuple
 
+from sleepwalker.utils import logger
+
 def get_edf_files_in_repo(root: str, recursive: bool = True) -> List[str]:
     """List EDF files in a folder (optionally including subfolders).
 
@@ -20,6 +22,10 @@ def get_edf_files_in_repo(root: str, recursive: bool = True) -> List[str]:
         for f in os.listdir(root):
             if f.lower().endswith(".edf"):
                 edfs.append(os.path.join(root, f))
+    
+    if len(edfs) == 0:
+        logger.warning(f"No EDF files found in {root}. Is this expected?")
+
     return edfs
 
 def _matches_any(path: str, patterns: Optional[Sequence[str]]) -> bool:

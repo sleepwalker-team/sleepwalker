@@ -1,2 +1,2 @@
-from Logger import Logger
-from MLFlowLogger import MLFlowLogger
+from .Logger import Logger
+from .MLFlowLogger import MLFlowLogger

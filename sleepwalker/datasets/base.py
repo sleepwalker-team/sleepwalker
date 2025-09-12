@@ -5,6 +5,7 @@ from collections import defaultdict
 import copy
 from dataclasses import dataclass
 from functools import partial
+import os
 import traceback
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -33,10 +34,6 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
     
     # Stack tensors for all keys except "timestamps"
     return {k: torch.stack(v) if k not in ignore_list else v for k, v in final_dict.items()}
-
-import numpy as np
-import pandas as pd
-from typing import Dict, Iterable, Optional
 
 class EventIndex:
     """
@@ -119,6 +116,7 @@ class BaseDataset(Dataset, ABC):
         self,
         *,
         channels: Sequence[ChannelConfig],
+        patients: Sequence[str| os.PathLike],
         sample_frequency: float,
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
@@ -128,7 +126,8 @@ class BaseDataset(Dataset, ABC):
         get_item: Optional[Callable] = None,
         verbose: str="TQDM",
         transform: Optional[Any] = None,
-        online_filtering:bool = True
+        online_filtering:bool = True,
+        num_workers:int = 4
         # event_type: str = "window",
         # normalizer_fit_strategy: Optional[Mapping[str, Any]] = None,
         # num_workers: int = 0,
@@ -165,6 +164,7 @@ class BaseDataset(Dataset, ABC):
 
         # Prepared state
         self.ids = []
+        self.initialize(patients, num_workers)
         # self._patients: List[str] = []
         # self._extractors: Dict[str, SignalExtractor] = {}
         # self._events: Dict[str, pd.DataFrame] = {}
@@ -189,7 +189,7 @@ class BaseDataset(Dataset, ABC):
 
     def get_timeseries_len(self) -> int:
         freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
-        return self.total_input * freq # TODO FROM HERE
+        return int(self.total_input.total_seconds() / freq.total_seconds())
 
     def __len__(self):
         return len(self.ids)
@@ -296,7 +296,7 @@ class BaseDataset(Dataset, ABC):
 
             return edf_path, ids, None, None, None, n_skipped # type: ignore
 
-    def initialize(self, patients: Sequence[str], num_workers: int=4) -> None:
+    def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
         events = {}
         events_additional = {}
         

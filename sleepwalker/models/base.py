@@ -18,8 +18,11 @@ class BaseModel(nn.Module, ABC):
         super().__init__()
         self.preprocessors: List = list(preprocessors) if preprocessors is not None else []
 
-    def apply_preprocessors(self, x: torch.Tensor) -> torch.Tensor:
-        for p in self.preprocessors:
+    def apply_preprocessors(self, x: torch.Tensor, up:int = 0) -> torch.Tensor:
+        if up <= 0:
+            up = len(self.preprocessors)
+            
+        for p in self.preprocessors[:up]:
             x = p(x)
         return x
 

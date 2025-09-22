@@ -1,2 +1,2 @@
-from .ruhrlandklinik import Ruhrlandklinik
-from .base import ChannelConfig, batch_collate
+from .Ruhrlandklinik import Ruhrlandklinik
+from .Basedataset import ChannelConfig, batch_collate

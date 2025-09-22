@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 
-from sleepwalker.models.base import BaseModel
+from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.Spectogram import Spectogram
 
@@ -85,7 +85,7 @@ class SleepTransformer(BaseModel):
         n_channels,           # input channels (from dataset)
         ndim=128,             # spectral bins (F)
         frame_seq_len=29,     # T (frames per epoch)
-        epoch_seq_len=20,     # L (epochs per input)
+        epoch_seq_len=21,     # L (epochs per input)
         hop_length=64,
         frm_d_ff=1024,
         frm_num_blocks=4,

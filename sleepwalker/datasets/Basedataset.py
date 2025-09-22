@@ -127,7 +127,8 @@ class BaseDataset(Dataset, ABC):
         verbose: str="TQDM",
         transform: Optional[Any] = None,
         online_filtering:bool = True,
-        num_workers:int = 4
+        num_workers:int = 4,
+        online_max_tries:int = 2**32
         # event_type: str = "window",
         # normalizer_fit_strategy: Optional[Mapping[str, Any]] = None,
         # num_workers: int = 0,
@@ -146,6 +147,7 @@ class BaseDataset(Dataset, ABC):
         self.verbose = verbose
         self.transform = transform
         self.online_filtering = online_filtering
+        self.online_max_tries = online_max_tries
         
         # self.num_workers = int(num_workers)
         # self.event_type = event_type
@@ -279,9 +281,9 @@ class BaseDataset(Dataset, ABC):
                             n_skipped += 1
                     else:
                         ids.append((edf_path, start))
-                    start += self.total_input
+                    start += self.target_resolution
             else:
-                ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.total_input)]
+                ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
 
             if len(ids) == 0 and self.verbose in ["TQDM", "tqdm", "console"]:
                 logger.warning(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
@@ -313,7 +315,8 @@ class BaseDataset(Dataset, ABC):
         else:
             iter_objects = patients
 
-        for ret_value in tqdm.tqdm(iter_objects, total=len(patients), desc=logger.log_prefix() + f"Preparing labels and sliding windows", disable=self.verbose not in ["TQDM", "tqdm"]): # type: ignore
+        logger.progress_start(len(patients), desc="Preparing labels and sliding windows")
+        for ret_value in iter_objects: #tqdm.tqdm(, total=len(patients), desc=logger.log_prefix() + f"Preparing labels and sliding windows", disable=self.verbose not in ["TQDM", "tqdm"]): # type: ignore
             if num_workers > 1:
                 fpath, ids, df, df_additional, normalizers, n_skipped = ret_value
             else:
@@ -327,6 +330,9 @@ class BaseDataset(Dataset, ABC):
                 n_patients += 1
                 n_skipped_total += n_skipped # type: ignore
                 final_patients.append(fpath)
+            logger.progress_advance(1)
+        
+        logger.progress_close()
 
         if num_workers > 1:
             pool.close() # type: ignore
@@ -338,8 +344,7 @@ class BaseDataset(Dataset, ABC):
         self.events_additional = events_additional
         self.n_patients = n_patients
         self.all_normalizers = all_normalizers
-        if self.verbose in ["TQDM", "tqdm", "console"]:
-            logger.info(f"Dataset initialized with {self.n_patients}/{total_n_patients} patients. Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. ")
+        logger.info(f"Dataset initialized with {self.n_patients}/{total_n_patients} patients. Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. ")
 
     def get_item(self, edf_path:str, start_date:pd.Timestamp, normalizers:Optional[dict[str,Normalizer]]):
         end_date = start_date + self.total_input
@@ -398,6 +403,6 @@ class BaseDataset(Dataset, ABC):
             
             item = self.get_item(edf_path, start_date, normalizer)
             cnt += 1
-            if cnt > 50:
-                raise ValueError("Tried to get a clean item for 50 tries, no success.")
+            if cnt > self.online_max_tries:
+                raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
         return item

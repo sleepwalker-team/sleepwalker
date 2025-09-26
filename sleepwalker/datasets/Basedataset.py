@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-import tqdm
 
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
@@ -124,7 +123,6 @@ class BaseDataset(Dataset, ABC):
         event_mapping: Optional[Mapping[str, str]] = None, # TODO allow for no mapping, but still return events, maybe when event_mapping is empty?
         filter_patient: Optional[Callable] = None,
         get_item: Optional[Callable] = None,
-        verbose: str="TQDM",
         transform: Optional[Any] = None,
         online_filtering:bool = True,
         num_workers:int = 4,
@@ -144,7 +142,6 @@ class BaseDataset(Dataset, ABC):
         self.target_resolution = pd.to_timedelta(target_resolution)
         self.filter_patient = filter_patient        
         self.get_item_callback = get_item        
-        self.verbose = verbose
         self.transform = transform
         self.online_filtering = online_filtering
         self.online_max_tries = online_max_tries
@@ -285,16 +282,15 @@ class BaseDataset(Dataset, ABC):
             else:
                 ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
 
-            if len(ids) == 0 and self.verbose in ["TQDM", "tqdm", "console"]:
+            if len(ids) == 0:
                 logger.warning(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
 
             return edf_path, ids, df, df_additional, normalizers, n_skipped # type: ignore
         #except (OSError, ValueError, KeyError) as e:
         except Exception as e:
-            if self.verbose in ["TQDM", "tqdm", "console"]:
-                logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
-                logger.warning(traceback.format_exc())
-                # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
+            logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
+            logger.warning(traceback.format_exc())
+            # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
 
             return edf_path, ids, None, None, None, n_skipped # type: ignore
 
@@ -316,7 +312,7 @@ class BaseDataset(Dataset, ABC):
             iter_objects = patients
 
         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
-        for ret_value in iter_objects: #tqdm.tqdm(, total=len(patients), desc=logger.log_prefix() + f"Preparing labels and sliding windows", disable=self.verbose not in ["TQDM", "tqdm"]): # type: ignore
+        for ret_value in iter_objects: 
             if num_workers > 1:
                 fpath, ids, df, df_additional, normalizers, n_skipped = ret_value
             else:
@@ -358,6 +354,23 @@ class BaseDataset(Dataset, ABC):
                     vals = x_df[col].to_numpy(dtype=float).reshape(-1, 1)
                     x_df[col] = norm.transform(vals, self.sample_frequency).ravel()
 
+        # Target time at center for window/sequence modes
+        t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
+        item: Dict[str, Any] = {"patient": edf_path, "time": t_center}
+        
+        if self.event_mapping is not None and len(self.classes) > 0:
+            y_df = self.events[edf_path]
+            item["target"] = self.get_events(y_df, start_date)
+        
+            if self.has_extra_target():
+                additional_df = self.events_additional[edf_path]
+                item["target_extra"] = self.get_events(additional_df, start_date)
+
+        if self.get_item_callback is not None:
+            item = self.get_item_callback(data=x_df, **item)
+        else:
+            item["data"] = torch.from_numpy(x_df.values).float()
+
         # Pad to exact desired length if needed
         # freq = pd.to_timedelta(1.0/self.sample_frequency, unit="s")
         # desired_len = int(self.total_input / freq)
@@ -369,26 +382,11 @@ class BaseDataset(Dataset, ABC):
         #     pad_df = pd.DataFrame([x_df.iloc[-1].values] * n, columns=x_df.columns, index=pad_idx)
         #     x_df = pd.concat([x_df, pad_df])
 
-        X = torch.from_numpy(x_df.values).float()
+        #X = torch.from_numpy(x_df.values).float()
         if self.transform is not None:
-            X = self.transform(X)
-
-        # Target time at center for window/sequence modes
-        t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
-        item: Dict[str, Any] = {"patient": edf_path, "time": t_center, "data": X}
+            item["data"] = self.transform(item["data"])
+        return item
         
-        if self.event_mapping is not None and len(self.classes) > 0:
-            y_df = self.events[edf_path]
-            item["target"] = self.get_events(y_df, start_date)
-        
-            if self.has_extra_target():
-                additional_df = self.events_additional[edf_path]
-                item["target_extra"] = self.get_events(additional_df, start_date)
-
-        if self.get_item_callback is not None:
-            return self.get_item_callback(item)
-        else:
-            return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         edf_path, start_date = self.ids[idx]

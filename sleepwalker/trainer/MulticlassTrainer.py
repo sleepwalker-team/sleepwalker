@@ -118,18 +118,20 @@ class MulticlassTrainer(ABC):
         return out
 
     @staticmethod
-    def get_item(item, percentage:float = 0.5):
+    def get_item(patient, time, data, target, target_extra = None, percentage:float = 0.5):
         try:
-            freq = pd.to_timedelta(item["target"].index.freq).total_seconds()
-            targets = torch.tensor(item["target"].sum().to_numpy())
-            item["target"] = MulticlassTrainer.target_to_multiclass(targets, None, len(item["target"])*freq*percentage, True)
+            freq = pd.to_timedelta(target.index.freq).total_seconds()
+            targets = torch.tensor(target.sum().to_numpy())
+            target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
 
-            if "target_extra" in item:
-                freq = pd.to_timedelta(item["target_extra"].index.freq).total_seconds()
-                targets = torch.tensor(item["target_extra"].sum().to_numpy())
-                item["target_extra"] = MulticlassTrainer.target_to_multiclass(targets, None, len(item["target_extra"])*freq*percentage, True)
+            if target_extra is not None:
+                freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
+                targets = torch.tensor(target_extra.sum().to_numpy())
+                target_extra = MulticlassTrainer.target_to_multiclass(targets, None, len(target_extra)*freq*percentage, True)
+            
+            data = torch.from_numpy(data.values).float()
+            return {"patient":patient, "time":time, "data":data, "target":target, "target_extra":target_extra}
         
-            return item
         except Exception as e:
             pass
         return None
@@ -199,6 +201,9 @@ class MulticlassTrainer(ABC):
 
         return model
 
+    def apply_model(self, model, x, is_test:bool=False):
+        return model(x)
+
     def run_epoch(self, loader, opt, model, prefix=""):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
@@ -215,7 +220,7 @@ class MulticlassTrainer(ABC):
             
             if opt is not None: opt.zero_grad(set_to_none=True)
             
-            logits = model(x)
+            logits = self.apply_model(model, x, is_test=mode=="TEST") # Typically model(x) would be enough here, but this way we can override self.apply_model later :-)
             loss = self._loss(logits, y)
             
             target_np = y.argmax(axis=1).cpu().numpy()

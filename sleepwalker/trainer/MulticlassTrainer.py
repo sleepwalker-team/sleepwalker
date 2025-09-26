@@ -5,13 +5,10 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
 import torch
-import tqdm
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
 from sleepwalker.models.Basemodel import BaseModel, warmup_model
-# from sleepwalker.trainer.logger.Logger import Logger
-# from sleepwalker.utils import TqdmProgress, logger as console_logger
 from sleepwalker.utils import logger
 
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
@@ -42,7 +39,6 @@ class MulticlassTrainer(ABC):
         epochs: int,
         optimizer: Callable[[torch.nn.Module], torch.optim.Optimizer],
         classes: list[str],
-        # logger: Optional[Logger],
         loss_function: Callable,
         class_weights: Optional[dict[str, float]] = None,
         loss_mode: str = "regular",  # fixed (type: str, not Optional[str])
@@ -55,7 +51,6 @@ class MulticlassTrainer(ABC):
         self.save_every = save_every
         self.early_stopping_patience = early_stopping
         self.device = device
-        # self.logger = logger
 
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
@@ -166,13 +161,13 @@ class MulticlassTrainer(ABC):
         logger.metric(f"{scope}/{mode}/coehns_kappa", kappa)  
         logger.metric(f"{scope}/{mode}/loss", float(loss_value)) 
 
-    def _warmup(self, model, data_loader, device = "cuda", prefix=""):
-        logger.context("warmup preprocessors")
+    def _warmup(self, model, data_loader, device = "cuda"):
+        logger.context("Warmup preprocessors")
         warmup_model(model, data_loader, device) 
         logger.uncontext()
 
         if self.estimate_class_cnts:
-            logger.progress_start(len(data_loader)*data_loader.batch_size, desc="warmup weights")
+            logger.progress_start(len(data_loader)*data_loader.batch_size, desc="Warmup weights", leave=True)
 
             for batch in data_loader:
                 y = batch["target"].to(device)
@@ -205,8 +200,7 @@ class MulticlassTrainer(ABC):
         return model
 
     def run_epoch(self, loader, opt, model, prefix=""):
-        # TODO use logger interface
-        pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, leave=True)
+        logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
         
         loss_sum = 0
@@ -245,9 +239,11 @@ class MulticlassTrainer(ABC):
 
             desc = f"{prefix:<12} {loss_sum/cnt:2.4f} acc {accs:2.3f} " \
                    f"f1 (mi/ma) {f1_micro:1.4f}/{f1_macro:1.4f} κ {coehns_kappa:2.3f}"
-            pbar.set_description(desc)
-            pbar.update(loader.batch_size)
+            
+            logger.progress_status(desc)
+            logger.progress_advance(loader.batch_size)
 
+        logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
         self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch")  
 
@@ -259,7 +255,7 @@ class MulticlassTrainer(ABC):
             test_loss, test_cm = self.run_epoch(test_loader, None, model, f"TEST") 
         return test_loss, test_cm
     
-    def fit(self, model: BaseModel, train_loader, val_loader = None, prefix=""):
+    def fit(self, model: BaseModel, train_loader, val_loader = None):
         model = model.to(self.device)
         opt = self.optimizer_fn(model)
 
@@ -274,26 +270,25 @@ class MulticlassTrainer(ABC):
             logger.warning(f"early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
-        model = self._warmup(model, train_loader, self.device, prefix)
+        model = self._warmup(model, train_loader, self.device)
         val_losses: list[float] = []
         losses = []
         cms = []
 
-        # Finally, start the training
         for epoch in range(self.epochs):
             model.train()
-            loss, cm = self.run_epoch(train_loader, opt, model, f"{prefix} TRAIN [{epoch+1}/{self.epochs}]")
+            loss, cm = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
             cms.append({"train":cm})
             losses.append({"train":loss})
 
             if self.save_every > 0 and (epoch % self.save_every == 0):
-                logger.info(f"Logging intermediate model after {epoch} epochs under.")
+                logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
                 folder = store_checkpoint(model, opt, lr_scheduler)
-                logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}/model.pt")
-                logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}/optimizer.pt")
+                logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}")
+                logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:
-                    logger.artifact(path=os.path.join(folder, "scheduler.pt"), dest=f"{epoch}/scheduler.pt")
+                    logger.artifact(path=os.path.join(folder, "scheduler.pt"), dest=f"{epoch}")
 
             if lr_scheduler is not None:
                 lr_scheduler.step()

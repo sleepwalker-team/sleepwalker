@@ -28,3 +28,5 @@ dev_plot.ipynb
 .VSCodeCounter
 copy_data.sh
 *.jsonl
+*.sqlite
+*.sqlite-journal

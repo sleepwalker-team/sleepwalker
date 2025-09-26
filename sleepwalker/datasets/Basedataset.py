@@ -121,7 +121,7 @@ class BaseDataset(Dataset, ABC):
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
         target_resolution: str | pd.Timedelta = "30s",
-        event_mapping: Optional[Mapping[str, str]] = None,
+        event_mapping: Optional[Mapping[str, str]] = None, # TODO allow for no mapping, but still return events, maybe when event_mapping is empty?
         filter_patient: Optional[Callable] = None,
         get_item: Optional[Callable] = None,
         verbose: str="TQDM",
@@ -315,7 +315,7 @@ class BaseDataset(Dataset, ABC):
         else:
             iter_objects = patients
 
-        logger.progress_start(len(patients), desc="Preparing labels and sliding windows")
+        logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
         for ret_value in iter_objects: #tqdm.tqdm(, total=len(patients), desc=logger.log_prefix() + f"Preparing labels and sliding windows", disable=self.verbose not in ["TQDM", "tqdm"]): # type: ignore
             if num_workers > 1:
                 fpath, ids, df, df_additional, normalizers, n_skipped = ret_value

@@ -1,8 +1,24 @@
-# unified_logger.py (final patch)
+# unified_logger.py
 from __future__ import annotations
 import os, sys, tempfile, logging, inspect
 from typing import Any, Dict, Optional, List, Protocol
 from dataclasses import dataclass, field
+
+# ---------------------------
+# Level-aware formatter
+# ---------------------------
+
+class LevelAwareFormatter(logging.Formatter):
+    def __init__(self, fmt_info: str, fmt_other: str, datefmt: Optional[str] = None):
+        super().__init__(datefmt=datefmt)
+        self._fmt_info = logging.Formatter(fmt_info, datefmt=datefmt)
+        self._fmt_other = logging.Formatter(fmt_other, datefmt=datefmt)
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno == logging.INFO:
+            return self._fmt_info.format(record)
+        else:
+            return self._fmt_other.format(record)
 
 # ---------------------------
 # Context (label stack)
@@ -89,13 +105,13 @@ class TqdmProgress:
 # ---------------------------
 
 class Sink(Protocol):
-    def start(self, experiment: Optional[str], run_name: Optional[str],
+    def start(self, run_name: Optional[str],
               params: Optional[Dict[str, Any]], tags: Optional[Dict[str, Any]]) -> None: ...
     def end(self, status: str = "FINISHED") -> None: ...
-    def event(self, level: str, message: str) -> None: ...
+    def event(self, level: str, message: str, context: str) -> None: ...
     def metric(self, name: str, value: float, context: str) -> None: ...
-    def figure(self, name: str, figure: Any) -> None: ...
-    def artifact(self, path: str, dest: Optional[str]) -> None: ...
+    def figure(self, name: str, figure: Any, context: str) -> None: ...
+    def artifact(self, path: str, dest: Optional[str], context: str) -> None: ...
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress: ...
 
 
@@ -117,28 +133,27 @@ class ConsoleTqdmHandler(logging.Handler):
 
 
 class StdLogSink:
-    def __init__(self, path: str, fmt: str):
-        self._logger = logging.getLogger("UnifiedLogger.stdout")
+    def __init__(self, path: str, formatter: logging.Formatter):
+        self._logger = logging.getLogger(f"UnifiedLogger.stdout.{id(self)}")
         self._logger.propagate = False
         self._logger.setLevel(logging.DEBUG)
-        self._logger.handlers.clear()
 
-        formatter = logging.Formatter(fmt)
-
+        # Console
         ch = ConsoleTqdmHandler()
         ch.setLevel(logging.DEBUG)
         ch.setFormatter(formatter)
         self._logger.addHandler(ch)
 
-        fh = logging.FileHandler(path)
+        # File
+        fh = logging.FileHandler(path, mode="a", encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(formatter)
         self._logger.addHandler(fh)
 
-    def start(self, experiment, run_name, params, tags): pass
+    def start(self, run_name, params, tags): pass
     def end(self, status="FINISHED"): pass
 
-    def event(self, level: str, message: str) -> None:
+    def event(self, level: str, message: str, context: str) -> None:
         frame = inspect.currentframe().f_back.f_back
         filename = os.path.basename(frame.f_code.co_filename)
         lineno = frame.f_lineno
@@ -154,8 +169,8 @@ class StdLogSink:
         self._logger.handle(lr)
 
     def metric(self, name: str, value: float, context: str): pass
-    def figure(self, name: str, figure: Any): pass
-    def artifact(self, path: str, dest: Optional[str]): pass
+    def figure(self, name: str, figure: Any, context: str): pass
+    def artifact(self, path: str, dest: Optional[str], context: str): pass
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         return NullProgress()
 
@@ -169,19 +184,19 @@ class TqdmSink:
         self._default_leave = default_leave
         self._formatter = formatter or logging.Formatter("%(message)s")
 
-    def start(self, experiment, run_name, params, tags): pass
+    def start(self, run_name, params, tags): pass
     def end(self, status="FINISHED"): pass
-    def event(self, level, message): pass
-    def metric(self, name, value, context): pass
-    def figure(self, name, figure): pass
-    def artifact(self, path, dest): pass
+    def event(self, level, message, context: str): pass
+    def metric(self, name, value, context: str): pass
+    def figure(self, name, figure, context: str): pass
+    def artifact(self, path, dest, context: str): pass
 
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         return TqdmProgress(total, desc, leave if leave is not None else self._default_leave, self._formatter)
 
 
 # ---------------------------
-# MlflowSink (metrics only shown)
+# MlflowSink
 # ---------------------------
 
 class MlflowSink:
@@ -193,16 +208,72 @@ class MlflowSink:
         self.experiment = experiment
         self._run_active = False
 
-    def start(self, experiment, run_name, params, tags): ...
-    def end(self, status="FINISHED"): ...
-    def event(self, level, message): pass
-    def metric(self, name, value, context):
+    def start(self, run_name: Optional[str],
+              params: Optional[Dict[str, Any]], tags: Optional[Dict[str, Any]]):
+        exp_name = self.experiment
+        if exp_name:
+            exp = self.mlflow.get_experiment_by_name(exp_name)
+            exp_id = exp.experiment_id if exp else self.mlflow.create_experiment(exp_name)
+        else:
+            exp_id = None
+
+        active = self.mlflow.active_run()
+        if active is None:
+            self.mlflow.start_run(
+                experiment_id=exp_id,
+                run_name=run_name,
+                tags=tags or {}
+            )
+        if params:
+            try:
+                self.mlflow.log_params(params)
+            except Exception:
+                pass
+        self._run_active = True
+
+    def end(self, status: str = "FINISHED"):
+        if self._run_active:
+            self.mlflow.end_run(status=status)
+            self._run_active = False
+
+    def event(self, level: str, message: str, context: str):
+        # MLflow doesn't handle free-form log events; ignore
+        pass
+
+    def metric(self, name: str, value: float, context: str):
+        # Context is ignored → metric name must be explicit
         self.mlflow.log_metric(name, float(value))
-        if context:
-            self.mlflow.set_tag("context", context)
-    def figure(self, name, figure): ...
-    def artifact(self, path, dest): ...
-    def progress(self, total, desc, leave, formatter): return NullProgress()
+
+    def figure(self, name: str, figure: Any, context: str):
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        tmp.close()
+        try:
+            if hasattr(figure, "savefig"):
+                figure.savefig(tmp.name, bbox_inches="tight")
+            elif callable(figure):
+                figure(tmp.name)
+            else:
+                raise TypeError("figure must be matplotlib.Figure or callable(path)")
+            artifact_path = f"figures/{name}"
+            self.mlflow.log_artifact(tmp.name, artifact_path=artifact_path)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    def artifact(self, path: str, dest: Optional[str], context: str):
+        # Context is ignored → artifact path only depends on dest
+        artifact_path = dest or ""
+        if os.path.isdir(path):
+            self.mlflow.log_artifacts(path, artifact_path=artifact_path)
+        else:
+            self.mlflow.log_artifact(path, artifact_path=artifact_path)
+
+    def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
+        # MLflow has no progress bar concept
+        return NullProgress()
 
 
 # ---------------------------
@@ -210,9 +281,8 @@ class MlflowSink:
 # ---------------------------
 
 class UnifiedLogger:
-    def __init__(self, fmt: str = "%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)3d | %(message)s"):
-        self._fmt = fmt
-        self._formatter = logging.Formatter(fmt)
+    def __init__(self, formatter: logging.Formatter):
+        self._formatter = formatter
         self._sinks: List[Sink] = []
         self._context = LogContext()
         self._pbar: Progress = NullProgress()
@@ -224,12 +294,28 @@ class UnifiedLogger:
     def uncontext(self): self._context.pop()
     def _ctx_str(self) -> str: return self._context.as_str()
 
+    # ---- Run lifecycle ----
+    def start_run(self, run_name: Optional[str] = None,
+                  params: Optional[Dict[str, Any]] = None, tags: Optional[Dict[str, Any]] = None):
+        for s in self._sinks:
+            try: s.start(run_name, params, tags)
+            except Exception: pass
+        if run_name:
+            self.context(run_name)
+
+    def end_run(self, status: str = "FINISHED"):
+        for s in self._sinks:
+            try: s.end(status)
+            except Exception: pass
+        self.uncontext()
+
     # ---- Events ----
     def _event(self, level: str, msg: str):
         prefix = self._ctx_str()
         full_msg = f"{prefix} | {msg}" if prefix else msg
+        ctx = self._ctx_str()
         for s in self._sinks:
-            try: s.event(level, full_msg)
+            try: s.event(level, full_msg, context=ctx)
             except Exception: pass
     def info(self, msg): self._event("INFO", msg)
     def warning(self, msg): self._event("WARNING", msg)
@@ -244,16 +330,24 @@ class UnifiedLogger:
 
     # ---- Figures / Artifacts ----
     def figure(self, name: str, figure: Any):
+        ctx = self._ctx_str()
         for s in self._sinks:
-            try: s.figure(name, figure)
+            try: s.figure(name, figure, context=ctx)
             except Exception: pass
+
     def artifact(self, path: str, dest: Optional[str] = None):
+        ctx = self._ctx_str()
         for s in self._sinks:
-            try: s.artifact(path, dest)
+            try: s.artifact(path, dest, context=ctx)
             except Exception: pass
 
     # ---- Progress ----
-    def progress_start(self, total: int, *, desc: Optional[str] = None, leave: bool = False):
+    def progress_start(self, total: int, *, desc: Optional[str] = None, leave: bool = True):
+        try:
+            self._pbar.close()
+        except Exception:
+            pass
+
         prefix = self._ctx_str()
         combined = f"{prefix} | {desc}" if desc and prefix else (desc or prefix)
         frame = inspect.currentframe().f_back
@@ -269,13 +363,15 @@ class UnifiedLogger:
             exc_info=None,
         )
         formatted = self._formatter.format(record)
+
         for s in self._sinks:
             try:
                 self._pbar = s.progress(total, formatted, leave, self._formatter)
                 if not isinstance(self._pbar, NullProgress):
-                    return
+                    return self._pbar
             except Exception: continue
         self._pbar = NullProgress()
+        return self._pbar
 
     def progress_status(self, msg: str, level: str = "INFO"):
         desc = self._ctx_str()
@@ -296,10 +392,14 @@ _singleton: Optional[UnifiedLogger] = None
 def get_logger() -> UnifiedLogger:
     global _singleton
     if _singleton is None:
-        FMT = "%(asctime)s | %(levelname)-8s | %(filename)s:%(lineno)3d | %(message)s"
-        _singleton = UnifiedLogger(fmt=FMT)
-        _singleton.add_sink(StdLogSink(path="sleepwalker.log", fmt=FMT))
-        _singleton.add_sink(TqdmSink(formatter=_singleton._formatter))
+        FMT_INFO  = "%(asctime)s | %(levelname)s | %(message)s"
+        FMT_OTHER = "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)3d | %(message)s"
+        formatter = LevelAwareFormatter(FMT_INFO, FMT_OTHER)
+
+        _singleton = UnifiedLogger(formatter=formatter)
+        _singleton.add_sink(StdLogSink(path="sleepwalker.log", formatter=formatter))
+        _singleton.add_sink(TqdmSink(formatter=formatter))
     return _singleton
 
 logger: UnifiedLogger = get_logger()
+

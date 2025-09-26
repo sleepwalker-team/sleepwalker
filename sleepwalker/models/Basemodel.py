@@ -17,7 +17,7 @@ def warmup_model(model: BaseModel, data_loader:DataLoader, device:str = "cuda") 
         raise ValueError(f"batch_size should not be None here.")
 
     for idx in range(len(model.preprocessors)):
-        logger.progress_start(total_batches*batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}")
+        logger.progress_start(total_batches*batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
         if model.preprocessors[idx].requires_warmup():
             for batch in data_loader:
                 x = batch["data"].to(device)

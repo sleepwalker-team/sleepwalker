@@ -7,3 +7,4 @@ tqdm
 xlrd
 mlflow
 torchinfo
+pytest

@@ -100,7 +100,6 @@ class SleepTransformer(BaseModel):
         fc_dropout=0.1,
         output_strategy="center",
     ):
-        # Attach spectrogram preprocessor exactly as in legacy
         spec = [Spectogram(n_fft=2 * (ndim - 1), hop_length=hop_length), Normalize()]
         super().__init__(preprocessors=spec)
         self.classes = list(classes)

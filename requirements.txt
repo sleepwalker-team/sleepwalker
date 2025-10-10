@@ -8,3 +8,5 @@ xlrd
 mlflow
 torchinfo
 pytest
+dotenv
+rarfile

@@ -30,3 +30,4 @@ copy_data.sh
 *.jsonl
 *.sqlite
 *.sqlite-journal
+.env

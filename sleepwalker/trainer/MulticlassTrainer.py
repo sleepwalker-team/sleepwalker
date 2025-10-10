@@ -5,10 +5,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
 import torch
+from torch.utils.data import DataLoader
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
-from sleepwalker.models.Basemodel import BaseModel, warmup_model
+from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
 
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
@@ -42,7 +43,7 @@ class MulticlassTrainer(ABC):
         loss_function: Callable,
         class_weights: Optional[dict[str, float]] = None,
         loss_mode: str = "regular",  # fixed (type: str, not Optional[str])
-        device: str = "cuda",
+        device: str = "cuda:0",
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None
@@ -163,9 +164,32 @@ class MulticlassTrainer(ABC):
         logger.metric(f"{scope}/{mode}/coehns_kappa", kappa)  
         logger.metric(f"{scope}/{mode}/loss", float(loss_value)) 
 
+    def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
+        model.to(device)
+        total_batches = len(data_loader)
+        batch_size = data_loader.batch_size  
+
+        if batch_size is None:
+            raise ValueError(f"batch_size should not be None here.")
+
+        for idx in range(len(model.preprocessors)):
+            logger.progress_start(total_batches*batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
+            if model.preprocessors[idx].requires_warmup():
+                for batch in data_loader:
+                    x = batch["data"].to(device)
+                    x = model.apply_preprocessors(x, idx)
+                    model.preprocessors[idx].update(x)
+                    logger.progress_advance(batch_size)
+            else:
+                # No warmup required -> Set tqdm bar to final value directly                
+                logger.progress_advance(total_batches*batch_size)
+            logger.progress_close()
+
+        return model
+
     def _warmup(self, model, data_loader, device = "cuda"):
         logger.context("Warmup preprocessors")
-        warmup_model(model, data_loader, device) 
+        self.warmup_preprocessors(model, data_loader, device) 
         logger.uncontext()
 
         if self.estimate_class_cnts:

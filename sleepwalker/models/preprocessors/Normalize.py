@@ -1,6 +1,6 @@
 import torch
 
-from sleepwalker.models.preprocessors.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Normalize(Preprocessor):
         

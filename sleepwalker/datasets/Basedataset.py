@@ -120,7 +120,8 @@ class BaseDataset(Dataset, ABC):
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
         target_resolution: str | pd.Timedelta = "30s",
-        event_mapping: Optional[Mapping[str, str]] = None, # TODO allow for no mapping, but still return events, maybe when event_mapping is empty?
+        event_mapping: Optional[Mapping[str, str]] = None, 
+        remove_unmapped_events : bool = True, 
         filter_patient: Optional[Callable] = None,
         get_item: Optional[Callable] = None,
         transform: Optional[Any] = None,
@@ -136,6 +137,7 @@ class BaseDataset(Dataset, ABC):
         # Config
         self.channels = channels
         self.event_mapping = event_mapping
+        self.remove_unmapped_events = remove_unmapped_events
         self.sample_frequency = sample_frequency
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
@@ -145,7 +147,6 @@ class BaseDataset(Dataset, ABC):
         self.transform = transform
         self.online_filtering = online_filtering
         self.online_max_tries = online_max_tries
-        
         # self.num_workers = int(num_workers)
         # self.event_type = event_type
         # self.normalizer_fit_strategy = normalizer_fit_strategy or {"mode": "full"}
@@ -175,13 +176,11 @@ class BaseDataset(Dataset, ABC):
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         ...
 
-    @abstractmethod
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
-        ...
+        raise ValueError(f"This function should not be called")
 
-    @abstractmethod
     def has_extra_target(self) -> bool:
-        ...
+        return False
 
     def get_classes(self) -> list[str]:
         return self.classes
@@ -251,15 +250,23 @@ class BaseDataset(Dataset, ABC):
                     df = self.get_event_df(edf_path, start) 
                     df_additional = self.get_extra_event_df(edf_path, start)
                     
-                    df_additional["Label"] = df_additional["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
+                    if self.remove_unmapped_events:
+                        df_additional["Label"] = df_additional["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
+                    else:
+                        df_additional["Label"] = df_additional["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                     df_additional = df_additional.dropna()
+                        
                     df_additional = EventIndex(df_additional, self.classes)
                 else:
                     df = self.get_event_df(edf_path, start) 
                     df_additional = None
 
-                df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
+                if self.remove_unmapped_events:
+                    df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
+                else:
+                    df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                 df = df.dropna() 
+
                 start = max(start, df["Starttime"].min())
                 end = min(end, df["Endtime"].max())
 

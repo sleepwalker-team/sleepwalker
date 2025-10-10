@@ -1,6 +1,6 @@
 import torch
 
-from sleepwalker.models.preprocessors.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Spectogram(Preprocessor):
     def __init__(self, n_fft = 256, hop_length = 64, win_length = None, epoch_len_samples = None):

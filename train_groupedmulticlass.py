@@ -122,6 +122,7 @@ MLFLow integration:
 # Parameters for this run
 edf_folder = "/raid/data/ruhrlandklinik/raw/train-test-2023"
 n_splits = 5
+#batch_size = 512
 batch_size = 128
 epochs = 100
 total_input = "630s"
@@ -129,7 +130,8 @@ target_resolution = "30s"
 n_samples = None #10_000
 tracking_uri = "file:./mlruns"
 experiment_name = "ruhrland_sleeptransformer"
-groups = [["C4-M1", "E2-M1", "F4-M1", "O2-M1"]]
+groups = [["C4-M1"]]
+# groups = [["C4-M1", "E2-M1", "F4-M1", "O2-M1"]]
 
 # Function that is called by the Basedataset to filter out patients _before_ loading them 
 # If true is returned => try to load patient
@@ -155,7 +157,7 @@ def build_loader(patients):
         },
         filter_patient = filter_patient,
         get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups), # Implements 50% rule for multi-class classification
-        online_filtering = True, # Let the dataset reject data points that are not usable for training by calling MulticlassTrainer.get_item
+        online_filtering = True, # Let the dataset reject data points that are not usable for training by calling get_item
         total_input = total_input, 
         target_resolution = target_resolution
     )
@@ -166,7 +168,6 @@ def build_loader(patients):
     return loader, dataset
 
 all_patients = get_edf_files_in_repo(edf_folder, recursive=False)
-all_patients = all_patients[:10]
 
 # Logging is now vastly simplified: 
 #   We have a global singleton logger (from sleepwalker.utils import logger) that can be used for {metric,artifacts,text,...} logging
@@ -194,19 +195,26 @@ for i, (train_patients, test_patients) in enumerate(kfold_split(all_patients, n_
         classes = dataset.get_classes(), 
         save_every = 10,
         loss_function=torch.nn.functional.cross_entropy, 
+        n_apply_repeats_train=1
     )
     losses, cms = trainer.fit(model, train_loader)
 
     test_loader, _ = build_loader(test_patients)
-    test_loss, test_cm = trainer.test(model, test_loader)
+    for r in [1,2,3,4,5,10]:
+        logger.context(f"r={r}")
+        test_loss, test_cm = trainer.test(model, test_loader, n_apply_repeats=r)
 
-    record = {
-        "xval":i,
-        "test_loss":test_loss,
-        "test_cm":test_cm,
-        "train_loss":losses,
-        "train_cm":cms,
-        "classes":dataset.get_classes(),
-    }
-    append_to_jsonl(experiment_name, record)
+        record = {
+            "xval":i,
+            "repeat":r,
+            "test_loss":test_loss,
+            "test_cm":test_cm,
+            "train_loss":losses,
+            "train_cm":cms,
+            "classes":dataset.get_classes(),
+        }
+        append_to_jsonl(experiment_name, record)
+        logger.uncontext()
+        
+    logger.end_run()
 

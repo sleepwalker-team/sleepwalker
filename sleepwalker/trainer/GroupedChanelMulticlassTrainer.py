@@ -1,31 +1,23 @@
-import inspect
-import os
-from typing import Callable, Optional
 import numpy as np
 import pandas as pd
-from sklearn.metrics import confusion_matrix
+from torch.utils.data import DataLoader
 import torch
-from abc import ABC
-from torch.optim.lr_scheduler import OneCycleLR
 
-from sleepwalker.models.Basemodel import BaseModel, warmup_model
+from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
 
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 
 class GroupedChanelMulticlassTrainer(MulticlassTrainer):
     def __init__(
         self,
         groups:dict[list[str],list[str]],
-        n_apply_repeats_train:int = 5,
-        n_apply_repeats_test:int = 5,
+        n_apply_repeats_train:int = 1,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.groups = groups
         self.n_apply_repeats_train = n_apply_repeats_train
-        self.n_apply_repeats_test = n_apply_repeats_test
         self.rng = np.random.default_rng()
 
     @staticmethod
@@ -60,6 +52,52 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
             pass
         return None
 
+    def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
+        model.to(device)
+        total_batches = len(data_loader)
+        batch_size = data_loader.batch_size  
+
+        if batch_size is None:
+            raise ValueError(f"batch_size should not be None here.")
+
+        for idx in range(len(model.preprocessors)):
+            prog_size = total_batches*batch_size*self.n_apply_repeats_train
+            logger.progress_start(prog_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
+
+            if model.preprocessors[idx].requires_warmup():
+                for batch in data_loader:
+                    x = batch["data"].to(device)
+
+                    # new_x = []
+                    for _ in range(self.n_apply_repeats_train):
+                        # select_idx = [1]
+                        offset = 0
+                        select_idx = []
+                        for g in self.groups:
+                            i = self.rng.integers(low=0,high=len(g))
+                            offset += len(g)
+                            select_idx.append(i)
+                        x = x[:,:,select_idx]
+                        x = model.apply_preprocessors(x, idx)
+                        model.preprocessors[idx].update(x)
+                        logger.progress_advance(batch_size)
+                        # new_x.append(x)
+                    # x = torch.vstack(new_x)
+            else:
+                # No warmup required -> Set tqdm bar to final value directly                
+                logger.progress_advance(prog_size)
+            logger.progress_close()
+
+        return model
+
+    def test(self, model: BaseModel, test_loader, n_apply_repeats:int=5):
+        self.n_apply_repeats_test = n_apply_repeats
+
+        model.eval()
+        with torch.inference_mode():
+            test_loss, test_cm = self.run_epoch(test_loader, None, model, f"TEST") 
+        return test_loss, test_cm
+
     def apply_model(self, model, x, is_test:bool=False):
         n_apply = self.n_apply_repeats_train if not is_test else self.n_apply_repeats_test
 
@@ -71,7 +109,6 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
                 idx = self.rng.integers(low=0,high=len(g))
                 offset += len(g)
                 select_idx.append(idx)
-            # TODO FROM HERE, MODEL IS WRONG? 
             logits = model(x[:,:,select_idx])
             all_logits.append(logits)
 

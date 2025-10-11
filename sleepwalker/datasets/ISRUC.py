@@ -202,7 +202,7 @@ def load_dataframe(fpath: str, event_mapping, annotator = "s1", start_date: pd.T
             # df = pd.read_excel(os.path.join(os.path.dirname(fpath), fname), engine='openpyxl', header=None)
             # df.columns = expected_header
             
-        df["Label"] = df.apply(lambda row: event_mapping.get(row["Stage"].lower().strip(), None), axis=1)
+        df = df.rename(columns={"Stage":"Label"})
         df["Starttime"] = df.apply(lambda row : start_date + pd.to_timedelta(f"{row['Epoch']*30} s"),axis=1)
         df["Endtime"] = df.apply(lambda row : start_date + pd.to_timedelta(f"{row['Epoch']*30} s" + pd.to_timedelta("30s")),axis=1)
         df = df[["Label", "Starttime", "Endtime"]].dropna()
@@ -218,8 +218,6 @@ class ISRUC(BaseDataset):
             **kwargs
         ): 
         
-        super().__init__(**kwargs)
-        
         if not isinstance(annotator, list):
             annotator = [annotator]
         
@@ -228,6 +226,8 @@ class ISRUC(BaseDataset):
         
         self.annotator = annotator
         self.merge = merge
+        
+        super().__init__(**kwargs)
 
     def has_extra_target(self):
         return len(self.annotator) > 1 and not self.merge

@@ -10,3 +10,4 @@ torchinfo
 pytest
 dotenv
 rarfile
+openpyxl

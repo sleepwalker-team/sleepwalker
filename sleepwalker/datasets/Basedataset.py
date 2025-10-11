@@ -31,7 +31,6 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
         for k, v in b.items():
             final_dict[k].append(v)
     
-    # Stack tensors for all keys except "timestamps"
     return {k: torch.stack(v) if k not in ignore_list else v for k, v in final_dict.items()}
 
 class EventIndex:
@@ -40,11 +39,11 @@ class EventIndex:
     Semantics: event is active at t iff start <= t < end  (left-closed, right-open).
     All timestamps should be tz-aligned (ideally UTC).
     """
-    def __init__(self, events: pd.DataFrame, labels:list[str]): #merge_overlaps: bool = True
+    def __init__(self, events: pd.DataFrame): #merge_overlaps: bool = True
         # expected columns: starttime, endtime, label
         df = events.copy()
 
-        self.labels: list = labels #sorted(df["Label"].unique())
+        # self.labels: list = labels #sorted(df["Label"].unique())
         self.starts: Dict[str, np.ndarray] = {}
         self.ends:   Dict[str, np.ndarray] = {}
 
@@ -82,6 +81,7 @@ class EventIndex:
         freq: str,
         dtype: str = "int8",
         sparse: bool = False,
+        labels: list = []
     ) -> pd.DataFrame:
         """
         Return a time-indexed DataFrame sampled at `freq`
@@ -91,9 +91,8 @@ class EventIndex:
         idx = pd.date_range(start, end, freq=freq, inclusive="left")
         t = idx.astype("int64").to_numpy()  # ns since epoch
 
-        cols = self.labels
         out = {}
-        for lab in cols:
+        for lab in labels:
             s = self.starts.get(lab, np.empty(0, np.int64))
             e = self.ends.get(lab,   np.empty(0, np.int64))
             # count how many have started minus how many have ended → active count
@@ -122,7 +121,6 @@ class BaseDataset(Dataset, ABC):
         target_resolution: str | pd.Timedelta = "30s",
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
-        filter_patient: Optional[Callable] = None,
         get_item: Optional[Callable] = None,
         transform: Optional[Any] = None,
         online_filtering:bool = True,
@@ -142,7 +140,6 @@ class BaseDataset(Dataset, ABC):
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
-        self.filter_patient = filter_patient        
         self.get_item_callback = get_item        
         self.transform = transform
         self.online_filtering = online_filtering
@@ -161,6 +158,9 @@ class BaseDataset(Dataset, ABC):
         else:
             self.event_mapping = None
             self.classes = []
+
+        if self.remove_unmapped_events and len(self.event_mapping) == 0:
+            logger.warning(f"You set remove_unmapped_events to true but provided an empty mapping. If you want to not extract any labels, set event_mapping to None. If you want to extract all labels, set event_mapping to an empty dictionary and remove_unmapped_events to false.")
 
         # Prepared state
         self.ids = []
@@ -197,7 +197,7 @@ class BaseDataset(Dataset, ABC):
         end_date = start_date + self.target_resolution
 
         freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
-        return df.query(start_date, end_date, freq=freq, sparse=False)
+        return df.query(start_date, end_date, freq=freq, sparse=False, labels=self.classes)
 
         # time_index = pd.date_range(start=start_date, end=end_date, freq=freq)
 
@@ -228,13 +228,12 @@ class BaseDataset(Dataset, ABC):
         channel_names = [c.name for c in self.channels]
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
+        classes = set()
+        extra_classes = set()
         try:
-            if self.filter_patient is not None and not self.filter_patient(edf_path):
-                return edf_path, ids, None, None, None, n_skipped
-            
             data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type)
             if data_df is None:
-                return edf_path, ids, None, None, None, n_skipped
+                return edf_path, ids, None, None, None, n_skipped, classes.union(extra_classes)
             
             meta = read_edf_meta(edf_path)
             start = meta["start"]
@@ -255,8 +254,8 @@ class BaseDataset(Dataset, ABC):
                     else:
                         df_additional["Label"] = df_additional["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                     df_additional = df_additional.dropna()
-                        
-                    df_additional = EventIndex(df_additional, self.classes)
+                    extra_classes = set(df_additional["Label"].unique())
+                    df_additional = EventIndex(df_additional)
                 else:
                     df = self.get_event_df(edf_path, start) 
                     df_additional = None
@@ -266,15 +265,16 @@ class BaseDataset(Dataset, ABC):
                 else:
                     df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                 df = df.dropna() 
+                classes = set(df["Label"].unique())
 
                 start = max(start, df["Starttime"].min())
                 end = min(end, df["Endtime"].max())
 
-                df = EventIndex(df, self.classes)
+                df = EventIndex(df)
             else:
                 df = None
                 df_additional = None
-            
+
             if self.get_item_callback is not None and not self.online_filtering:
                 while start < end-self.total_input:
                     if self.get_item_callback is not None:
@@ -292,14 +292,14 @@ class BaseDataset(Dataset, ABC):
             if len(ids) == 0:
                 logger.warning(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
 
-            return edf_path, ids, df, df_additional, normalizers, n_skipped # type: ignore
+            return edf_path, ids, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
         #except (OSError, ValueError, KeyError) as e:
         except Exception as e:
             logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
             logger.warning(traceback.format_exc())
             # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
 
-            return edf_path, ids, None, None, None, n_skipped # type: ignore
+            return edf_path, ids, None, None, None, n_skipped, classes.union(extra_classes) # type: ignore
 
     def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
         events = {}
@@ -307,6 +307,7 @@ class BaseDataset(Dataset, ABC):
         
         all_ids = []
         all_normalizers = {}
+        all_classes = set()
         n_patients = 0
         n_skipped_total = 0
         total_n_patients = len(patients)
@@ -321,9 +322,9 @@ class BaseDataset(Dataset, ABC):
         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
         for ret_value in iter_objects: 
             if num_workers > 1:
-                fpath, ids, df, df_additional, normalizers, n_skipped = ret_value
+                fpath, ids, df, df_additional, normalizers, n_skipped, classes = ret_value
             else:
-                fpath, ids, df, df_additional, normalizers, n_skipped = self.prepare_patient(ret_value)
+                fpath, ids, df, df_additional, normalizers, n_skipped, classes = self.prepare_patient(ret_value)
             
             if len(ids) > 0:
                 all_ids.extend(ids)
@@ -333,6 +334,7 @@ class BaseDataset(Dataset, ABC):
                 n_patients += 1
                 n_skipped_total += n_skipped # type: ignore
                 final_patients.append(fpath)
+                all_classes = all_classes.union(classes)
             logger.progress_advance(1)
         
         logger.progress_close()
@@ -347,6 +349,9 @@ class BaseDataset(Dataset, ABC):
         self.events_additional = events_additional
         self.n_patients = n_patients
         self.all_normalizers = all_normalizers
+        if len(self.event_mapping) == 0:
+            self.classes = sorted(list(all_classes))
+
         logger.info(f"Dataset initialized with {self.n_patients}/{total_n_patients} patients. Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. ")
 
     def get_item(self, edf_path:str, start_date:pd.Timestamp, normalizers:Optional[dict[str,Normalizer]]):

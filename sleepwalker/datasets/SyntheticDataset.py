@@ -39,7 +39,7 @@ def load_stages(edf_path: str, start_datetime: pd.Timestamp, basename:str = "sta
             if not line:
                 continue
             start_off, end_off, label = line.split(",")
-            start_off, end_off, label = int(start_off), int(end_off), int(label)
+            start_off, end_off, label = int(start_off), int(end_off), label
 
             start = start_datetime + pd.to_timedelta(start_off, unit="s")
             end = start_datetime + pd.to_timedelta(end_off, unit="s")

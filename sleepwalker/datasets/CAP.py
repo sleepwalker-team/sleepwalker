@@ -33,8 +33,6 @@ class CAP(BaseDataset):
             **kwargs
         ): 
         
-        super().__init__(**kwargs)
-        
         self.trim_wake = trim_wake
         self.disorders = disorders
 
@@ -45,6 +43,8 @@ class CAP(BaseDataset):
             if d not in ["n", "ins", "narco", "nfle", "rbd", "sdb", "brux", "plm"]:
                 logger.warining(f"Unknown disorder found in CAP configuration. The original CAP dataset does not contain a disorder `{d}`. Typically, only {{n, ins, narco, nfle, rbd, sdb, brux, plm}} are available. If you do not want to filter for specific disorders or filenames have changed on disk, you can ignore this warning.")
 
+        super().__init__(**kwargs)
+        
     def has_extra_target(self):
         return False
 
@@ -92,8 +92,8 @@ class CAP(BaseDataset):
             df.loc[df["Endtime"] < (first_event_timestamp - pd.to_timedelta(self.trim_wake)), "Label"] = None
             df.loc[df["Starttime"] > (last_event_timestamp + pd.to_timedelta(self.trim_wake)), "Label"] = None
 
-        df["Label"] = df.apply(lambda row: None if row.Label is None else row.Label.lower().strip(), axis=1)
-        df["Label"] = df.apply(lambda row: self.event_mapping[row["Label"]] if row["Label"] in self.event_mapping else None, axis=1)
+        # df["Label"] = df.apply(lambda row: None if row.Label is None else row.Label.lower().strip(), axis=1)
+        # df["Label"] = df.apply(lambda row: self.event_mapping[row["Label"]] if row["Label"] in self.event_mapping else None, axis=1)
         df = df[['Label', 'Starttime', 'Endtime']].dropna()
 
         return df

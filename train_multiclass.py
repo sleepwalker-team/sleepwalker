@@ -149,7 +149,6 @@ def build_loader(patients):
             "n3": "n3",
             "rem": "rem"
         },
-        filter_patient = filter_patient,
         get_item = MulticlassTrainer.get_item, # Implements 50% rule for multi-class classification
         online_filtering = True, # Let the dataset reject data points that are not usable for training by calling MulticlassTrainer.get_item
         total_input = total_input, 
@@ -162,6 +161,7 @@ def build_loader(patients):
     return loader, dataset
 
 all_patients = get_edf_files_in_repo(edf_folder, recursive=False)
+all_patients = [p for p in all_patients if filter_patient(p)]
 
 # Logging is now vastly simplified: 
 #   We have a global singleton logger (from sleepwalker.utils import logger) that can be used for {metric,artifacts,text,...} logging

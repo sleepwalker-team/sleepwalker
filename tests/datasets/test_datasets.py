@@ -7,6 +7,8 @@ import pandas as pd
 
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.CAP import CAP
+from sleepwalker.datasets.MNC import MNC
+from sleepwalker.datasets.NCHSDB import NCHSDB
 from sleepwalker.datasets.SHHS import SHHS
 from sleepwalker.datasets.ABC import ABC
 from sleepwalker.datasets.ISRUC import ISRUC
@@ -15,6 +17,10 @@ from sleepwalker.datasets.SleepEDFx import SleepEDFx
 from sleepwalker.datasets.SVUH_UCD import SVUH_UCD
 from sleepwalker.datasets.Apples import Apples
 from sleepwalker.datasets.HCHS import HCHS
+from sleepwalker.datasets.MROS import MROS
+from sleepwalker.datasets.Numom2b import Numom2b
+from sleepwalker.datasets.WSC import WSC
+from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.utils import get_edf_files_in_repo
@@ -32,6 +38,8 @@ def run_test(dataset_clazz, channel_name, edf_path, num_batches, batch_size = 8,
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn= lambda x: batch_collate(x, ignore_list=["time", "patient", "target", "target_extra"]))
 
     cnt = 0
+    assert len(loader) > 0
+
     for batch in loader:
         assert "patient" in batch
         assert "time" in batch
@@ -104,6 +112,15 @@ def test_shhs_dataset():
 
     run_test(SHHS, "EMG", EDF_PATH, NUM_BATCHES)
 
+def test_mros_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("MROS_PATH") 
+    
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("MROS dataset not available")
+
+    run_test(MROS, "C4", EDF_PATH, NUM_BATCHES)
+
 def test_svuh_ucd_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("SVUH_UCD_PATH") 
@@ -131,15 +148,61 @@ def test_apples_dataset():
 
     run_test(Apples, "EMG", EDF_PATH, NUM_BATCHES)
 
-def test_hchs_dataset()
+def test_hchs_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("HCHS_PATH") 
-    EDF_PATH = "/cephfs_projects/sleepwalker/hchs"
 
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("ABC dataset not available")
 
     run_test(HCHS, "C4", EDF_PATH, NUM_BATCHES)
+
+def test_mnc_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("MNC_PATH") 
+
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("MNC dataset not available")
+
+    run_test(MNC, "E2", EDF_PATH, NUM_BATCHES, num_patients=10)
+
+def test_nchsdb_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("NCHSDB_PATH") 
+    EDF_PATH = "/cephfs_projects/sleepwalker/nchsdb/sleep_data"
+
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("NCHSDB dataset not available")
+
+    run_test(NCHSDB, "E2", EDF_PATH, NUM_BATCHES)
+
+def test_numom2b_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("NUMOM2B_PATH") 
+
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("NUMOM2B dataset not available")
+
+    run_test(Numom2b, "ECG", EDF_PATH, NUM_BATCHES)
+
+def test_stages_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("STAGES_PATH") 
+    
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("STAGES dataset not available")
+
+    run_test(Stages, "C4", EDF_PATH, NUM_BATCHES)
+
+def test_wsc_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    EDF_PATH = os.environ.get("WSC_PATH") 
+    EDF_PATH = "/cephfs_projects/sleepwalker/wsc"
+    
+    if not EDF_PATH or not Path(EDF_PATH).exists():
+        pytest.skip("WSC dataset not available")
+
+    run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
 if __name__ == '__main__':
     # test_isruc_dataset()
@@ -151,4 +214,10 @@ if __name__ == '__main__':
     # test_svuh_ucd_dataset()
     # test_abc_dataset()
     # test_apples_dataset() 
-    test_hchs_dataset() 
+    # test_hchs_dataset() # TODO NOT WORKING, all EDFs are broken
+    # test_mnc_dataset()
+    # test_mros_dataset()
+    # test_nchsdb_dataset() # TODO NOT WORKING, all EDFs are broken
+    # test_numom2b_dataset() 
+    # test_stages_dataset() 
+    test_wsc_dataset() 

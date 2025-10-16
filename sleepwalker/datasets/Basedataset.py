@@ -411,8 +411,12 @@ class BaseDataset(Dataset, ABC):
             edf_path, start_date = self.ids[idx]
             normalizer = self.all_normalizers[edf_path]
             
-            item = self.get_item(edf_path, start_date, normalizer)
-            cnt += 1
-            if cnt > self.online_max_tries:
-                raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
+            try:
+                item = self.get_item(edf_path, start_date, normalizer)
+            except Exception as e:
+                pass
+            finally:
+                cnt += 1
+                if cnt > self.online_max_tries:
+                    raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
         return item

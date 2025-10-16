@@ -155,7 +155,7 @@ def test_hchs_dataset():
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("ABC dataset not available")
 
-    run_test(HCHS, "C4", EDF_PATH, NUM_BATCHES)
+    run_test(HCHS, "A-Snore", EDF_PATH, NUM_BATCHES)
 
 def test_mnc_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
@@ -169,12 +169,11 @@ def test_mnc_dataset():
 def test_nchsdb_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("NCHSDB_PATH") 
-    EDF_PATH = "/cephfs_projects/sleepwalker/nchsdb/sleep_data"
 
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("NCHSDB dataset not available")
 
-    run_test(NCHSDB, "E2", EDF_PATH, NUM_BATCHES)
+    run_test(NCHSDB, "EEG F4-M1", EDF_PATH, NUM_BATCHES)
 
 def test_numom2b_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
@@ -197,7 +196,6 @@ def test_stages_dataset():
 def test_wsc_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("WSC_PATH") 
-    EDF_PATH = "/cephfs_projects/sleepwalker/wsc"
     
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("WSC dataset not available")
@@ -205,19 +203,19 @@ def test_wsc_dataset():
     run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
 if __name__ == '__main__':
-    # test_isruc_dataset()
-    # test_ruhrlandklinik_dataset()
-    # test_sleepedfx_dataset()
-    # test_cap_dataset()
-    # test_synthetic_dataset()
-    # test_shhs_dataset()
-    # test_svuh_ucd_dataset()
-    # test_abc_dataset()
-    # test_apples_dataset() 
-    # test_hchs_dataset() # TODO NOT WORKING, all EDFs are broken
-    # test_mnc_dataset()
-    # test_mros_dataset()
-    # test_nchsdb_dataset() # TODO NOT WORKING, all EDFs are broken
-    # test_numom2b_dataset() 
-    # test_stages_dataset() 
+    test_isruc_dataset()
+    test_ruhrlandklinik_dataset()
+    test_sleepedfx_dataset()
+    test_cap_dataset()
+    test_synthetic_dataset()
+    test_shhs_dataset()
+    test_svuh_ucd_dataset()
+    test_abc_dataset()
+    test_apples_dataset() 
+    test_hchs_dataset()
+    test_mnc_dataset()
+    test_mros_dataset()
+    test_nchsdb_dataset() 
+    test_numom2b_dataset() 
+    test_stages_dataset() 
     test_wsc_dataset() 

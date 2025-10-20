@@ -1,13 +1,11 @@
-from functools import partial
 import os
 from pathlib import Path
 import pytest
-from torch.utils.data import DataLoader
-import pandas as pd
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.CAP import CAP
 from sleepwalker.datasets.MNC import MNC
+from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.NCHSDB import NCHSDB
 from sleepwalker.datasets.SHHS import SHHS
 from sleepwalker.datasets.ABC import ABC
@@ -26,52 +24,35 @@ from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
 from dotenv import load_dotenv
+
+from tests.utils import iterate_dataset
 load_dotenv()  
 
-def run_test(dataset_clazz, channel_name, edf_path, num_batches, batch_size = 8, num_patients = 5, ending="edf"):
+# TODO: READ NUM_PATIENTS FROM ENVIRONMENT VARIABLE
+
+def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending="edf", event_mapping = {}):
     edf_files = get_edf_files_in_repo(edf_path, recursive=True, ending=ending)
     assert len(edf_files) > 0
     edf_files = edf_files[:num_patients]
 
-    dataset = dataset_clazz(patients = edf_files, channels = [ChannelConfig(name=channel_name, normalizer=None)], sample_frequency=100, event_mapping={}, remove_unmapped_events=False)
+    dataset = dataset_clazz(patients = edf_files, channels = [ChannelConfig(name=channel_name, normalizer=None)], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn= lambda x: batch_collate(x, ignore_list=["time", "patient", "target", "target_extra"]))
+    return dataset
 
-    cnt = 0
-    assert len(loader) > 0
-
-    for batch in loader:
-        assert "patient" in batch
-        assert "time" in batch
-        assert "data" in batch
-        assert "target" in batch
-
-        # check events can be loaded
-        edf_path = batch["patient"][0]
-        start_dt = pd.Timestamp(batch["time"][0])
-        df = dataset.get_event_df(edf_path, start_dt)
-        assert not df.empty
-
-        if dataset.has_extra_target():
-            assert "target_extra" in batch
-
-            extra_df = dataset.get_extra_event_df(edf_path, start_dt)
-            assert not extra_df.empty
-
-        cnt += 1
-        if cnt >= num_batches:
-            break
+def run_test(dataset_clazz, channel_name, edf_path, num_batches, batch_size = 128, num_patients = 5, ending=".edf"):
+    dataset = build_dataset(dataset_clazz, channel_name, edf_path, num_patients, ending)    
+    iterate_dataset(dataset, num_batches, batch_size)
 
 def test_synthetic_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
-    edf_data_dir = os.path.join(Path(__file__).parent, "..", "data")
+    edf_data_dir = os.path.join(Path(__file__).parent, "data")
 
     run_test(SyntheticDataset, "EEG", edf_data_dir, NUM_BATCHES)
 
 def test_cap_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("CAP_PATH")
-    
+
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("CAP dataset not available")
 
@@ -80,7 +61,7 @@ def test_cap_dataset():
 def test_ruhrlandklinik_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("RUHRLANDKLINIK_PATH")
-
+    
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("RUHRLANDKLINIK_PATH dataset not available")
 
@@ -128,7 +109,7 @@ def test_svuh_ucd_dataset():
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("SVUH_UCD dataset not available")
 
-    run_test(SVUH_UCD, "EMG", EDF_PATH, NUM_BATCHES, ending="rec")
+    run_test(SVUH_UCD, "EMG", EDF_PATH, NUM_BATCHES, ending=".rec")
 
 def test_abc_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
@@ -169,7 +150,7 @@ def test_mnc_dataset():
 def test_nchsdb_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("NCHSDB_PATH") 
-
+    
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("NCHSDB dataset not available")
 
@@ -202,11 +183,48 @@ def test_wsc_dataset():
 
     run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
+def test_multi_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    CAP_PATH = os.environ.get("CAP_PATH") 
+    if not CAP_PATH or not Path(CAP_PATH).exists():
+        pytest.skip("CAP dataset not available. ")
+
+    edf_data_dir = os.path.join(Path(__file__).parent, "..", "data")
+
+    ds1 = build_dataset(
+        SyntheticDataset, 
+        "EEG", 
+        edf_data_dir,
+        event_mapping = {
+            "n1":"n1",
+            "n2":"n2",
+            "n3":"n3",
+            "rem":"rem",
+            "wake":"wake"
+        }
+    )
+
+    ds2 = build_dataset(
+        CAP, 
+        "Fp2-F4", 
+        CAP_PATH, 
+        event_mapping = {
+            "S1":"n1",
+            "S2":"n2",
+            "S3":"n3",
+            "S4":"n3",
+            "R":"rem",
+            "W":"wake"
+        }
+    )
+
+    ds = MultiDataset([ds1,ds2])
+    iterate_dataset(ds, NUM_BATCHES)
+
 if __name__ == '__main__':
     test_isruc_dataset()
     test_ruhrlandklinik_dataset()
     test_sleepedfx_dataset()
-    test_cap_dataset()
     test_synthetic_dataset()
     test_shhs_dataset()
     test_svuh_ucd_dataset()
@@ -219,3 +237,5 @@ if __name__ == '__main__':
     test_numom2b_dataset() 
     test_stages_dataset() 
     test_wsc_dataset() 
+    test_multi_dataset()
+    test_cap_dataset()

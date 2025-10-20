@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import Counter, defaultdict
 import copy
 from dataclasses import dataclass
 from functools import partial
@@ -144,6 +144,7 @@ class BaseDataset(Dataset, ABC):
         self.transform = transform
         self.online_filtering = online_filtering
         self.online_max_tries = online_max_tries
+        self.initialized = False
         # self.num_workers = int(num_workers)
         # self.event_type = event_type
         # self.normalizer_fit_strategy = normalizer_fit_strategy or {"mode": "full"}
@@ -232,17 +233,20 @@ class BaseDataset(Dataset, ABC):
         extra_classes = set()
         try:
             data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type)
-            if data_df is None:
-                return edf_path, ids, None, None, None, n_skipped, classes.union(extra_classes)
+            if data_df is None or len(data_df) == 0: 
+                raise ValueError(f"Found empty EDF file")
             
             meta = read_edf_meta(edf_path)
             start = meta["start"]
             end = meta["end"]
 
+            start = max(data_df.index[0], start)
+            end = min(data_df.index[-1], end)
+
             for col in normalizers.keys():
                 if col in data_df.columns:
                     X = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                    normalizers[col].fit(X, self.sample_frequency) 
+                    normalizers[col].fit(X = X, fs = self.sample_frequency) 
 
             if self.event_mapping is not None:
                 if self.has_extra_target():
@@ -353,6 +357,7 @@ class BaseDataset(Dataset, ABC):
             self.classes = sorted(list(all_classes))
 
         logger.info(f"Dataset initialized with {self.n_patients}/{total_n_patients} patients. Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. ")
+        self.initialized = True
 
     def get_item(self, edf_path:str, start_date:pd.Timestamp, normalizers:Optional[dict[str,Normalizer]]):
         end_date = start_date + self.total_input
@@ -378,27 +383,30 @@ class BaseDataset(Dataset, ABC):
                 additional_df = self.events_additional[edf_path]
                 item["target_extra"] = self.get_events(additional_df, start_date)
 
+        # Make sure that x_df has exactly self.get_timeseries_len() entries. 
+        # This can happen, when timestamps do not match exactly or there are inaccuracies for
+        # very high sample rates.
+        #   - if not enough entries: pad the last value at the end
+        #   - if too many entries: take the first self.get_timeseries_len() entries
+        if len(x_df) < self.get_timeseries_len():
+            freq = pd.to_timedelta(1.0/self.sample_frequency, unit="s")
+            freq = x_df.index.freq or pd.infer_freq(x_df.index)
+            # Pad at end
+            n = self.get_timeseries_len() - len(x_df)
+            pad_idx = pd.date_range(start=x_df.index[-1] + freq, periods=n, freq=freq)
+            pad_df = pd.DataFrame([x_df.iloc[-1].values] * n, columns=x_df.columns, index=pad_idx)
+            x_df = pd.concat([x_df, pad_df])
+        elif len(x_df) > self.get_timeseries_len():
+            x_df = x_df.head(n = self.get_timeseries_len())
+
         if self.get_item_callback is not None:
             item = self.get_item_callback(data=x_df, **item)
         else:
             item["data"] = torch.from_numpy(x_df.values).float()
 
-        # Pad to exact desired length if needed
-        # freq = pd.to_timedelta(1.0/self.sample_frequency, unit="s")
-        # desired_len = int(self.total_input / freq)
-        # if len(x_df) < desired_len:
-        #     freq = x_df.index.freq or pd.infer_freq(x_df.index)
-        #     # Pad at end
-        #     n = desired_len - len(x_df)
-        #     pad_idx = pd.date_range(start=x_df.index[-1] + freq, periods=n, freq=freq)
-        #     pad_df = pd.DataFrame([x_df.iloc[-1].values] * n, columns=x_df.columns, index=pad_idx)
-        #     x_df = pd.concat([x_df, pad_df])
-
-        #X = torch.from_numpy(x_df.values).float()
         if self.transform is not None:
             item["data"] = self.transform(item["data"])
         return item
-        
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         edf_path, start_date = self.ids[idx]
@@ -418,5 +426,8 @@ class BaseDataset(Dataset, ABC):
             finally:
                 cnt += 1
                 if cnt > self.online_max_tries:
-                    raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
+                    break
+        
+        if cnt > self.online_max_tries:
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
         return item

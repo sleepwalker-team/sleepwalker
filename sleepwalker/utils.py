@@ -281,11 +281,21 @@ class MlflowSink:
 # ---------------------------
 
 class UnifiedLogger:
-    def __init__(self, formatter: logging.Formatter):
+    def __init__(self, formatter: logging.Formatter, level: int = logging.INFO):
         self._formatter = formatter
         self._sinks: List[Sink] = []
         self._context = LogContext()
         self._pbar: Progress = NullProgress()
+        self._level = level  
+
+    def set_level(self, level: str | int) -> None:
+        """Change the active logging level (e.g. 'DEBUG', 'WARNING')."""
+        if isinstance(level, str):
+            level = getattr(logging, level.upper(), logging.INFO)
+        self._level = level
+
+    def get_level(self) -> int:
+        return self._level
 
     def add_sink(self, sink: Sink): self._sinks.append(sink)
 
@@ -311,16 +321,23 @@ class UnifiedLogger:
 
     # ---- Events ----
     def _event(self, level: str, msg: str):
+        lvl = getattr(logging, level.upper(), logging.INFO)
+        if lvl < self._level:
+            return  # below threshold → skip
+
         prefix = self._ctx_str()
         full_msg = f"{prefix} | {msg}" if prefix else msg
         ctx = self._ctx_str()
         for s in self._sinks:
-            try: s.event(level, full_msg, context=ctx)
-            except Exception: pass
+            try:
+                s.event(level, full_msg, context=ctx)
+            except Exception:
+                pass
     def info(self, msg): self._event("INFO", msg)
     def warning(self, msg): self._event("WARNING", msg)
     def error(self, msg): self._event("ERROR", msg)
-
+    def debug(self, msg): self._event("DEBUG", msg)
+    
     # ---- Metrics ----
     def metric(self, name: str, value: float):
         ctx = self._ctx_str()
@@ -343,6 +360,11 @@ class UnifiedLogger:
 
     # ---- Progress ----
     def progress_start(self, total: int, *, desc: Optional[str] = None, leave: bool = True):
+        # skip entirely if below level
+        if logging.INFO < self._level:
+            self._pbar = NullProgress()
+            return self._pbar
+    
         try:
             self._pbar.close()
         except Exception:
@@ -374,6 +396,10 @@ class UnifiedLogger:
         return self._pbar
 
     def progress_status(self, msg: str, level: str = "INFO"):
+        lvl = getattr(logging, level.upper(), logging.INFO)
+        if lvl < self._level:
+            return 
+    
         desc = self._ctx_str()
         full_msg = f"{desc} | {msg}" if desc else msg
         self._pbar.status(full_msg, level)
@@ -389,16 +415,18 @@ class UnifiedLogger:
 # ---------------------------
 
 _singleton: Optional[UnifiedLogger] = None
-def get_logger() -> UnifiedLogger:
+def get_logger(level: str | int = logging.INFO) -> UnifiedLogger:
     global _singleton
     if _singleton is None:
         FMT_INFO  = "%(asctime)s | %(levelname)s | %(message)s"
         FMT_OTHER = "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)3d | %(message)s"
         formatter = LevelAwareFormatter(FMT_INFO, FMT_OTHER)
 
-        _singleton = UnifiedLogger(formatter=formatter)
+        _singleton = UnifiedLogger(formatter=formatter, level=level)
         _singleton.add_sink(StdLogSink(path="sleepwalker.log", formatter=formatter))
         _singleton.add_sink(TqdmSink(formatter=formatter))
+    else:
+        _singleton.set_level(level)
     return _singleton
 
 logger: UnifiedLogger = get_logger()

@@ -21,6 +21,90 @@ def convert_to_datetime(row, start_date):
     return complete_date
 
 class Apples(BaseDataset):
+    """
+    Dataset URL: 
+        https://sleepdata.org/datasets/apples/pages/README.md
+        https://gitlab-scm.partners.org/zzz-public/nsrr/-/tree/master/studies/apples
+
+    Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 1084 
+        Durations:
+            min     : 0 days 00:03:12
+            max     : 0 days 11:15:00
+            mean    : 0 days 08:10:24.836956522
+            median  : 0 days 08:13:30
+            q25     : 0 days 07:56:30
+            q75     : 0 days 08:40:00
+
+        Channels:
+            1. snore                100.0%
+            2. SpO2                 100.0%
+            3. LOC                  100.0%
+            4. EMG                  100.0%
+            5. ECG                  99.9%
+            6. O2_M1                99.4%
+            7. C4_M1                99.4%
+            8. C3_M2                99.4%
+            9. thorax               99.4%
+            10. thermistor           99.4%
+            11. abdomen              99.4%
+            12. nasal_pres           99.4%
+            13. ROC                  99.4%
+            14. O1_M2                99.2%
+            15. LEG                  79.8%
+            16. pulse                70.1%
+
+        Classes:
+            - L
+            - LM
+            - N1
+            - N2
+            - N3
+            - R
+            - W
+            - apnea
+            - arousal
+            - desat
+            - epos2_mixed
+            - epos2_nonsupine
+            - epos2_supine
+            - epos5_left
+            - epos5_mixed
+            - epos5_prone
+            - epos5_right
+            - epos5_supine
+            - epos5_upright
+            - epos9_left
+            - epos9_mixed
+            - epos9_prone
+            - epos9_prone_left
+            - epos9_prone_right
+            - epos9_right
+            - epos9_supine
+            - epos9_supine_left
+            - epos9_supine_right
+            - epos9_upright
+            - hypopnea
+            - pos2_nonsupine
+            - pos2_supine
+            - pos5_left
+            - pos5_prone
+            - pos5_right
+            - pos5_supine
+            - pos5_upright
+            - pos9_left
+            - pos9_prone
+            - pos9_prone_left
+            - pos9_prone_right
+            - pos9_right
+            - pos9_supine
+            - pos9_supine_left
+            - pos9_supine_right
+            - pos9_upright
+            - snoring
+        """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

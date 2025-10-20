@@ -85,9 +85,75 @@ def read_xml(fpath, trim_wake, start_date):
     return xml_df
 
 class MNC(BaseDataset):
+    """
+    Dataset URL:
+        https://sleepdata.org/datasets/mnc/pages/README.md
+        https://sleepdata.org/datasets/mnc/pages/montage-and-sampling-rate-information.md
+
+    Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 78 
+        Durations:
+            min     : 0 days 06:30:17
+            max     : 0 days 11:09:19
+            mean    : 0 days 08:26:08.388489209
+            median  : 0 days 08:18:44
+            q25     : 0 days 07:51:13
+            q75     : 0 days 08:56:42
+
+        Channels:
+            1. F3                   100.0%
+            2. F4                   100.0%
+            3. C3                   100.0%
+            4. C4                   100.0%
+            5. E2                   100.0%
+            6. E1                   100.0%
+            7. spo2                 100.0%
+            8. abdomen              100.0%
+            9. thorax               100.0%
+            10. cs_LOC               100.0%
+            11. cs_EEG               100.0%
+            12. position             100.0%
+            13. cs_ROC               100.0%
+            14. cs_EMG               100.0%
+            15. O1                   99.3%
+            16. O2                   99.3%
+            17. cs_ECG               95.0%
+            18. cchin_l              88.5%
+            19. nas_pres             88.5%
+            20. flow                 72.7%
+            21. ECG1_2               61.2%
+            22. rleg                 56.8%
+            23. lleg                 56.8%
+            24. snore                56.1%
+            25. sum                  43.9%
+            26. lleg1_2              43.2%
+            27. rleg1_2              43.2%
+            28. ECG                  27.3%
+            29. therm                27.3%
+            30. rchin_c              25.9%
+            31. chin                 11.5%
+            32. ECG2                 11.5%
+            33. pulse                7.9%
+            34. etco2                3.6%
+            35. ECG1                 1.4%
+            36. ECG3                 1.4%
+
+        Classes:
+            - 
+            - 9
+            - nrem1
+            - nrem2
+            - nrem3
+            - rem
+            - wake
+
+    """
+
     def __init__(self, 
             trim_wake = "30m",
-            ignore_patients_with_partial_events = True,
+            ignore_patients_with_partial_events = False,
             **kwargs
         ): 
         

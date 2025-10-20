@@ -212,6 +212,91 @@ def load_dataframe(fpath: str, event_mapping, annotator = "s1", start_date: pd.T
         raise e
 
 class ISRUC(BaseDataset):
+    """
+    Dataset URL:
+        https://sleeptight.isr.uc.pt/?page_id=48
+    
+    Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 111 
+        Durations:
+            min     : 0 days 06:13:30
+            max     : 0 days 08:51:00
+            mean    : 0 days 07:30:03.750000
+            median  : 0 days 07:28:15
+            q25     : 0 days 07:07:37.500000
+            q75     : 0 days 07:51:37.500000
+
+        Channels:
+            1. E1-M2                75.0%
+            2. E2-M1                75.0%
+            3. F3-M2                75.0%
+            4. C3-M2                75.0%
+            5. O1-M2                75.0%
+            6. F4-M1                75.0%
+            7. C4-M1                75.0%
+            8. O2-M1                75.0%
+            9. SpO2                 75.0%
+            10. X1                   71.4%
+            11. X3                   71.4%
+            12. X2                   71.4%
+            13. X5                   71.4%
+            14. X6                   71.4%
+            15. X7                   71.4%
+            16. X4                   71.4%
+            17. DC8                  71.4%
+            18. X8                   71.4%
+            19. DC4                  46.4%
+            20. DC7                  36.6%
+            21. 24                   28.6%
+            22. 25                   28.6%
+            23. 26                   28.6%
+            24. 27                   28.6%
+            25. 28                   28.6%
+            26. 29                   28.6%
+            27. DC01                 28.6%
+            28. 30                   28.6%
+            29. 31                   28.6%
+            30. DC02                 28.6%
+            31. DC3                  26.8%
+            32. SaO2                 25.0%
+            33. O2-A1                24.1%
+            34. ROC-A1               24.1%
+            35. O1-A2                24.1%
+            36. C3-A2                24.1%
+            37. C4-A1                24.1%
+            38. LOC-A2               24.1%
+            39. F4-A1                23.2%
+            40. F3-A2                23.2%
+            41. DC04                 18.8%
+            42. DC5                  1.8%
+            43. A1                   0.9%
+            44. ROC                  0.9%
+            45. A2                   0.9%
+            46. C4                   0.9%
+            47. O2                   0.9%
+            48. LOC                  0.9%
+            49. C3                   0.9%
+            50. O1                   0.9%
+            51. F3                   0.9%
+            52. F4                   0.9%
+            53. X7-X8                0.9%
+            54. DC1                  0.9%
+            55. DC2                  0.9%
+            56. DC6                  0.9%
+
+        Classes:
+            - N
+            - N1
+            - N2
+            - N3
+            - R
+            - U
+            - W
+            - n2
+            - w
+    """
     def __init__(self, 
             annotator = ["1", "2"],
             merge = False, 

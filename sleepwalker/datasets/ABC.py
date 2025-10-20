@@ -37,6 +37,88 @@ def read_xml(fpath, annotator, trim_wake, start_date):
     return xml_df
 
 class ABC(BaseDataset):
+    """
+    Dataset URL: https://sleepdata.org/datasets/abc/pages/montage-and-sampling-rate-information.md
+
+    Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 132 
+        Durations:
+            min     : 0 days 07:15:19
+            max     : 0 days 09:53:13
+            mean    : 0 days 08:24:25.356060606
+            median  : 0 days 08:20:02.500000
+            q25     : 0 days 08:12:35.250000
+            q75     : 0 days 08:32:27.750000
+
+        Channels:
+            1. F3                   100.0%
+            2. F4                   100.0%
+            3. C3                   100.0%
+            4. C4                   100.0%
+            5. O1                   100.0%
+            6. O2                   100.0%
+            7. M1                   100.0%
+            8. M2                   100.0%
+            9. E1                   100.0%
+            10. E2                   100.0%
+            11. ECG1                 100.0%
+            12. ECG2                 100.0%
+            13. LLeg1                100.0%
+            14. LLeg2                100.0%
+            15. RLeg1                100.0%
+            16. RLeg2                100.0%
+            17. Chin1                100.0%
+            18. Chin2                100.0%
+            19. Chin3                100.0%
+            20. Airflow              100.0%
+            21. Abdo                 100.0%
+            22. Thor                 100.0%
+            23. Snore                100.0%
+            24. Sum                  100.0%
+            25. PosSensor            100.0%
+            26. Ox Status            100.0%
+            27. Pulse                100.0%
+            28. SpO2                 100.0%
+            29. Nasal Pressure       100.0%
+            30. CPAP Flow            100.0%
+            31. CPAP Press           100.0%
+            32. Pleth                100.0%
+            33. Derived HR           100.0%
+            34. Light                100.0%
+            35. Manual Pos           100.0%
+            36. Respiratory Rate     29.5%
+
+        Classes:
+            - arousal resulting from respiratory effort|arousal (aro res)
+            - arousal|arousal ()
+            - blood pressure artifact|blood pressure artifact
+            - body temperature artifact|body temperature artifact
+            - central apnea|central apnea
+            - distal ph|distal ph
+            - etco2 artifact|etco2 artifact
+            - hypopnea|hypopnea
+            - limb movement - left|limb movement (left)
+            - limb movement - right|limb movement (right)
+            - obstructive apnea|obstructive apnea
+            - periodic leg movement - left|plm (left)
+            - periodic leg movement - right|plm (right)
+            - proximal ph artifact|proximal ph artifact
+            - proximal ph|distal ph artifact
+            - rem sleep|5
+            - respiratory artifact|respiratory artifact
+            - spo2 artifact|spo2 artifact
+            - spo2 desaturation|spo2 desaturation
+            - stage 1 sleep|1
+            - stage 2 sleep|2
+            - stage 3 sleep|3
+            - technician notes
+            - unscored|9
+            - unsure|unsure
+            - wake|0
+        """
+
     def __init__(self, 
             annotator = "nsrr",
             trim_wake = "30m",

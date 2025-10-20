@@ -32,7 +32,7 @@ class EEGFilterNormalizer(Normalizer):
         filtered = self._filter(signal, fs)
 
         self.mean_ = np.mean(filtered)
-        self.std_ = np.std(filtered) if np.std(filtered) > 0 else 1.0
+        self.std_ = np.std(filtered) if np.std(filtered) > 1e-7 else 1.0
         return self
 
     def transform(self, X, fs):

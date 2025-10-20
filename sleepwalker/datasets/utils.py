@@ -1,14 +1,202 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import xmltodict as xtd
+from torch.utils.data import DataLoader
+
 from sklearn.model_selection import KFold
 
+from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.utils import logger
+
+import numpy as np
+import pandas as pd
+from collections import Counter
+from torch.utils.data import DataLoader
+from sleepwalker.utils import logger
+
+
+def summarize_dataset(
+    dataset_clazz,
+    edf_files,
+    channel_name=None,
+    batch_size=128,
+    estimate_class_frequencies=False,
+):
+    """Summarize a dataset: durations, channel coverage, and optionally class frequencies.
+
+    Parameters
+    ----------
+    dataset_clazz : type
+        Dataset class implementing `get_event_df()` and optionally `get_extra_event_df()`.
+    edf_files : list[str]
+        List of EDF file paths.
+    channel_name : str, optional
+        Channel to load for event statistics. If None, only metadata & signals are summarized.
+    batch_size : int, default=128
+        Batch size for iteration when estimating class frequencies.
+    estimate_class_frequencies : bool, default=False
+        Whether to iterate over the dataset and compute event class distributions.
+
+    Returns
+    -------
+    dict
+        {
+            "meta": DataFrame with file-level info,
+            "summary": {
+                "duration_stats": {...},
+                "duration_histogram": {...},
+                "signal_coverage": DataFrame,
+                "dataset_classes": list[str] | None,
+                "class_distribution": dict[str, int] | None,
+                "extra_class_distribution": dict[str, int] | None,
+            }
+        }
+    """
+    meta_data = []
+    signals = []
+    files_read = 0
+
+    logger.info(f"Found a total of {len(edf_files)} EDF files")
+
+    for e in edf_files:
+        try:
+            meta = read_edf_meta(e)
+            meta_data.append({
+                "file": e,
+                "start": meta["start"],
+                "end": meta["end"],
+                "duration[s]": meta["duration_s"],
+            })
+            signals.extend(meta["signals"])
+            files_read += 1
+        except Exception as ex:
+            logger.warning(f"Skipping {e}: {ex}")
+            continue
+
+    logger.info(f"Successfully read {files_read} files")
+    df_meta = pd.DataFrame(meta_data)
+
+    # --- (1) Duration statistics & histogram ---
+    duration_s = df_meta["duration[s]"].dropna()
+
+    def _format_hms(seconds: float) -> str:
+        return str(pd.to_timedelta(seconds, unit="s"))
+
+    if len(duration_s) > 0:
+        duration_stats = {
+            "min": _format_hms(duration_s.min()),
+            "max": _format_hms(duration_s.max()),
+            "mean": _format_hms(duration_s.mean()),
+            "median": _format_hms(duration_s.median()),
+            "q25": _format_hms(duration_s.quantile(0.25)),
+            "q75": _format_hms(duration_s.quantile(0.75)),
+        }
+        bins = np.linspace(duration_s.min(), duration_s.max(), num=11)
+        hist, edges = np.histogram(duration_s, bins=bins)
+        duration_hist = {
+            f"[{_format_hms(edges[i])} - {_format_hms(edges[i+1])})": int(hist[i])
+            for i in range(len(hist))
+        }
+    else:
+        duration_stats, duration_hist = {}, {}
+
+    # --- (2) Channel coverage ---
+    if files_read > 0:
+        dff = pd.DataFrame([Counter(signals)]).transpose()
+        dff.columns = ["count"]
+        dff["coverage[%]"] = dff["count"] / files_read * 100.0
+        signal_coverage = dff.sort_values("coverage[%]", ascending=False)
+    else:
+        signal_coverage = pd.DataFrame(columns=["count", "coverage[%]"])
+
+    # If no channel provided → return only metadata + coverage
+    if channel_name is None:
+        return {
+            "n_patients":dataset.n_patients,
+            "duration_stats": duration_stats,
+            "duration_histogram": duration_hist,
+            "signal_coverage": signal_coverage,
+            "dataset_classes": None,
+            "class_distribution": None,
+            "extra_class_distribution": None,
+        }
+
+    # --- (3) Dataset setup ---
+    dataset = dataset_clazz(
+        patients=edf_files,
+        channels=[ChannelConfig(name=channel_name, normalizer=None)],
+        sample_frequency=100,
+        event_mapping={},
+        remove_unmapped_events=False,
+        num_workers=8
+    )
+
+    # always include known class list
+    dataset_classes = getattr(dataset, "classes", None)
+
+    # if class frequency estimation is disabled, stop here
+    if not estimate_class_frequencies:
+        return {
+            "n_patients":dataset.n_patients,
+            "duration_stats": duration_stats,
+            "duration_histogram": duration_hist,
+            "signal_coverage": signal_coverage,
+            "dataset_classes": dataset_classes,
+            "class_distribution": None,
+            "extra_class_distribution": None,
+        }
+
+    # --- (4) Iterate and compute class frequencies ---
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda x: batch_collate(
+            x, ignore_list=["time", "patient", "target", "target_extra"]
+        ),
+    )
+
+    label_counter = Counter()
+    extra_label_counter = Counter()
+
+    logger.progress_start(len(loader)*batch_size, desc=f"Estimating class frequencies", leave=True)
+    for batch in loader:
+        try:
+            edf_path = batch["patient"][0]
+            start_dt = pd.Timestamp(batch["time"][0])
+            df = dataset.get_event_df(edf_path, start_dt)
+            label_counter.update(df["Label"].astype(str).str.lower())
+
+            if dataset.has_extra_target():
+                extra_df = dataset.get_extra_event_df(edf_path, start_dt)
+                extra_label_counter.update(extra_df["Label"].astype(str).str.lower())
+            logger.progress_advance(batch_size)
+
+        except Exception as ex:
+            logger.warning(f"Failed to process {edf_path}: {ex}")
+            continue
+
+    logger.info("Finished summarizing dataset")
+
+    return {
+        "n_patients": dataset.n_patients,
+        "duration_stats": duration_stats,
+        "duration_histogram": duration_hist,
+        "signal_coverage": signal_coverage,
+        "dataset_classes": dataset_classes,
+        "class_distribution": dict(label_counter),
+        "extra_class_distribution": (
+            dict(extra_label_counter) if extra_label_counter else None
+        ),
+    }
+
 
 def read_profusion(xml_path):
     with open(xml_path, "r") as f:
@@ -89,7 +277,7 @@ def read_nsrr(xml_path):
 
         return xml_df
 
-def get_edf_files_in_repo(root: str, recursive: bool = True, ending: str = "edf") -> List[str]:
+def get_edf_files_in_repo(root: str, recursive: bool = True, ending: str = ".edf") -> List[str]:
     """List EDF files in a folder (optionally including subfolders).
 
     - root: base directory containing EDF files
@@ -101,11 +289,11 @@ def get_edf_files_in_repo(root: str, recursive: bool = True, ending: str = "edf"
     if recursive:
         for dirpath, _, files in os.walk(root):
             for f in files:
-                if f.lower().endswith(f".{ending}"):
+                if f.endswith(f"{ending}"):
                     edfs.append(os.path.join(dirpath, f))
     else:
         for f in os.listdir(root):
-            if f.lower().endswith(f".{ending}"):
+            if f.endswith(f"{ending}"):
                 edfs.append(os.path.join(root, f))
     
     if len(edfs) == 0:

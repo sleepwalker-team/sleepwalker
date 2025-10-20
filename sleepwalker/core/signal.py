@@ -235,7 +235,7 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
             labels = f.getSignalLabels()
             fs = {lab: float(f.getSampleFrequency(i)) for i, lab in enumerate(labels)}
             duration_s = float(f.getFileDuration())
-            start = f.getStartdatetime()
+            start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
             end = start + pd.to_timedelta(f"{duration_s}s")
             return {
                 "start": start,
@@ -262,8 +262,8 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
             end = start + pd.to_timedelta(f"{duration_s}s")
 
         return {
-            "start": pd.Timestamp(start),
-            "end": pd.Timestamp(end),
+            "start": pd.Timestamp(start).tz_localize(None),
+            "end": pd.Timestamp(end).tz_localize(None),
             "duration_s": duration_s,
             "signals": labels,
             "fs": fs,
@@ -304,7 +304,7 @@ def edf_to_df(
                 idx = labels.index(ch)
                 fs = float(f.getSampleFrequency(idx))
                 dt = pd.to_timedelta(f"{1.0 / fs}s")
-                file_start = pd.Timestamp(f.getStartdatetime())
+                file_start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
                 duration_s = float(f.getFileDuration())
                 file_end = file_start + pd.to_timedelta(f"{duration_s}s")
                 start_ = start or file_start
@@ -334,7 +334,7 @@ def edf_to_df(
             logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
             logger.info(f"Falling back to MNE for {edf_path}")
 
-        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
+        raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
 
         # Filter channels
         available = [ch for ch in channels if ch in raw.ch_names]
@@ -347,6 +347,7 @@ def edf_to_df(
         if isinstance(meas_date, tuple):
             meas_date = meas_date[0]
         file_start = pd.Timestamp(meas_date or pd.Timestamp.now())
+        file_start = file_start.tz_localize(None)
         duration_s = (raw.n_times - 1) / sfreq
         file_end = file_start + pd.to_timedelta(f"{duration_s}s")
         start_ = start or file_start
@@ -361,8 +362,11 @@ def edf_to_df(
         if tmax > raw.times[-1]: tmax = raw.times[-1]
 
         raw.crop(tmin=tmin, tmax=tmax)
-
         data, times = raw.get_data(picks=available, return_times=True)
+        
+        # This version should be faster than the above version, but it is not on our system as it seems (tested on 2025-10-20 on a30 node with data loaded from cephfs). In any case, performance difference was in ~20% range
+        # data, times = raw.get_data(picks=available, tmin=tmin, tmax=tmax, return_times=True) 
+
         dates = pd.to_datetime(start_.value + (times * 1e9).astype(np.int64))
         df = pd.DataFrame(data.T, index=dates, columns=available)
 

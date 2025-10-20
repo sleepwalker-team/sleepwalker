@@ -44,6 +44,7 @@ class MulticlassTrainer(ABC):
         class_weights: Optional[dict[str, float]] = None,
         loss_mode: str = "regular",  # fixed (type: str, not Optional[str])
         device: str = "cuda:0",
+        warmup_device: str = "cpu",
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None
@@ -52,7 +53,8 @@ class MulticlassTrainer(ABC):
         self.save_every = save_every
         self.early_stopping_patience = early_stopping
         self.device = device
-
+        self.warmup_device = warmup_device
+        
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
 
@@ -299,7 +301,7 @@ class MulticlassTrainer(ABC):
             logger.warning(f"early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
-        model = self._warmup(model, train_loader, self.device)
+        model = self._warmup(model, train_loader, self.warmup_device)
         val_losses: list[float] = []
         losses = []
         cms = []

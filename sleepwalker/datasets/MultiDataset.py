@@ -47,7 +47,8 @@ class MultiDataset(Dataset):
 
         self.datasets = datasets
         self.len = sum([len(d) for d in datasets])
-    
+        self.extra_target = all([d.has_extra_target() for d in datasets])
+
     def get_classes(self):
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_classes()
@@ -55,6 +56,9 @@ class MultiDataset(Dataset):
     def get_timeseries_len(self):
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_timeseries_len()
+
+    def has_extra_target(self):
+        return self.extra_target 
 
     def n_patients(self):
         return sum([d.n_patients for d in self.datasets])

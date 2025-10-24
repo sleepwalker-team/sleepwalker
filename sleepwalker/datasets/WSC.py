@@ -8,6 +8,79 @@ import pandas as pd
 from .Basedataset import BaseDataset  
 
 class WSC(BaseDataset):
+    """
+    Dataset Summary
+    Summary of core statistics for this dataset.
+    n_patients: 49 
+    Durations:
+        min     : 0 days 00:19:30
+        max     : 0 days 10:30:00
+        mean    : 0 days 03:59:58.034830893
+        median  : 0 days 02:21:00
+        q25     : 0 days 01:55:30
+        q75     : 0 days 07:32:08
+    Channels:
+        1. ECG                  97.1%
+        2. R OCC                65.1%
+        3. L OCC                65.1%
+        4. CHIN EMG             65.1%
+        5. R CENT               65.1%
+        6. L CENT               65.1%
+        7. L EOG                65.1%
+        8. R EOG                65.1%
+        9. spo2                 32.1%
+        10. abdomen              32.1%
+        11. sum                  32.1%
+        12. lleg_r               32.1%
+        13. E1                   32.1%
+        14. E2                   32.1%
+        15. thorax               32.1%
+        16. position             32.1%
+        17. nas_pres             32.1%
+        18. snore                32.1%
+        19. C3_M2                32.0%
+        20. O1_M2                32.0%
+        21. chin                 28.6%
+        22. nasalflow            28.2%
+        23. oralflow             28.2%
+        24. flow                 3.8%
+        25. F3_M2                3.8%
+        26. cchin_l              3.4%
+        27. EKG1-EKG2            2.9%
+        28. O1-M2                2.6%
+        29. Chin1-Chin2          2.6%
+        30. REOG-M1              2.6%
+        31. C3-M2                2.6%
+        32. LEOG-M2              2.6%
+        33. O2-M1                2.6%
+        34. C4-M1                2.6%
+        35. Pz_M2                0.3%
+        36. Fz_M2                0.3%
+        37. Cz_M2                0.3%
+        38. LEOG-AVG             0.3%
+        39. REOG-AVG             0.3%
+        40. C3-AVG               0.3%
+        41. C4-AVG               0.3%
+        42. O2-AVG               0.3%
+        43. O1-AVG               0.3%
+        44. Chin1-Chin3          0.2%
+        45. Chin3-Chin2          0.1%
+        46. Pz_Cz                0.1%
+        47. F3_M1                0.1%
+        48. C3_M1                0.1%
+        49. O1_M1                0.1%
+        50. O2_M1                0.1%
+        51. cchin_r              0.1%
+        52. Fz_M1                0.1%
+        53. Cz_M1                0.1%
+    Classes:
+        - n1
+        - n2
+        - n3
+        - no stage
+        - r
+        - w
+    """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

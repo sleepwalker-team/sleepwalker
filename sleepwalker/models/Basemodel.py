@@ -5,6 +5,7 @@ from typing import Iterable, List, Optional
 
 import torch
 from torch import nn
+from torch.nn import ModuleList
 
 class BaseModel(nn.Module, ABC):
     """Minimal base model that can own preprocessors.
@@ -15,7 +16,7 @@ class BaseModel(nn.Module, ABC):
 
     def __init__(self, preprocessors: Optional[Iterable] = None) -> None:
         super().__init__()
-        self.preprocessors: List = list(preprocessors) if preprocessors is not None else []
+        self.preprocessors: ModuleList = ModuleList(preprocessors) if preprocessors is not None else ModuleList([])
 
     def apply_preprocessors(self, x: torch.Tensor, up:int = 0) -> torch.Tensor:
         if up < 0:

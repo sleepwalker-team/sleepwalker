@@ -15,6 +15,57 @@ def convert_to_datetime(row, start_date):
     return complete_date
 
 class SVUH_UCD(BaseDataset):
+    """Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 25 
+        Durations:
+            min     : 0 days 05:55:50
+            max     : 0 days 07:42:39
+            mean    : 0 days 06:56:03.920000
+            median  : 0 days 06:53:18
+            q25     : 0 days 06:34:00
+            q75     : 0 days 07:26:31
+
+        Channels:
+            1. Lefteye              100.0%
+            2. RightEye             100.0%
+            3. EMG                  100.0%
+            4. C3A2                 100.0%
+            5. C4A1                 100.0%
+            6. ECG                  100.0%
+            7. SpO2                 100.0%
+            8. Flow                 100.0%
+            9. Sum                  100.0%
+            10. Pulse                100.0%
+            11. ribcage              100.0%
+            12. abdo                 100.0%
+            13. BodyPos              100.0%
+            14. Sound                60.0%
+            15. Soud                 40.0%
+            16. Right leg            4.0%
+            17. Left leg             4.0%
+
+        Classes:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 8
+            - apnea-
+            - apnea-c
+            - apnea-m
+            - apnea-o
+            - hyp-c
+            - hyp-m
+            - hyp-o
+            - pb even
+            - possib
+            - possibl
+            - possible
+    """
     def __init__(self, 
             end_align = False,
             **kwargs

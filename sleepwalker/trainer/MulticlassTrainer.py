@@ -1,5 +1,7 @@
 import inspect
 import os
+import shutil
+import tempfile
 from typing import Callable, Optional
 import numpy as np
 import pandas as pd
@@ -57,7 +59,6 @@ class MulticlassTrainer(ABC):
         
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
-
         self.loss_mode = loss_mode
 
         # Normalize class names once or keep original; here we keep original
@@ -71,15 +72,14 @@ class MulticlassTrainer(ABC):
             self.estimate_class_cnts = False
 
         if class_weights is not None:
-            class_weights = {k.lower(): v for k, v in class_weights.items()}
+            class_weights = {k: v for k, v in class_weights.items()}
             weight_list = []
             for c in classes:
-                key = c.lower() 
-                if key not in class_weights:
+                if c not in class_weights:
                     logger.warning(f"Did not find class weights for class {c}, assuming weight 1")
                     weight_list.append(1.0)
                 else:
-                    weight_list.append(class_weights[key])
+                    weight_list.append(class_weights[c])
             self.user_class_weights = torch.tensor(weight_list)
             self.class_weights = torch.tensor(weight_list)
         else:
@@ -127,14 +127,16 @@ class MulticlassTrainer(ABC):
             targets = torch.tensor(target.sum().to_numpy())
             target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
 
+            item = {"patient":patient, "time":time, "target":target}
+
             if target_extra is not None:
                 freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
                 targets = torch.tensor(target_extra.sum().to_numpy())
                 target_extra = MulticlassTrainer.target_to_multiclass(targets, None, len(target_extra)*freq*percentage, True)
-            
-            data = torch.from_numpy(data.values).float()
-            return {"patient":patient, "time":time, "data":data, "target":target, "target_extra":target_extra}
-        
+                item["target_extra"] = target_extra
+
+            item["data"] = torch.from_numpy(data.values).float()
+            return item
         except Exception as e:
             pass
         return None
@@ -227,9 +229,6 @@ class MulticlassTrainer(ABC):
 
         return model
 
-    def apply_model(self, model, x, is_test:bool=False):
-        return model(x)
-
     def run_epoch(self, loader, opt, model, prefix=""):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
@@ -244,9 +243,10 @@ class MulticlassTrainer(ABC):
             x = batch["data"].to(self.device)
             y = batch["target"].to(self.device)
             
-            if opt is not None: opt.zero_grad(set_to_none=True)
+            if opt is not None: 
+                opt.zero_grad(set_to_none=True)
             
-            logits = self.apply_model(model, x, is_test=mode=="TEST") # Typically model(x) would be enough here, but this way we can override self.apply_model later :-)
+            logits = model(x)
             loss = self._loss(logits, y)
             
             target_np = y.argmax(axis=1).cpu().numpy()
@@ -287,7 +287,6 @@ class MulticlassTrainer(ABC):
         return test_loss, test_cm
     
     def fit(self, model: BaseModel, train_loader, val_loader = None):
-        model = model.to(self.device)
         opt = self.optimizer_fn(model)
 
         if self.lr_scheduler_fn is not None:
@@ -302,10 +301,13 @@ class MulticlassTrainer(ABC):
             self.early_stopping_patience = None
 
         model = self._warmup(model, train_loader, self.warmup_device)
+        model = model.to(self.device)
         val_losses: list[float] = []
         losses = []
         cms = []
 
+        self.best_model_idx = None
+        self.best_checkpoint = None
         for epoch in range(self.epochs):
             model.train()
             loss, cm = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
@@ -315,7 +317,7 @@ class MulticlassTrainer(ABC):
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
-                folder = store_checkpoint(model, opt, lr_scheduler)
+                folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
                 logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}")
                 logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:
@@ -327,14 +329,26 @@ class MulticlassTrainer(ABC):
             if val_loader is not None:
                 model.eval()
                 with torch.inference_mode():
-                    val_loss, val_cm = self.run_epoch(val_loader, opt, model, f"VAL [{epoch+1}/{self.epochs}]") 
-                cms.append({"val": val_cm}) 
-                losses.append({"val": val_loss}) 
-                val_losses.append(val_loss) 
+                    val_loss, val_cm = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]") 
+                cms[-1]["val"] =  val_cm
+                losses[-1]["val"] =  val_loss
+                val_losses.append(val_loss)
             
                 imin = np.argmin(val_losses)
-                if self.early_stopping_patience and (len(val_losses) - imin >= self.early_stopping_patience):
+                if self.best_model_idx is None or imin != self.best_model_idx:
+                    if self.best_checkpoint is not None:
+                        shutil.rmtree(os.path.dirname(self.best_checkpoint))
+                    folder = store_checkpoint(model, opt, lr_scheduler)
+                    self.best_checkpoint = os.path.join(folder, "model.pt")
+                    self.best_model_idx = imin
+
+                if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
                     logger.info(f"Early stopping after {epoch} epochs - best epoch was {imin}") 
-                    break
+                    return {
+                        "losses":losses,
+                        "cms":cms,
+                        "best_model":imin,
+                        "checkpoint":self.best_checkpoint
+                    }
         
-        return losses, cms
+        return { "losses":losses, "cms":cms }

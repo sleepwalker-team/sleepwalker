@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 from typing import Any,  Dict, List, Optional
 
 import numpy as np
@@ -149,6 +151,16 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
             logger.info(str(e))
             return False
 
+    def _try_fix_via_mne(path, path_out):
+        try:
+            raw = mne.io.read_raw_edf(path, preload=False, verbose="ERROR")
+            raw.export(path_out, fmt="edf", physical_range=(-32768, 32767), verbose="ERROR", overwrite=True)
+            logger.info("Re-exported via MNE to fix remaining structural inconsistencies.")
+            return True
+        except Exception as e:
+            logger.info(f"MNE fallback failed: {e}")
+            return False
+
     # --- main repair logic ---
     edf = _load_edf(path_in)
     name = os.path.basename(path_in)
@@ -197,6 +209,15 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
 
     # --- Dry-run mode ---
     if dry:
+        # Still check if file can be read by pyedflib or MNE, but don't modify anything
+        readable_pyedflib = _check_if_readable(path_in)
+        readable_mne = False
+        try:
+            _ = mne.io.read_raw_edf(path_in, preload=False, verbose="ERROR")
+            readable_mne = True
+        except Exception as e:
+            logger.info(f"MNE read test failed: {e}")
+
         return False
 
     # determine output path
@@ -205,7 +226,12 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
 
     # verify readability
     readable = _check_if_readable(path_out)
-    if readable:
+    if not readable:
+        success = _try_fix_via_mne(path_out, path_out)
+        if success:
+            readable = _check_if_readable(path_out)
+
+    if readable:    # fallback: try reloading via MNE and re-exporting
         logger.info(f"{name}: successfully fixed and verified")
     else:
         logger.info(f"{name}: still not readable after fix")
@@ -248,7 +274,6 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
     except Exception as e:
         if verbose:
             logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
-            logger.info(f"Falling back to MNE for {edf_path}")
 
         raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
 
@@ -270,7 +295,6 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
             "source": "mne",
         }
 
-
 def edf_to_df(
     edf_path: str,
     channels: List[str],
@@ -290,7 +314,8 @@ def edf_to_df(
         DataFrame indexed by timestamps, columns = channels.
     """
     try:
-        with pyedflib.EdfReader(
+        text_trap = io.StringIO()
+        with redirect_stdout(text_trap), pyedflib.EdfReader(
             edf_path,
             annotations_mode=DO_NOT_READ_ANNOTATIONS,
             check_file_size=DO_NOT_CHECK_FILE_SIZE,
@@ -332,7 +357,6 @@ def edf_to_df(
     except Exception as e:
         if verbose:
             logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
-            logger.info(f"Falling back to MNE for {edf_path}")
 
         raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
 

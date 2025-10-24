@@ -4,9 +4,10 @@ from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 class Normalize(Preprocessor):
     def __init__(self):
         super().__init__()
-        self.mean = None
-        self.M2 = None
+        self.register_buffer("mean", None)
+        self.register_buffer("M2", None)
         self.count = 0
+        # self.register_buffer("count", torch.tensor(0.0))
 
     def update(self, data: torch.Tensor):
         # Batch statistics

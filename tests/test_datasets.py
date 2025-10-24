@@ -21,6 +21,7 @@ from sleepwalker.datasets.WSC import WSC
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
+from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
 from dotenv import load_dotenv
@@ -70,7 +71,7 @@ def test_ruhrlandklinik_dataset():
 def test_sleepedfx_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("SLEEP_EDFX_PATH")
-
+    
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("SLEEP_EDFX_PATH dataset not available")
 
@@ -79,6 +80,7 @@ def test_sleepedfx_dataset():
 def test_isruc_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("ISRUC_PATH") 
+
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("ISRUC dataset not available")
 
@@ -105,6 +107,7 @@ def test_mros_dataset():
 def test_svuh_ucd_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     EDF_PATH = os.environ.get("SVUH_UCD_PATH") 
+    EDF_PATH = "/raid/sleepwalker/svuh-ucd"
 
     if not EDF_PATH or not Path(EDF_PATH).exists():
         pytest.skip("SVUH_UCD dataset not available")
@@ -183,13 +186,26 @@ def test_wsc_dataset():
 
     run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
+def test_zarr_dataset():
+    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
+    ZARR_PATH = os.environ.get("ZARR_PATH")
+    ZARR_PATH = "/raid/sleepwalker/zarr"
+
+    if not ZARR_PATH or not Path(ZARR_PATH).exists():
+        pytest.skip("Zarr dataset not available. ")
+    
+    zarr_files = get_zarr_files_in_repo(ZARR_PATH)
+
+    dataset = ZarrDataset(zarr_files, total_input = "630s", target_resolution = "30s", sample_frequency = 100)
+    iterate_dataset(dataset, NUM_BATCHES)
+
 def test_multi_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     CAP_PATH = os.environ.get("CAP_PATH") 
     if not CAP_PATH or not Path(CAP_PATH).exists():
         pytest.skip("CAP dataset not available. ")
 
-    edf_data_dir = os.path.join(Path(__file__).parent, "..", "data")
+    edf_data_dir = os.path.join(Path(__file__).parent, "data")
 
     ds1 = build_dataset(
         SyntheticDataset, 
@@ -209,12 +225,12 @@ def test_multi_dataset():
         "Fp2-F4", 
         CAP_PATH, 
         event_mapping = {
-            "S1":"n1",
-            "S2":"n2",
-            "S3":"n3",
-            "S4":"n3",
-            "R":"rem",
-            "W":"wake"
+            "s1":"n1",
+            "s2":"n2",
+            "s3":"n3",
+            "s4":"n3",
+            "r":"rem",
+            "w":"wake"
         }
     )
 
@@ -222,20 +238,21 @@ def test_multi_dataset():
     iterate_dataset(ds, NUM_BATCHES)
 
 if __name__ == '__main__':
-    test_isruc_dataset()
-    test_ruhrlandklinik_dataset()
-    test_sleepedfx_dataset()
-    test_synthetic_dataset()
-    test_shhs_dataset()
+    # test_isruc_dataset()
+    # test_ruhrlandklinik_dataset()
+    # test_sleepedfx_dataset()
+    # test_synthetic_dataset()
+    # test_shhs_dataset()
     test_svuh_ucd_dataset()
-    test_abc_dataset()
-    test_apples_dataset() 
-    test_hchs_dataset()
-    test_mnc_dataset()
-    test_mros_dataset()
-    test_nchsdb_dataset() 
-    test_numom2b_dataset() 
-    test_stages_dataset() 
-    test_wsc_dataset() 
-    test_multi_dataset()
-    test_cap_dataset()
+    # test_abc_dataset()
+    # test_apples_dataset() 
+    # test_hchs_dataset()
+    # test_mnc_dataset()
+    # test_mros_dataset()
+    # test_nchsdb_dataset() 
+    # test_numom2b_dataset() 
+    # test_stages_dataset() 
+    # test_wsc_dataset() 
+    # test_multi_dataset()
+    # test_cap_dataset()
+    test_zarr_dataset()

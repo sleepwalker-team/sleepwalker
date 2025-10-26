@@ -2,11 +2,11 @@ from cosy.dsl import DSL
 from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
 from cosy.synthesizer import Synthesizer
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+#import torch
+#import torch.nn as nn
+#import torch.nn.functional as F
 
-
+"""
 class ChannelWiseNormalization(nn.Module):
     def __init__(self, num_channels, eps=1e-5):
         super(ChannelWiseNormalization, self).__init__()
@@ -65,7 +65,7 @@ class DepthwiseSeparableConv1d(nn.Module):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
-
+"""
 class UtimeRepository:
     def __init__(self, dimension_choices, normalization_eps_choices, #normalization_momentum_choices,
                  dropout_p_choices,
@@ -292,7 +292,7 @@ class UtimeRepository:
                                 )
                     & Constructor("normalization_epsilon", Var("e"))
                     & Constructor("normalization_epsilon", Literal(None))
-                    & Constructor("batch_norm")
+                    & Literal("batch_norm")
                     ),
 
             "ChannelWiseNorm": DSL()
@@ -306,7 +306,7 @@ class UtimeRepository:
                                 )
                     & Constructor("normalization_epsilon", Var("e"))
                     & Constructor("normalization_epsilon", Literal(None))
-                    & Constructor("channel_wise_norm")
+                    & Literal("channel_wise_norm")
                     ),
 
             "Conv1dLayerNorm": DSL()
@@ -443,7 +443,7 @@ class UtimeRepository:
             .parameter("norm", self.normalization())
             .parameter("norm_e", self.normalization_eps())
             .argument("activation", Constructor("activation_function") & Var("af"))
-            .argument("dropout", Constructor("dropout") & Constructor("probability", Var("d")))
+            .argument("dropout", Constructor("dropout") & Constructor("dropout_probability", Var("d")))
             .argument("c1", Constructor("1d_conv_layer",
                                         Constructor("input", Var("in"))
                                         & Constructor("output", Var("out"))
@@ -473,7 +473,8 @@ class UtimeRepository:
             .suffix(Constructor("conv_block",
                                 Constructor("input", Var("in"))
                                 & Constructor("output", Var("out"))
-                                & Constructor("kernel_size", Var("k")))
+                                & Constructor("kernel_size", Var("k"))
+                                )
                     & Constructor("homogeneous",
                                   Constructor("convolution", Var("conv"))
                                   & Constructor("convolution_stride", Var("stride"))
@@ -875,7 +876,7 @@ class UtimeRepository:
             "Conv1d": (lambda i, o, k, s, p, d, b: f"Conv1d({i}, {o}, {k}, {s}, {p}, {d}, {b})"),
             "DepthwiseSeparableConv1d": (lambda i, o, k, s, p, d, b:
                                          f"DepthwiseSeparableConv1d({i}, {o}, {k}, {s}, {p}, {d}, {b})"),
-            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, e, activation, dropout, c1, c2, norm:
+            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, n, e, activation, dropout, c1, c2, norm:
                           f"Conv_Block({activation}, {dropout}, {c1}, {c2}, {norm})"),
             "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb: f"Encoder({cb}, {mp})"),
             "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb: f"Decoder({cb}, {mp})"),
@@ -889,7 +890,7 @@ class UtimeRepository:
 
 
     # TODO: Refactor from here
-
+"""
     @staticmethod
     def _conv_block(activation, dropout, c1, c2, norm, x):
         x = c1(x)
@@ -973,7 +974,7 @@ class UtimeRepository:
             "UModel_Cons_length": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, e, n, m, l, l_u, enc, dec, u_model, x:
                                    self._umodel_cons_length(enc, dec, u_model, x)),
         }
-
+"""
 if __name__ == "__main__":
     repo = UtimeRepository(dimension_choices=[64, 128, 256], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
                            convolution_kernel_size_choices=[5, 3, 2], convolution_stride_choices=[1, ],
@@ -989,7 +990,8 @@ if __name__ == "__main__":
                         )
             & Constructor("bottleneck",
                           Constructor("in_and_out", Literal(64))
-                          & Constructor("kernel_size", Literal(1)))
+                          & Constructor("kernel_size", Literal(1))
+                          )
             & Constructor("homogeneous",
                           Constructor("convolution", Literal("simple_convolution"))
                           & Constructor("convolution_stride", Literal(1))
@@ -1006,7 +1008,34 @@ if __name__ == "__main__":
                           )
               )
 
-    target = target0
+    target1 = (
+            Constructor("u_model",
+                        Constructor("dimensions", Literal((256, None, 128)))
+                        & Constructor("kernel_sizes", Literal((2, 3, None)))
+                        & Constructor("maxpool_sizes", Literal((None, 5, 3)))
+                        )
+            & Constructor("bottleneck",
+                          Constructor("in_and_out", Literal(None))
+                          & Constructor("kernel_size", Literal(1))
+                          )
+            & Constructor("homogeneous",
+                          Constructor("convolution", Literal(None))
+                          & Constructor("convolution_stride", Literal(None))
+                          & Constructor("convolution_padding", Literal(None))
+                          & Constructor("convolution_dilation", Literal(None))
+                          & Constructor("bias", Literal(True))
+                          & Constructor("activation", Literal(None))
+                          & Constructor("dropout_p", Literal(0.1))
+                          & Constructor("normalization", Literal("channel_wise_norm"))
+                          & Constructor("normalization_epsilon", Literal(1e-3))
+                          & Constructor("maxpool_stride", Literal(1))
+                          & Constructor("maxpool_padding", Literal(0))
+                          & Constructor("maxpool_dilation", Literal(1))
+                          )
+    )
+
+
+    target = target1
 
     synthesizer = Synthesizer(repo.specification(), {})
 

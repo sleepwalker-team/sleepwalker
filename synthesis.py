@@ -631,7 +631,7 @@ class UtimeRepository:
                                   )
                     ),
 
-            "UModel": DSL()
+            "UStructure": DSL()
             .parameter("in", dimension)
             .parameter("out_enc", dimension)
             .parameter("in_dec", dimension, lambda v: [2 * v["out_enc"]])
@@ -709,7 +709,7 @@ class UtimeRepository:
                                     & Constructor("normalization_epsilon", Var("e"))
                                     )
                       )
-            .suffix(Constructor("u_model",
+            .suffix(Constructor("u_structure",
                                 Constructor("dimensions", Var("ds"))
                                 & Constructor("kernel_sizes", Var("ks"))
                                 & Constructor("maxpool_sizes", Var("ms"))
@@ -748,7 +748,7 @@ class UtimeRepository:
                                   )
                     ),
 
-            "UModel_Cons": DSL()
+            "UStructure_Cons": DSL()
             .parameter("in_u", dimension)  # in_u == out_enc
             .parameter("in_enc", dimension)
             .parameter("in_dec", dimension, lambda v: [2 * v["in_u"]])
@@ -819,7 +819,7 @@ class UtimeRepository:
                                     & Constructor("normalization_epsilon", Var("e"))
                                     )
                       )
-            .argument("u_model", Constructor("u_model",
+            .argument("u", Constructor("u_structure",
                                 Constructor("dimensions", Var("ds"))
                                 & Constructor("kernel_sizes", Var("ks"))
                                 & Constructor("maxpool_sizes", Var("ms"))
@@ -843,7 +843,7 @@ class UtimeRepository:
                                   & Constructor("maxpool_dilation", Var("m_dilation"))
                                   )
                       )
-            .suffix(Constructor("u_model",
+            .suffix(Constructor("u_structure",
                                 Constructor("dimensions", Var("dds"))
                                 & Constructor("kernel_sizes", Var("kks"))
                                 & Constructor("maxpool_sizes", Var("mms"))
@@ -878,6 +878,8 @@ class UtimeRepository:
                                   & Constructor("maxpool_dilation", Literal(None))
                                   )
                     ),
+
+
         }
 
     def pretty_term_algebra(self):
@@ -898,10 +900,10 @@ class UtimeRepository:
                           f"Conv_Block({activation}, {dropout}, {c1}, {c2}, {norm})"),
             "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb: f"Encoder({cb}, {mp})"),
             "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb: f"Decoder({cb}, {mp})"),
-            "UModel": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+            "UStructure": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
                               ds, ks, ms, enc, dec, cb: f"U_Model({enc}, {dec}, {cb})"),
 
-            "UModel_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+            "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
                                             dds, ds, kks, ks, mms, ms, enc, dec, u_model:
                             f"U_Model_Cons({enc}, {dec}, {u_model})"),
         }
@@ -1001,7 +1003,7 @@ if __name__ == "__main__":
                            maxpool_dilation_choices=[1, ])
 
     target0 = (
-            Constructor("u_model",
+            Constructor("u_structure",
                         Constructor("dimensions", Literal((256, 128, 128)))
                         & Constructor("kernel_sizes", Literal((2, 3, 5)))
                         & Constructor("maxpool_sizes", Literal((5, 5, 3)))
@@ -1027,7 +1029,7 @@ if __name__ == "__main__":
               )
 
     target1 = (
-            Constructor("u_model",
+            Constructor("u_structure",
                         Constructor("dimensions", Literal((256, None, 128)))
                         & Constructor("kernel_sizes", Literal((2, 3, None)))
                         & Constructor("maxpool_sizes", Literal((None, 5, 3)))

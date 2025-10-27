@@ -125,7 +125,7 @@ class BaseDataset(Dataset, ABC):
         transform: Optional[Any] = None,
         online_filtering:bool = True,
         num_workers:int = 4,
-        online_max_tries:int = 2**32
+        online_max_tries:int = 128
         # event_type: str = "window",
         # normalizer_fit_strategy: Optional[Mapping[str, Any]] = None,
         # num_workers: int = 0,
@@ -154,7 +154,7 @@ class BaseDataset(Dataset, ABC):
 
         # # Events/classes
         if event_mapping is not None:
-            self.event_mapping = {k.lower(): v.lower() for k, v in event_mapping.items()}
+            self.event_mapping = {k: v for k, v in event_mapping.items()}
             self.classes = sorted(list(set(self.event_mapping.values())))
         else:
             self.event_mapping = None
@@ -294,13 +294,13 @@ class BaseDataset(Dataset, ABC):
                 ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
 
             if len(ids) == 0:
-                logger.warning(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
+                raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
 
             return edf_path, ids, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
         #except (OSError, ValueError, KeyError) as e:
         except Exception as e:
             logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
-            logger.warning(traceback.format_exc())
+            # logger.warning(traceback.format_exc())
             # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
 
             return edf_path, ids, None, None, None, n_skipped, classes.union(extra_classes) # type: ignore
@@ -429,5 +429,5 @@ class BaseDataset(Dataset, ABC):
                     break
         
         if cnt > self.online_max_tries:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries, no success.")
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {edf_path}")
         return item

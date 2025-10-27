@@ -1,8 +1,9 @@
 # unified_logger.py
 from __future__ import annotations
-import os, sys, tempfile, logging, inspect
+import os, sys, logging, inspect
 from typing import Any, Dict, Optional, List, Protocol
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 
 # ---------------------------
 # Level-aware formatter
@@ -410,6 +411,23 @@ class UnifiedLogger:
     def progress_close(self): self._pbar.close()
 
 
+
+@contextmanager
+def suppress_stdout_logging(logger: UnifiedLogger):
+    for sink in logger._sinks:
+        if isinstance(sink, StdLogSink):
+            for handler in sink._logger.handlers:
+                handler._old_level = handler.level
+                handler.setLevel(logging.CRITICAL + 1)
+    try:
+        yield
+    finally:
+        for sink in logger._sinks:
+            if isinstance(sink, StdLogSink):
+                for handler in sink._logger.handlers:
+                    handler.setLevel(handler._old_level)
+                    del handler._old_level
+
 # ---------------------------
 # Singleton
 # ---------------------------
@@ -430,4 +448,3 @@ def get_logger(level: str | int = logging.INFO) -> UnifiedLogger:
     return _singleton
 
 logger: UnifiedLogger = get_logger()
-

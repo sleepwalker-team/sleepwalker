@@ -458,6 +458,38 @@ def download_dataset(out_folder, server_url, file_names):
         download_and_validate(download_url, sha256, out_file_path, prefix=f"[{i+1}/{len(file_names)}] ")
 
 class SleepEDFx(BaseDataset):
+    """Dataset Summary
+        Summary of core statistics for this dataset.
+
+        n_patients: 190 
+        Durations:
+            min     : 0 days 07:29:40
+            max     : 1 days 00:00:00
+            mean    : 0 days 19:32:17.715736041
+            median  : 0 days 22:41:00
+            q25     : 0 days 20:01:00
+            q75     : 0 days 23:15:00
+
+        Channels:
+            1. EEG Fpz-Cz           100.0%
+            2. EEG Pz-Oz            100.0%
+            3. EOG horizontal       100.0%
+            4. EMG submental        100.0%
+            5. Resp oro-nasal       77.7%
+            6. Temp rectal          77.7%
+            7. Event marker         77.7%
+            8. Marker               22.3%
+
+        Classes:
+            - movement time
+            - sleep stage 1
+            - sleep stage 2
+            - sleep stage 3
+            - sleep stage 4
+            - sleep stage ?
+            - sleep stage r
+            - sleep stage w
+    """
     def __init__(self, 
             trim_wake = "30m",
             **kwargs

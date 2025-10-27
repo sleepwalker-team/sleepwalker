@@ -86,9 +86,11 @@ class UtimeRepository:
         self.maxpool_padding_choices = maxpool_padding_choices
         self.maxpool_dilation_choices = maxpool_dilation_choices
 
+        # Is this really necessary? With our request language, the user has to ensure this himself...
         if 1 not in self.convolution_kernel_size_choices:
             self.convolution_kernel_size_choices.append(1)
 
+        """
         # Parameters that are optional in request language need to have None as a choice
         self.normalization_eps_choices.append(None)
         #self.normalization_momentum_choices.append(None)
@@ -102,19 +104,14 @@ class UtimeRepository:
         self.maxpool_padding_choices.append(None)
         self.maxpool_dilation_choices.append(None)
         self.dimension_choices.append(None)
+        """
 
-        self.convs = ["simple_convolution", "depthwise_separable_convolution", None]
+        self.convs = ["simple_convolution", "depthwise_separable_convolution"] #, None]
 
-        self.afs = ["ReLu", "ELU", "Tanh", None]
+        self.afs = ["ReLu", "ELU", "Tanh"] #, None]
 
-        self.norms = ["batch_norm", "conv1d_layer_norm", "channel_wise_norm", None]
+        self.norms = ["batch_norm", "conv1d_layer_norm", "channel_wise_norm"] #, None]
 
-    class Maybe_Nat(Group):
-        def __iter__(self):
-            return super().__iter__()
-
-        def __contains__(self, value: object) -> bool:
-            return value is None or (isinstance(value, int) and value >= 0)
 
     class Nat(Group):
         def __iter__(self):
@@ -122,6 +119,102 @@ class UtimeRepository:
 
         def __contains__(self, value: object) -> bool:
             return isinstance(value, int) and value >= 0
+
+    class Nat_Tuple(Group):
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(isinstance(v, int) and v >= 0 for v in value)
+
+    class Conv_Tuple(Group):
+        def __init__(self, conv_choices):
+            self.conv_choices = conv_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.conv_choices for v in value)
+
+    class Conv_Tuple_Tuple(Group):
+        def __init__(self, conv_choices):
+            self.conv_choices = conv_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return (isinstance(value, tuple) and
+                    all(isinstance(v, tuple) and
+                        all(c in self.conv_choices for c in v) for v in value))
+
+    class AF_Tuple(Group):
+        def __init__(self, af_choices):
+            self.af_choices = af_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.af_choices for v in value)
+
+    class Norm_Tuple(Group):
+        def __init__(self, norm_choices):
+            self.norm_choices = norm_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.norm_choices for v in value)
+
+    class Dropout_Tuple(Group):
+        def __init__(self, dropout_p_choices):
+            self.dropout_p_choices = dropout_p_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.dropout_p_choices for v in value)
+
+    class Kernel_Size_Tuple(Group):
+        def __init__(self, kernel_size_choices):
+            self.kernel_size_choices = kernel_size_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.kernel_size_choices for v in value)
+
+    class Maxpool_Size_Tuple(Group):
+        def __init__(self, maxpool_size_choices):
+            self.maxpool_size_choices = maxpool_size_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return isinstance(value, tuple) and all(v in self.maxpool_size_choices for v in value)
+
+    class Dimension_Tuple(Group):
+        def __init__(self, dimension_choices):
+            self.dimension_choices = dimension_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return (isinstance(value, tuple) and all(v in self.dimension_choices for v in value))
+
+    class Maybe_Nat(Group):
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return value is None or (isinstance(value, int) and value >= 0)
 
     class Maybe_Nat_Tuple(Group):
         def __iter__(self):
@@ -212,68 +305,29 @@ class UtimeRepository:
         def __contains__(self, value: object) -> bool:
             return (isinstance(value, tuple) and all(True if v is None else v in self.dimension_choices for v in value))
 
-
-    def dimension(self):
-        return DataGroup("dimension", self.dimension_choices)
-
-    def normalization_eps(self):
-        return DataGroup("normalization_eps", self.normalization_eps_choices)
-
-    def dropout_p(self):
-        return DataGroup("dropout_p", self.dropout_p_choices)
-
-    def maxpool_size(self):
-        return DataGroup("maxpool_size", self.maxpool_size_choices)
-
-    def kernel_size(self):
-        return DataGroup("kernel_size", self.convolution_kernel_size_choices)
-
-    def activation_function(self):
-        return DataGroup("activation_function", self.afs)
-
-    def convolution(self):
-        return DataGroup("convolution", self.convs)
-
-    def normalization(self):
-        return DataGroup("normalization", self.norms)
-
-    def dimension_list(self):
-        return DataGroup("dimension_list", self.Maybe_Dimension_Tuple(self.dimension_choices))
-
-    def kernel_size_list(self):
-        return DataGroup("kernel_size_list", self.Maybe_Kernel_Size_Tuple(self.convolution_kernel_size_choices))
-
-    def maxpool_size_list(self):
-        return DataGroup("maxpool_size_list", self.Maybe_Maxpool_Size_Tuple(self.maxpool_size_choices))
-
-    def length(self):
-        return DataGroup("length", self.Maybe_Nat())
-
-    #def normalization_momentum(self):
-    #    return DataGroup("normalization_momentum", self.normalization_momentum_choices)
-
-    def maxpool_stride(self):
-        return DataGroup("maxpool_stride", self.maxpool_stride_choices)
-
-    def maxpool_padding(self):
-        return DataGroup("maxpool_padding", self.maxpool_padding_choices)
-
-    def maxpool_dilation(self):
-        return DataGroup("maxpool_dilation", self.maxpool_dilation_choices)
-
-    def convolution_stride(self):
-        return DataGroup("convolution_stride", self.convolution_stride_choices)
-
-    def convolution_padding(self):
-        return DataGroup("convolution_padding", self.convolution_padding_choices)
-
-    def convolution_dilation(self):
-        return DataGroup("convolution_dilation", self.convolution_dilations_choices)
-
-    def bias(self):
-        return DataGroup("bias", [True, False])
-
     def specification(self):
+        dimension = DataGroup("dimension", self.dimension_choices)
+        maybe_dimension = DataGroup("dimension", self.dimension_choices + [None])
+        normalization_eps = DataGroup("normalization_eps", self.normalization_eps_choices)
+        dropout_p = DataGroup("dropout_p", self.dropout_p_choices)
+        maxpool_size = DataGroup("maxpool_size", self.maxpool_size_choices)
+        kernel_size = DataGroup("kernel_size", self.convolution_kernel_size_choices)
+        maybe_kernel_size = DataGroup("kernel_size", self.convolution_kernel_size_choices + [None])
+        activation_function = DataGroup("activation_function", self.afs)
+        convolution = DataGroup("convolution", self.convs)
+        normalization = DataGroup("normalization", self.norms)
+        dimension_list = DataGroup("dimension_list", self.Maybe_Dimension_Tuple(self.dimension_choices))
+        kernel_size_list = DataGroup("kernel_size_list", self.Maybe_Kernel_Size_Tuple(self.convolution_kernel_size_choices))
+        maxpool_size_list = DataGroup("maxpool_size_list", self.Maybe_Maxpool_Size_Tuple(self.maxpool_size_choices))
+        length = DataGroup("length", self.Nat())
+        maxpool_stride = DataGroup("maxpool_stride", self.maxpool_stride_choices)
+        maxpool_padding = DataGroup("maxpool_padding", self.maxpool_padding_choices)
+        maxpool_dilation = DataGroup("maxpool_dilation", self.maxpool_dilation_choices)
+        convolution_stride = DataGroup("convolution_stride", self.convolution_stride_choices)
+        convolution_padding = DataGroup("convolution_padding", self.convolution_padding_choices)
+        convolution_dilation = DataGroup("convolution_dilation", self.convolution_dilations_choices)
+        bias = DataGroup("bias", [True, False])
+
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
 
@@ -282,10 +336,8 @@ class UtimeRepository:
             "Tanh": Constructor("activation_function") & Literal("Tanh") & Literal(None),
 
             "BatchNorm1d": DSL()
-            .parameter("n", self.dimension())
-            .parameter_constraint(lambda v: v["n"] is not None)
-            .parameter("e", self.normalization_eps())
-            .parameter_constraint(lambda v: v["e"] is not None)
+            .parameter("n", dimension)
+            .parameter("e", normalization_eps)
             .suffix(Constructor("normalization",
                                 Constructor("output", Var("n"))
                                 & Constructor("output", Literal(None))
@@ -296,10 +348,8 @@ class UtimeRepository:
                     ),
 
             "ChannelWiseNorm": DSL()
-            .parameter("n", self.dimension())
-            .parameter_constraint(lambda v: v["n"] is not None)
-            .parameter("e", self.normalization_eps())
-            .parameter_constraint(lambda v: v["e"] is not None)
+            .parameter("n", dimension)
+            .parameter("e", normalization_eps)
             .suffix(Constructor("normalization",
                                 Constructor("output", Var("n"))
                                 & Constructor("output", Literal(None))
@@ -310,10 +360,8 @@ class UtimeRepository:
                     ),
 
             "Conv1dLayerNorm": DSL()
-            .parameter("n", self.dimension())
-            .parameter_constraint(lambda v: v["n"] is not None)
-            .parameter("e", self.normalization_eps())
-            .parameter_constraint(lambda v: v["e"] is not None)
+            .parameter("n", dimension)
+            .parameter("e", normalization_eps)
             .suffix(Constructor("normalization",
                                 Constructor("output", Var("n"))
                                 & Constructor("output", Literal(None))
@@ -324,22 +372,17 @@ class UtimeRepository:
                     ),
 
             "Dropout1d": DSL()
-            .parameter("d", self.dropout_p())
-            .parameter_constraint(lambda v: v["d"] is not None)
+            .parameter("d", dropout_p)
             .suffix(Constructor("dropout")
                     & Constructor("dropout_probability", Var("d"))
                     & Constructor("dropout_probability", Literal(None))
                     ),
 
             "Maxpool1d": DSL()
-            .parameter("n", self.maxpool_size())
-            .parameter_constraint(lambda v: v["n"] is not None)
-            .parameter("s", self.maxpool_stride())
-            .parameter_constraint(lambda v: v["s"] is not None)
-            .parameter("p", self.maxpool_padding())
-            .parameter_constraint(lambda v: v["p"] is not None)
-            .parameter("d", self.maxpool_dilation())
-            .parameter_constraint(lambda v: v["d"] is not None)
+            .parameter("n", maxpool_size)
+            .parameter("s", maxpool_stride)
+            .parameter("p", maxpool_padding)
+            .parameter("d", maxpool_dilation)
             .suffix(Constructor("maxpool1d",
                                 Constructor("size", Var("n"))
                                 & Constructor("size", Literal(None))
@@ -353,8 +396,7 @@ class UtimeRepository:
                     ),
 
             "Upsample1d": DSL()
-            .parameter("n", self.maxpool_size())
-            .parameter_constraint(lambda v: v["n"] is not None)
+            .parameter("n", maxpool_size)
             .suffix(Constructor("upsample1d",
                                 Constructor("scale_factor", Var("n"))
                                 & Constructor("scale_factor", Literal(None))
@@ -362,19 +404,13 @@ class UtimeRepository:
                     ),
 
             "Conv1d": DSL()
-            .parameter("in", self.dimension())
-            .parameter_constraint(lambda v: v["in"] is not None)
-            .parameter("out", self.dimension())
-            .parameter_constraint(lambda v: v["out"] is not None)
-            .parameter("k", self.kernel_size())
-            .parameter_constraint(lambda v: v["k"] is not None)
-            .parameter("s", self.convolution_stride())
-            .parameter_constraint(lambda v: v["s"] is not None)
-            .parameter("p", self.convolution_padding())
-            .parameter_constraint(lambda v: v["p"] is not None)
-            .parameter("d", self.convolution_dilation())
-            .parameter_constraint(lambda v: v["d"] is not None)
-            .parameter("b", self.bias())
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("k", kernel_size)
+            .parameter("s", convolution_stride)
+            .parameter("p", convolution_padding)
+            .parameter("d", convolution_dilation)
+            .parameter("b", bias)
             .suffix(Constructor("1d_conv_layer",
                                 Constructor("input", Var("in"))
                                 & Constructor("input", Literal(None))
@@ -396,19 +432,13 @@ class UtimeRepository:
                     ),
 
             "DepthwiseSeparableConv1d": DSL()
-            .parameter("in", self.dimension())
-            .parameter_constraint(lambda v: v["in"] is not None)
-            .parameter("out", self.dimension())
-            .parameter_constraint(lambda v: v["out"] is not None)
-            .parameter("k", self.kernel_size())
-            .parameter_constraint(lambda v: v["k"] is not None)
-            .parameter("s", self.convolution_stride())
-            .parameter_constraint(lambda v: v["s"] is not None)
-            .parameter("p", self.convolution_padding())
-            .parameter_constraint(lambda v: v["p"] is not None)
-            .parameter("d", self.convolution_dilation())
-            .parameter_constraint(lambda v: v["d"] is not None)
-            .parameter("b", self.bias())
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("k", kernel_size)
+            .parameter("s", convolution_stride)
+            .parameter("p", convolution_padding)
+            .parameter("d", convolution_dilation)
+            .parameter("b", bias)
             .suffix(Constructor("1d_conv_layer",
                                 Constructor("input", Var("in"))
                                 & Constructor("input", Literal(None))
@@ -430,18 +460,18 @@ class UtimeRepository:
                     ),
 
             "ConvBlock": DSL()
-            .parameter("in", self.dimension())
-            .parameter("out", self.dimension())
-            .parameter("k", self.kernel_size())
-            .parameter("d", self.dropout_p())
-            .parameter("af", self.activation_function())
-            .parameter("conv", self.convolution())
-            .parameter("stride", self.convolution_stride())
-            .parameter("padding", self.convolution_padding())
-            .parameter("dilation", self.convolution_dilation())
-            .parameter("b", self.bias())
-            .parameter("norm", self.normalization())
-            .parameter("norm_e", self.normalization_eps())
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("k", kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("stride", convolution_stride)
+            .parameter("padding", convolution_padding)
+            .parameter("dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("norm", normalization)
+            .parameter("norm_e", normalization_eps)
             .argument("activation", Constructor("activation_function") & Var("af"))
             .argument("dropout", Constructor("dropout") & Constructor("dropout_probability", Var("d")))
             .argument("c1", Constructor("1d_conv_layer",
@@ -489,22 +519,22 @@ class UtimeRepository:
                     ),
 
             "Encoder": DSL()
-            .parameter("in", self.dimension())
-            .parameter("out", self.dimension())
-            .parameter("k", self.kernel_size())
-            .parameter("d", self.dropout_p())
-            .parameter("af", self.activation_function())
-            .parameter("conv", self.convolution())
-            .parameter("c_stride", self.convolution_stride())
-            .parameter("c_padding", self.convolution_padding())
-            .parameter("c_dilation", self.convolution_dilation())
-            .parameter("b", self.bias())
-            .parameter("e", self.normalization_eps())
-            .parameter("norm", self.normalization())
-            .parameter("m", self.maxpool_size())
-            .parameter("m_stride", self.convolution_stride())
-            .parameter("m_padding", self.convolution_padding())
-            .parameter("m_dilation", self.convolution_dilation())
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("k", kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m", maxpool_size)
+            .parameter("m_stride", convolution_stride)
+            .parameter("m_padding", convolution_padding)
+            .parameter("m_dilation", convolution_dilation)
             .argument("mp",
                       Constructor("maxpool1d",Constructor("size", Var("m")))
                       & Constructor("maxpool_stride", Var("m_stride"))
@@ -551,19 +581,19 @@ class UtimeRepository:
                     ),
 
             "Decoder": DSL()
-            .parameter("in", self.dimension())
-            .parameter("out", self.dimension())
-            .parameter("k", self.kernel_size())
-            .parameter("d", self.dropout_p())
-            .parameter("af", self.activation_function())
-            .parameter("conv", self.convolution())
-            .parameter("c_stride", self.convolution_stride())
-            .parameter("c_padding", self.convolution_padding())
-            .parameter("c_dilation", self.convolution_dilation())
-            .parameter("b", self.bias())
-            .parameter("e", self.normalization_eps())
-            .parameter("norm", self.normalization())
-            .parameter("sf", self.maxpool_size())
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("k", kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("sf", maxpool_size)
             .argument("up", Constructor("upsample1d", Constructor("scale_factor", Var("sf"))))
             .argument("cb",
                       Constructor("conv_block",
@@ -602,33 +632,27 @@ class UtimeRepository:
                     ),
 
             "UModel": DSL()
-            .parameter("in", self.dimension(), lambda v: [x for x in self.dimension_choices if x is not None])
-            .parameter("out_enc", self.dimension(), lambda v: [x for x in self.dimension_choices if x is not None])
-            .parameter("in_dec", self.dimension(), lambda v: [2 * v["out_enc"]])
-            .parameter("k1", self.kernel_size(), lambda v: [x for x in self.convolution_kernel_size_choices if x is not None])
-            .parameter("k2", self.kernel_size(), lambda v: [x for x in self.convolution_kernel_size_choices if x is not None])
-            .parameter("d", self.dropout_p(), lambda v: [x for x in self.dropout_p_choices if x is not None])
-            .parameter("af", self.activation_function(), lambda v: [x for x in self.afs if x is not None])
-            .parameter("conv", self.convolution(), lambda v: [x for x in self.convs if x is not None])
-            .parameter("c_stride", self.convolution_stride())
-            .parameter_constraint(lambda v: v["c_stride"] is not None)
-            .parameter("c_padding", self.convolution_padding())
-            .parameter_constraint(lambda v: v["c_padding"] is not None)
-            .parameter("c_dilation", self.convolution_dilation())
-            .parameter_constraint(lambda v: v["c_dilation"] is not None)
-            .parameter("b", self.bias())
-            .parameter("e", self.normalization_eps(), lambda v: [x for x in self.normalization_eps_choices if x is not None])
-            .parameter("norm", self.normalization(), lambda v: [x for x in self.norms if x is not None])
-            .parameter("m", self.maxpool_size(), lambda v: [x for x in self.maxpool_size_choices if x is not None])
-            .parameter("m_stride", self.maxpool_stride())
-            .parameter_constraint(lambda v: v["m_stride"] is not None)
-            .parameter("m_padding", self.maxpool_padding())
-            .parameter_constraint(lambda v: v["m_padding"] is not None)
-            .parameter("m_dilation", self.maxpool_dilation())
-            .parameter_constraint(lambda v: v["m_dilation"] is not None)
-            .parameter("ds", self.dimension_list(), lambda v: [(v["in"],), (None,)])
-            .parameter("ks", self.kernel_size_list(), lambda v: [(v["k1"],), (None,)])
-            .parameter("ms", self.maxpool_size_list(), lambda v: [(v["m"],), (None,)])
+            .parameter("in", dimension)
+            .parameter("out_enc", dimension)
+            .parameter("in_dec", dimension, lambda v: [2 * v["out_enc"]])
+            .parameter("k1", kernel_size)
+            .parameter("k2", kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m", maxpool_size)
+            .parameter("m_stride", maxpool_stride)
+            .parameter("m_padding", maxpool_padding)
+            .parameter("m_dilation", maxpool_dilation)
+            .parameter("ds", dimension_list, lambda v: [(v["in"],), (None,)])
+            .parameter("ks", kernel_size_list, lambda v: [(v["k1"],), (None,)])
+            .parameter("ms", maxpool_size_list, lambda v: [(v["m"],), (None,)])
             .argument("enc", Constructor("encoder",
                                 Constructor("input", Var("in"))
                                 & Constructor("output", Var("out_enc"))
@@ -725,42 +749,36 @@ class UtimeRepository:
                     ),
 
             "UModel_Cons": DSL()
-            .parameter("in_u", self.dimension(), lambda v: [x for x in self.dimension_choices if x is not None])  # in_u == out_enc
-            .parameter("in_enc", self.dimension(), lambda v: [x for x in self.dimension_choices if x is not None])
-            .parameter("in_dec", self.dimension(), lambda v: [2 * v["in_u"]])
-            .parameter("bd", self.dimension())
-            .parameter("k", self.kernel_size(), lambda v: [x for x in self.convolution_kernel_size_choices if x is not None])
-            .parameter("bk", self.kernel_size())
-            .parameter("d", self.dropout_p(), lambda v: [x for x in self.dropout_p_choices if x is not None])
-            .parameter("af", self.activation_function(), lambda v: [x for x in self.afs if x is not None])
-            .parameter("conv", self.convolution(), lambda v: [x for x in self.convs if x is not None])
-            .parameter("c_stride", self.convolution_stride())
-            .parameter_constraint(lambda v: v["c_stride"] is not None)
-            .parameter("c_padding", self.convolution_padding())
-            .parameter_constraint(lambda v: v["c_padding"] is not None)
-            .parameter("c_dilation", self.convolution_dilation())
-            .parameter_constraint(lambda v: v["c_dilation"] is not None)
-            .parameter("b", self.bias())
-            .parameter("e", self.normalization_eps(), lambda v: [x for x in self.normalization_eps_choices if x is not None])
-            .parameter("norm", self.normalization(), lambda v: [x for x in self.norms if x is not None])
-            .parameter("m", self.maxpool_size(), lambda v: [x for x in self.maxpool_size_choices if x is not None])
-            .parameter("m_stride", self.maxpool_stride())
-            .parameter_constraint(lambda v: v["m_stride"] is not None)
-            .parameter("m_padding", self.maxpool_padding())
-            .parameter_constraint(lambda v: v["m_padding"] is not None)
-            .parameter("m_dilation", self.maxpool_dilation())
-            .parameter_constraint(lambda v: v["m_dilation"] is not None)
-            .parameter("dds", self.dimension_list())
+            .parameter("in_u", dimension)  # in_u == out_enc
+            .parameter("in_enc", dimension)
+            .parameter("in_dec", dimension, lambda v: [2 * v["in_u"]])
+            .parameter("bd", maybe_dimension)
+            .parameter("k", kernel_size)
+            .parameter("bk", maybe_kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m", maxpool_size)
+            .parameter("m_stride", maxpool_stride)
+            .parameter("m_padding", maxpool_padding)
+            .parameter("m_dilation", maxpool_dilation)
+            .parameter("dds", dimension_list)
             .parameter_constraint(lambda v: len(v["dds"]) > 1 and (v["dds"][0] == v["in_enc"] or v["dds"][0] is None))
-            .parameter("ds", self.dimension_list(), lambda v: [v["dds"][1:]])
+            .parameter("ds", dimension_list, lambda v: [v["dds"][1:]])
             .parameter_constraint(lambda v: len(v["ds"]) > 0 and (v["ds"][0] == v["in_u"] or v["ds"][0] is None))
-            .parameter("kks", self.kernel_size_list())
+            .parameter("kks", kernel_size_list)
             .parameter_constraint(lambda v: len(v["kks"]) > 1 and (v["kks"][0] == v["k"] or v["kks"][0] is None))
-            .parameter("ks", self.kernel_size_list(), lambda v: [v["kks"][1:]])
+            .parameter("ks", kernel_size_list, lambda v: [v["kks"][1:]])
             .parameter_constraint(lambda v: len(v["ks"]) > 0)
-            .parameter("mms", self.maxpool_size_list())
+            .parameter("mms", maxpool_size_list)
             .parameter_constraint(lambda v: len(v["mms"]) > 1 and (v["mms"][0] == v["m"] or v["mms"][0] is None))
-            .parameter("ms", self.maxpool_size_list(), lambda v: [v["mms"][1:]])
+            .parameter("ms", maxpool_size_list, lambda v: [v["mms"][1:]])
             .parameter_constraint(lambda v: len(v["ms"]) > 0)
             .argument("enc", Constructor("encoder",
                                          Constructor("input", Var("in_enc"))
@@ -1016,7 +1034,7 @@ if __name__ == "__main__":
                         )
             & Constructor("bottleneck",
                           Constructor("in_and_out", Literal(None))
-                          & Constructor("kernel_size", Literal(1))
+                          & Constructor("kernel_size", Literal(None))
                           )
             & Constructor("homogeneous",
                           Constructor("convolution", Literal(None))

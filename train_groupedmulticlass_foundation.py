@@ -39,11 +39,10 @@ mp.set_sharing_strategy('file_system')
 
 batch_size = 256
 # batch_size = 196
-epochs = 100
+epochs = 200
 total_input = "630s"
 target_resolution = "30s"
-n_samples = 500_000
-tracking_uri = "file:/raid/mlflow/"
+n_samples = 200_000
 experiment_name = "grouped_transformer"
 num_workers_dataset = 16
 num_workers_dataloader = 16
@@ -58,7 +57,15 @@ groups = [[
     "C3A2", "C4A1", # SVUH-UCD
 ]]
 
-logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
+# logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
+
+with open("$HOME/mlflow/auth_config.ini","r") as f:
+    TRACKING_URI=f.read()
+ARTIFACT_URI="/raid/mlruns"
+
+logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
+
+logger.start_run(run_name=experiment_name)
 
 # TRAIN / VAL
 def build_abc(edf_path):
@@ -504,8 +511,6 @@ def build_shhs(edf_path):
     logger.info(f"Loaded {dataset.n_patients} / {len(edf_files)} patients for testing")
     return dataset
 
-logger.start_run(run_name=experiment_name)
-
 ds = []
 logger.context("ABC")
 ds.append(build_abc("/raid/sleepwalker/abc"))
@@ -540,14 +545,15 @@ val_ds = [d[1] for d in ds]
 
 test_ds = []
 test_ds_names = []
-logger.context("Ruhrland")
-test_ds.append(build_ruhrland("/raid/sleepwalker/ruhrlandklinik/raw"))
-test_ds_names.append("Ruhrland")
-logger.uncontext()
 
 logger.context("SleepEDFx")
 test_ds.append(build_sleepedfx("/raid/sleepwalker/sleep-edfx"))
 test_ds_names.append("SleepEDFx")
+logger.uncontext()
+
+logger.context("Ruhrland")
+test_ds.append(build_ruhrland("/raid/sleepwalker/ruhrlandklinik/raw"))
+test_ds_names.append("Ruhrland")
 logger.uncontext()
 
 logger.context("SVUH-UCD")
@@ -587,7 +593,7 @@ trainer = GroupedChanelMulticlassTrainer(
     optimizer = lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
     lr_scheduler = lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
     classes = train_multi_ds.get_classes(), 
-    save_every = 10,
+    save_every = 1,
     loss_function=torch.nn.functional.cross_entropy, 
     early_stopping = 10
 )
@@ -603,7 +609,9 @@ for t_ds, name in zip(test_ds, test_ds_names):
     logger.context(f"{name}")
     for r in [1,2,3,4,5,10]:
         logger.context(f"r={r}")
-        test_loss, test_cm = trainer.test(model, test_loader, n_apply_repeats=r)
+
+        trainer.n_repeat_test = r
+        test_loss, test_cm = trainer.test(model, test_loader)
 
         record = {
             "repeat":r,

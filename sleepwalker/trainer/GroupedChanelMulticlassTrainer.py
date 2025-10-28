@@ -174,7 +174,8 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
             cnt += 1
             loss_sum += float(loss.item())
 
-            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch") 
+            step = self.steps[mode]
+            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch", step=step) 
 
             accs = cm_sum.trace() / cm_sum.sum() * 100.0
             f1_micro = f1_score_from_confusion_matrix(cm_sum, macro=False)
@@ -184,12 +185,13 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
             desc = f"{prefix:<12} {loss_sum/cnt:2.4f} acc {accs:2.3f} " \
                    f"f1 (mi/ma) {f1_micro:1.4f}/{f1_macro:1.4f} κ {coehns_kappa:2.3f}"
             
+            self.steps[mode] += 1
             logger.progress_status(desc)
             logger.progress_advance(loader.batch_size)
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
-        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch")  
+        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step)  
 
         return epoch_loss, cm_sum  
     

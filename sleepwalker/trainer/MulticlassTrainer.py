@@ -152,7 +152,7 @@ class MulticlassTrainer(ABC):
             return self.loss_function(logits, target)  
         return self.loss_function(logits, target, weight=w)  
 
-    def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch"):
+    def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
         total = cm.sum()  
         if total == 0:  
@@ -162,11 +162,11 @@ class MulticlassTrainer(ABC):
         f1_micro = f1_score_from_confusion_matrix(cm, macro=False)  
         f1_macro = f1_score_from_confusion_matrix(cm, macro=True)  
         kappa = cohen_kappa_from_confusion_matrix(cm)  
-        logger.metric(f"{scope}/{mode}/accuracy", acc)  
-        logger.metric(f"{scope}/{mode}/f1_micro", f1_micro)  
-        logger.metric(f"{scope}/{mode}/f1_macro", f1_macro)  
-        logger.metric(f"{scope}/{mode}/coehns_kappa", kappa)  
-        logger.metric(f"{scope}/{mode}/loss", float(loss_value)) 
+        logger.metric(f"{scope}/{mode}/accuracy", acc, step=step)  
+        logger.metric(f"{scope}/{mode}/f1_micro", f1_micro, step=step)  
+        logger.metric(f"{scope}/{mode}/f1_macro", f1_macro, step=step)  
+        logger.metric(f"{scope}/{mode}/coehns_kappa", kappa, step=step)  
+        logger.metric(f"{scope}/{mode}/loss", float(loss_value), step=step) 
 
     def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
         model.to(device)
@@ -261,7 +261,8 @@ class MulticlassTrainer(ABC):
             cnt += 1
             loss_sum += float(loss.item())
 
-            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch") 
+            step = self.steps[mode]
+            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch", step=step) 
 
             accs = cm_sum.trace() / cm_sum.sum() * 100.0
             f1_micro = f1_score_from_confusion_matrix(cm_sum, macro=False)
@@ -271,12 +272,13 @@ class MulticlassTrainer(ABC):
             desc = f"{prefix:<12} {loss_sum/cnt:2.4f} acc {accs:2.3f} " \
                    f"f1 (mi/ma) {f1_micro:1.4f}/{f1_macro:1.4f} κ {coehns_kappa:2.3f}"
             
+            self.steps[mode] += 1
             logger.progress_status(desc)
             logger.progress_advance(loader.batch_size)
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
-        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch")  
+        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step)  
 
         return epoch_loss, cm_sum  
     
@@ -308,6 +310,9 @@ class MulticlassTrainer(ABC):
 
         self.best_model_idx = None
         self.best_checkpoint = None
+        self.steps = {"train":0, "val":0, "test":0}
+        self.epoch_step = 0
+
         for epoch in range(self.epochs):
             model.train()
             loss, cm = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
@@ -317,7 +322,7 @@ class MulticlassTrainer(ABC):
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
-                folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
+                folder = store_checkpoint(model, opt, lr_scheduler)
                 logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}")
                 logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:
@@ -337,9 +342,10 @@ class MulticlassTrainer(ABC):
                 imin = np.argmin(val_losses)
                 if self.best_model_idx is None or imin != self.best_model_idx:
                     if self.best_checkpoint is not None:
-                        shutil.rmtree(os.path.dirname(self.best_checkpoint))
-                    folder = store_checkpoint(model, opt, lr_scheduler)
-                    self.best_checkpoint = os.path.join(folder, "model.pt")
+                        logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
+                        shutil.rmtree(self.best_checkpoint)
+                    
+                    self.best_checkpoint = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix="sleepwalker_best_model")) 
                     self.best_model_idx = imin
 
                 if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
@@ -350,5 +356,7 @@ class MulticlassTrainer(ABC):
                         "best_model":imin,
                         "checkpoint":self.best_checkpoint
                     }
+            
+            self.epoch_step += 1
         
         return { "losses":losses, "cms":cms }

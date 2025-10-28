@@ -110,7 +110,7 @@ class Sink(Protocol):
               params: Optional[Dict[str, Any]], tags: Optional[Dict[str, Any]]) -> None: ...
     def end(self, status: str = "FINISHED") -> None: ...
     def event(self, level: str, message: str, context: str) -> None: ...
-    def metric(self, name: str, value: float, context: str) -> None: ...
+    def metric(self, name: str, value: float, step:int, context: str) -> None: ...
     def figure(self, name: str, figure: Any, context: str) -> None: ...
     def artifact(self, path: str, dest: Optional[str], context: str) -> None: ...
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress: ...
@@ -169,7 +169,7 @@ class StdLogSink:
         )
         self._logger.handle(lr)
 
-    def metric(self, name: str, value: float, context: str): pass
+    def metric(self, name: str, value: float, step:int, context: str): pass
     def figure(self, name: str, figure: Any, context: str): pass
     def artifact(self, path: str, dest: Optional[str], context: str): pass
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
@@ -188,7 +188,7 @@ class TqdmSink:
     def start(self, run_name, params, tags): pass
     def end(self, status="FINISHED"): pass
     def event(self, level, message, context: str): pass
-    def metric(self, name, value, context: str): pass
+    def metric(self, name, value, step, context: str): pass
     def figure(self, name, figure, context: str): pass
     def artifact(self, path, dest, context: str): pass
 
@@ -201,11 +201,13 @@ class TqdmSink:
 # ---------------------------
 
 class MlflowSink:
-    def __init__(self, tracking_uri: Optional[str] = None, experiment: Optional[str] = None):
+    def __init__(self, tracking_uri: Optional[str] = None, experiment: Optional[str] = None, artifact_uri:Optional[str]= None):
         import mlflow
         self.mlflow = mlflow
         if tracking_uri:
             self.mlflow.set_tracking_uri(tracking_uri)
+        
+        self.artifact_uri = artifact_uri
         self.experiment = experiment
         self._run_active = False
 
@@ -214,7 +216,7 @@ class MlflowSink:
         exp_name = self.experiment
         if exp_name:
             exp = self.mlflow.get_experiment_by_name(exp_name)
-            exp_id = exp.experiment_id if exp else self.mlflow.create_experiment(exp_name)
+            exp_id = exp.experiment_id if exp else self.mlflow.create_experiment(exp_name, artifact_location=self.artifact_uri)
         else:
             exp_id = None
 
@@ -241,9 +243,9 @@ class MlflowSink:
         # MLflow doesn't handle free-form log events; ignore
         pass
 
-    def metric(self, name: str, value: float, context: str):
+    def metric(self, name: str, value: float, step:int, context: str):
         # Context is ignored → metric name must be explicit
-        self.mlflow.log_metric(name, float(value))
+        self.mlflow.log_metric(name, float(value), step=step)
 
     def figure(self, name: str, figure: Any, context: str):
         import tempfile, os
@@ -340,10 +342,10 @@ class UnifiedLogger:
     def debug(self, msg): self._event("DEBUG", msg)
     
     # ---- Metrics ----
-    def metric(self, name: str, value: float):
+    def metric(self, name: str, value: float, step:int = 0):
         ctx = self._ctx_str()
         for s in self._sinks:
-            try: s.metric(name, float(value), context=ctx)
+            try: s.metric(name, float(value), step=step, context=ctx)
             except Exception: pass
 
     # ---- Figures / Artifacts ----

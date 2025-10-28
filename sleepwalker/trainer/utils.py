@@ -36,7 +36,7 @@ def append_to_jsonl(filename: str, record: dict):
     with open(f"{filename}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, cls=NumpyEncoder) + "\n")
 
-def store_checkpoint(model: BaseModel, optimizer: torch.optim.Optimizer, scheduler: Optional[torch.optim.lr_scheduler.LRScheduler], folder:str = tempfile.gettempdir()) -> str:
+def store_checkpoint(model: BaseModel, optimizer: torch.optim.Optimizer, scheduler: Optional[torch.optim.lr_scheduler.LRScheduler], folder:str = tempfile.mkdtemp(prefix="sleepwalker_")) -> str:
     """
     Saves model, optimizer, and scheduler (if provided) states to the specified folder.
     Args:
@@ -53,6 +53,7 @@ def store_checkpoint(model: BaseModel, optimizer: torch.optim.Optimizer, schedul
         and scheduler state (if provided) as "scheduler.pt" in the specified folder.
     """
 
+    os.makedirs(folder, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(folder, "model.pt"))
     torch.save(optimizer.state_dict(), os.path.join(folder, "optimizer.pt"))
     if scheduler:
@@ -93,7 +94,7 @@ def cohen_kappa_from_confusion_matrix(confusion_matrix):
     
     return kappa
 
-def f1_score_from_confusion_matrix(confusion_matrix, macro=False):
+def f1_score_from_confusion_matrix(confusion_matrix, macro=False) -> float:
     """
     Calculate the F1-score (macro or micro) from a given confusion matrix.
     Parameters:

@@ -2,11 +2,10 @@ from cosy.dsl import DSL
 from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
 from cosy.synthesizer import Synthesizer
 
-#import torch
-#import torch.nn as nn
-#import torch.nn.functional as F
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-"""
 class ChannelWiseNormalization(nn.Module):
     def __init__(self, num_channels, eps=1e-5):
         super(ChannelWiseNormalization, self).__init__()
@@ -65,7 +64,8 @@ class DepthwiseSeparableConv1d(nn.Module):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
-"""
+
+
 class UtimeRepository:
     def __init__(self, dimension_choices, normalization_eps_choices, #normalization_momentum_choices,
                  dropout_p_choices,
@@ -879,6 +879,236 @@ class UtimeRepository:
                                   )
                     ),
 
+            "LinearLayer": DSL()
+            .parameter("in", dimension)
+            .parameter("out", dimension)
+            .parameter("b", bias)
+            .suffix(Constructor("linear_layer",
+                                Constructor("input", Var("in"))
+                                & Constructor("output", Var("out"))
+                                & Constructor("bias", Var("b"))
+                                )
+                    ),
+
+            "UModel": DSL()
+            .parameter("in_u", dimension)  # in_u == out_enc
+            .parameter("in_enc", dimension)
+            .parameter("in_dec", dimension, lambda v: [2 * v["in_u"]])
+            .parameter("bd", maybe_dimension)
+            .parameter("k", kernel_size)
+            .parameter("bk", maybe_kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m", maxpool_size)
+            .parameter("m_stride", maxpool_stride)
+            .parameter("m_padding", maxpool_padding)
+            .parameter("m_dilation", maxpool_dilation)
+            .parameter("first_d", dropout_p)
+            .parameter("first_af", activation_function)
+            .parameter("first_conv", convolution)
+            .parameter("first_c_stride", convolution_stride)
+            .parameter("first_c_padding", convolution_padding)
+            .parameter("first_c_dilation", convolution_dilation)
+            .parameter("first_b", bias)
+            .parameter("first_e", normalization_eps)
+            .parameter("first_norm", normalization)
+            .parameter("first_m_stride", maxpool_stride)
+            .parameter("first_m_padding", maxpool_padding)
+            .parameter("first_m_dilation", maxpool_dilation)
+            .parameter("fc_k", kernel_size)
+            .parameter("fc_conv", convolution)
+            .parameter("fc_stride", convolution_stride)
+            .parameter("fc_padding", convolution_padding)
+            .parameter("fc_dilation", convolution_dilation)
+            .parameter("fc_b", bias)
+            .parameter("mlp_in", dimension)
+            .parameter("mlp_out", dimension)
+            .parameter("mlp_b", bias)
+            .parameter("dds", dimension_list)
+            .parameter_constraint(lambda v: len(v["dds"]) > 1 and (v["dds"][0] == v["in_enc"] or v["dds"][0] is None))
+            .parameter("ds", dimension_list, lambda v: [v["dds"][1:]])
+            .parameter_constraint(lambda v: len(v["ds"]) > 0 and (v["ds"][0] == v["in_u"] or v["ds"][0] is None))
+            .parameter("kks", kernel_size_list)
+            .parameter_constraint(lambda v: len(v["kks"]) > 1 and (v["kks"][0] == v["k"] or v["kks"][0] is None))
+            .parameter("ks", kernel_size_list, lambda v: [v["kks"][1:]])
+            .parameter_constraint(lambda v: len(v["ks"]) > 0)
+            .parameter("mms", maxpool_size_list)
+            .parameter_constraint(lambda v: len(v["mms"]) > 1 and (v["mms"][0] == v["m"] or v["mms"][0] is None))
+            .parameter("ms", maxpool_size_list, lambda v: [v["mms"][1:]])
+            .parameter_constraint(lambda v: len(v["ms"]) > 0)
+            .argument("enc", Constructor("encoder",
+                                         Constructor("input", Var("in_enc"))
+                                         & Constructor("output", Var("in_u"))
+                                         & Constructor("kernel_size", Var("k"))
+                                         & Constructor("maxpool_size", Var("m"))
+                                         )
+                      & Constructor("homogeneous",
+                                    Constructor("convolution", Var("first_conv"))
+                                    & Constructor("convolution_stride", Var("first_c_stride"))
+                                    & Constructor("convolution_padding", Var("first_c_padding"))
+                                    & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                    & Constructor("bias", Var("first_b"))
+                                    & Constructor("activation", Var("first_af"))
+                                    & Constructor("dropout_p", Var("first_d"))
+                                    & Constructor("normalization", Var("first_norm"))
+                                    & Constructor("normalization_epsilon", Var("first_e"))
+                                    & Constructor("maxpool_stride", Var("first_m_stride"))
+                                    & Constructor("maxpool_padding", Var("first_m_padding"))
+                                    & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                    )
+                      )
+            .argument("dec", Constructor("decoder",
+                                         Constructor("input", Var("in_dec"))
+                                         & Constructor("output", Var("in_enc"))
+                                         & Constructor("kernel_size", Var("k"))
+                                         & Constructor("upsample_size", Var("m"))
+                                         )
+                      & Constructor("homogeneous",
+                                    Constructor("convolution", Var("first_conv"))
+                                    & Constructor("convolution_stride", Var("first_c_stride"))
+                                    & Constructor("convolution_padding", Var("first_c_padding"))
+                                    & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                    & Constructor("bias", Var("first_b"))
+                                    & Constructor("activation", Var("first_af"))
+                                    & Constructor("dropout_p", Var("first_d"))
+                                    & Constructor("normalization", Var("first_norm"))
+                                    & Constructor("normalization_epsilon", Var("first_e"))
+                                    )
+                      )
+            .argument("u", Constructor("u_structure",
+                                       Constructor("dimensions", Var("ds"))
+                                       & Constructor("kernel_sizes", Var("ks"))
+                                       & Constructor("maxpool_sizes", Var("ms"))
+                                       )
+                      & Constructor("bottleneck",
+                                    Constructor("in_and_out", Var("bd"))
+                                    & Constructor("kernel_size", Var("bk"))
+                                    )
+                      & Constructor("homogeneous",
+                                    Constructor("convolution", Var("conv"))
+                                    & Constructor("convolution_stride", Var("c_stride"))
+                                    & Constructor("convolution_padding", Var("c_padding"))
+                                    & Constructor("convolution_dilation", Var("c_dilation"))
+                                    & Constructor("bias", Var("b"))
+                                    & Constructor("activation", Var("af"))
+                                    & Constructor("dropout_p", Var("d"))
+                                    & Constructor("normalization", Var("norm"))
+                                    & Constructor("normalization_epsilon", Var("e"))
+                                    & Constructor("maxpool_stride", Var("m_stride"))
+                                    & Constructor("maxpool_padding", Var("m_padding"))
+                                    & Constructor("maxpool_dilation", Var("m_dilation"))
+                                    )
+                      )
+            .argument("fc", Constructor("1d_conv_layer",
+                                        Constructor("input", Var("in_enc"))
+                                        & Constructor("output", Var("mlp_in"))
+                                        & Constructor("kernel_size", Literal(1))
+                                        )
+                      & Var("fc_conv")
+                      & Constructor("convolution_stride", Var("fc_stride"))
+                      & Constructor("convolution_padding", Var("fc_padding"))
+                      & Constructor("convolution_dilation", Var("fc_dilation"))
+                      & Constructor("bias", Var("fc_b"))
+                      )
+            .argument("mlp", Constructor("linear_layer",
+                                         Constructor("input", Var("mlp_in"))
+                                         & Constructor("output", Var("mlp_out"))
+                                         & Constructor("bias", Var("mlp_b"))
+                                         )
+                      )
+            .suffix(Constructor("u_model",
+                                Constructor("dimensions", Var("dds"))
+                                & Constructor("kernel_sizes", Var("kks"))
+                                & Constructor("maxpool_sizes", Var("mms"))
+                                )
+                    & Constructor("u_first_level", Constructor("convolution", Var("first_conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("first_c_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("first_c_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("first_b"))
+                                              & Constructor("bias", Literal(None))
+                                              & Constructor("activation", Var("first_af"))
+                                              & Constructor("activation", Literal(None))
+                                              & Constructor("dropout_p", Var("first_d"))
+                                              & Constructor("dropout_p", Literal(None))
+                                              & Constructor("normalization", Var("first_norm"))
+                                              & Constructor("normalization", Literal(None))
+                                              & Constructor("normalization_epsilon", Var("first_e"))
+                                              & Constructor("normalization_epsilon", Literal(None))
+                                              & Constructor("maxpool_stride", Var("first_m_stride"))
+                                              & Constructor("maxpool_stride", Literal(None))
+                                              & Constructor("maxpool_padding", Var("first_m_padding"))
+                                              & Constructor("maxpool_padding", Literal(None))
+                                              & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                              & Constructor("maxpool_dilation", Literal(None))
+                                  )
+                    & Constructor("bottleneck",
+                                  Constructor("in_and_out", Var("bd"))
+                                  & Constructor("kernel_size", Var("bk"))
+                                  )
+                    & Constructor("homogeneous",
+                                  Constructor("convolution", Var("conv"))
+                                  & Constructor("convolution", Literal(None))
+                                  & Constructor("convolution_stride", Var("c_stride"))
+                                  & Constructor("convolution_stride", Literal(None))
+                                  & Constructor("convolution_padding", Var("c_padding"))
+                                  & Constructor("convolution_padding", Literal(None))
+                                  & Constructor("convolution_dilation", Var("c_dilation"))
+                                  & Constructor("convolution_dilation", Literal(None))
+                                  & Constructor("bias", Var("b"))
+                                  & Constructor("bias", Literal(None))
+                                  & Constructor("activation", Var("af"))
+                                  & Constructor("activation", Literal(None))
+                                  & Constructor("dropout_p", Var("d"))
+                                  & Constructor("dropout_p", Literal(None))
+                                  & Constructor("normalization", Var("norm"))
+                                  & Constructor("normalization", Literal(None))
+                                  & Constructor("normalization_epsilon", Var("e"))
+                                  & Constructor("normalization_epsilon", Literal(None))
+                                  & Constructor("maxpool_stride", Var("m_stride"))
+                                  & Constructor("maxpool_stride", Literal(None))
+                                  & Constructor("maxpool_padding", Var("m_padding"))
+                                  & Constructor("maxpool_padding", Literal(None))
+                                  & Constructor("maxpool_dilation", Var("m_dilation"))
+                                  & Constructor("maxpool_dilation", Literal(None))
+                                  )
+                    & Constructor("u_final_conv",
+                                  Constructor("kernel_size", Var("fc_k"))
+                                  & Constructor("kernel_size", Literal(None))
+                                  & Constructor("convolution", Var("fc_conv"))
+                                  & Constructor("convolution", Literal(None))
+                                  & Constructor("convolution_stride", Var("fc_stride"))
+                                  & Constructor("convolution_stride", Literal(None))
+                                  & Constructor("convolution_padding", Var("fc_padding"))
+                                  & Constructor("convolution_padding", Literal(None))
+                                  & Constructor("convolution_dilation", Var("fc_dilation"))
+                                  & Constructor("convolution_dilation", Literal(None))
+                                  & Constructor("bias", Var("fc_b"))
+                                  & Constructor("bias", Literal(None))
+                                  )
+                    & Constructor("u_linear_classifier",
+                                  Constructor("linear_layer",
+                                              Constructor("input", Var("mlp_in"))
+                                              & Constructor("input", Literal(None))
+                                              & Constructor("output", Var("mlp_out"))
+                                              & Constructor("output", Literal(None))
+                                              & Constructor("bias", Var("mlp_b"))
+                                              & Constructor("bias", Literal(None))
+                                              )
+                                  )
+                    ),
+
 
         }
 
@@ -901,16 +1131,23 @@ class UtimeRepository:
             "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb: f"Encoder({cb}, {mp})"),
             "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb: f"Decoder({cb}, {mp})"),
             "UStructure": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
-                              ds, ks, ms, enc, dec, cb: f"U_Model({enc}, {dec}, {cb})"),
+                              ds, ks, ms, enc, dec, cb: f"U_Structure({enc}, {dec}, {cb})"),
 
             "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
                                             dds, ds, kks, ks, mms, ms, enc, dec, u_model:
-                            f"U_Model_Cons({enc}, {dec}, {u_model})"),
+                                f"U_Model_Structure({enc}, {dec}, {u_model})"),
+            "LinearLayer": (lambda i, o, b: f"LinearLayer({i}, {o}, {b})"),
+            "UModel": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
+                              first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
+                              fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
+                              dds, ds, kks, ks, mms, ms, enc, dec, u, dc, mlp:
+                       f"U_Model({enc}, {dec}, {u}, {dc}, {mlp})"),
+
         }
 
 
     # TODO: Refactor from here
-"""
+
     @staticmethod
     def _conv_block(activation, dropout, c1, c2, norm, x):
         x = c1(x)
@@ -994,7 +1231,7 @@ class UtimeRepository:
             "UModel_Cons_length": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, e, n, m, l, l_u, enc, dec, u_model, x:
                                    self._umodel_cons_length(enc, dec, u_model, x)),
         }
-"""
+
 if __name__ == "__main__":
     repo = UtimeRepository(dimension_choices=[64, 128, 256], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
                            convolution_kernel_size_choices=[5, 3, 2], convolution_stride_choices=[1, ],
@@ -1054,8 +1291,114 @@ if __name__ == "__main__":
                           )
     )
 
+    target2 = (Constructor("u_model",
+                                Constructor("dimensions", Literal((256, 128, 128)))
+                                & Constructor("kernel_sizes", Literal((2, 3, 5)))
+                                & Constructor("maxpool_sizes", Literal((5, 5, 3)))
+                                )
+               & Constructor("u_first_level", Constructor("convolution", Literal("simple_convolution"))
+                          & Constructor("convolution_stride", Literal(1))
+                          & Constructor("convolution_padding", Literal(0))
+                          & Constructor("convolution_dilation", Literal(1))
+                          & Constructor("bias", Literal(True))
+                          & Constructor("activation", Literal("ReLu"))
+                          & Constructor("dropout_p", Literal(0.1))
+                          & Constructor("normalization", Literal("channel_wise_norm"))
+                          & Constructor("normalization_epsilon", Literal(1e-3))
+                          & Constructor("maxpool_stride", Literal(1))
+                          & Constructor("maxpool_padding", Literal(0))
+                          & Constructor("maxpool_dilation", Literal(1))
+                             )
+               & Constructor("bottleneck",
+                          Constructor("in_and_out", Literal(64))
+                          & Constructor("kernel_size", Literal(1))
+                          )
+               & Constructor("homogeneous",
+                          Constructor("convolution", Literal("simple_convolution"))
+                          & Constructor("convolution_stride", Literal(1))
+                          & Constructor("convolution_padding", Literal(0))
+                          & Constructor("convolution_dilation", Literal(1))
+                          & Constructor("bias", Literal(True))
+                          & Constructor("activation", Literal("ReLu"))
+                          & Constructor("dropout_p", Literal(0.1))
+                          & Constructor("normalization", Literal("channel_wise_norm"))
+                          & Constructor("normalization_epsilon", Literal(1e-3))
+                          & Constructor("maxpool_stride", Literal(1))
+                          & Constructor("maxpool_padding", Literal(0))
+                          & Constructor("maxpool_dilation", Literal(1))
+                          )
+               & Constructor("u_final_conv",
+                                  Constructor("kernel_size", Literal(1))
+                                  & Constructor("convolution", Literal("simple_convolution"))
+                                  & Constructor("convolution_stride", Literal(1))
+                                  & Constructor("convolution_padding", Literal(0))
+                                  & Constructor("convolution_dilation", Literal(1))
+                                  & Constructor("bias", Literal(True))
+                             )
+               & Constructor("u_linear_classifier",
+                                  Constructor("linear_layer",
+                                              Constructor("input", Literal(256))
+                                              & Constructor("output", Literal(64))
+                                              & Constructor("bias", Literal(False))
+                                              )
+                                  )
+               )
 
-    target = target1
+    target3 = (Constructor("u_model",
+                           Constructor("dimensions", Literal((None, 128, 128)))
+                           & Constructor("kernel_sizes", Literal((2, None, 5)))
+                           & Constructor("maxpool_sizes", Literal((None, 5, None)))
+                           )
+               & Constructor("u_first_level", Constructor("convolution", Literal(None))
+                             & Constructor("convolution_stride", Literal(None))
+                             & Constructor("convolution_padding", Literal(None))
+                             & Constructor("convolution_dilation", Literal(None))
+                             & Constructor("bias", Literal(None))
+                             & Constructor("activation", Literal(None))
+                             & Constructor("dropout_p", Literal(None))
+                             & Constructor("normalization", Literal(None))
+                             & Constructor("normalization_epsilon", Literal(None))
+                             & Constructor("maxpool_stride", Literal(None))
+                             & Constructor("maxpool_padding", Literal(None))
+                             & Constructor("maxpool_dilation", Literal(None))
+                             )
+               & Constructor("bottleneck",
+                             Constructor("in_and_out", Literal(64))
+                             & Constructor("kernel_size", Literal(1))
+                             )
+               & Constructor("homogeneous",
+                             Constructor("convolution", Literal("simple_convolution"))
+                             & Constructor("convolution_stride", Literal(1))
+                             & Constructor("convolution_padding", Literal(0))
+                             & Constructor("convolution_dilation", Literal(1))
+                             & Constructor("bias", Literal(True))
+                             & Constructor("activation", Literal("ReLu"))
+                             & Constructor("dropout_p", Literal(0.1))
+                             & Constructor("normalization", Literal("channel_wise_norm"))
+                             & Constructor("normalization_epsilon", Literal(1e-3))
+                             & Constructor("maxpool_stride", Literal(1))
+                             & Constructor("maxpool_padding", Literal(0))
+                             & Constructor("maxpool_dilation", Literal(1))
+                             )
+               & Constructor("u_final_conv",
+                             Constructor("kernel_size", Literal(None))
+                             & Constructor("convolution", Literal(None))
+                             & Constructor("convolution_stride", Literal(None))
+                             & Constructor("convolution_padding", Literal(None))
+                             & Constructor("convolution_dilation", Literal(None))
+                             & Constructor("bias", Literal(None))
+                             )
+               & Constructor("u_linear_classifier",
+                             Constructor("linear_layer",
+                                         Constructor("input", Literal(None))
+                                         & Constructor("output", Literal(None))
+                                         & Constructor("bias", Literal(None))
+                                         )
+                             )
+               )
+
+
+    target = target3
 
     synthesizer = Synthesizer(repo.specification(), {})
 
@@ -1064,6 +1407,7 @@ if __name__ == "__main__":
     trees = search_space.enumerate_trees(target, 10)
 
     for t in trees:
+        #print(t)
         print(t.interpret(repo.pretty_term_algebra()))
 
 

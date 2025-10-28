@@ -322,7 +322,7 @@ class MulticlassTrainer(ABC):
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
-                folder = store_checkpoint(model, opt, lr_scheduler)
+                folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
                 logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}")
                 logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:

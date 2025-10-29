@@ -72,6 +72,13 @@ class UtimeRepository:
                  convolution_kernel_size_choices, convolution_stride_choices, convolution_padding_choices,
                  convolution_dilations_choices,
                  maxpool_size_choices, maxpool_stride_choices, maxpool_padding_choices, maxpool_dilation_choices,
+                 preprocessor_channel_sampler_n_choices,
+                 preprocessor_crop_total_input_choices, preprocessor_crop_sampling_rate_choices,
+                 preprocessor_empirical_clip_scaler_q_choices, preprocessor_empirical_clip_scaler_scale_choices,
+                 preprocessor_fir_sampling_rate_choices, preprocessor_fir_channels_choices, preprocessor_fir_filter_params_choices,
+                 preprocessor_robust_scaler_lower_quantile_choices, preprocessor_robust_scaler_upper_quantile_choices,
+                 preprocessor_spectogram_n_fft_choices, preprocessor_spectogram_hop_length_choices,
+                 preprocessor_spectogram_win_length_choices, preprocessor_spectogram_epoch_len_samples_choices
                  ):
         self.dimension_choices = dimension_choices + [x for x in map(lambda x: x * 2, dimension_choices) if x not in dimension_choices]
         self.normalization_eps_choices = normalization_eps_choices
@@ -85,6 +92,20 @@ class UtimeRepository:
         self.maxpool_stride_choices = maxpool_stride_choices
         self.maxpool_padding_choices = maxpool_padding_choices
         self.maxpool_dilation_choices = maxpool_dilation_choices
+        self.preprocessor_channel_sampler_n_choices = preprocessor_channel_sampler_n_choices
+        self.preprocessor_crop_total_input_choices = preprocessor_crop_total_input_choices
+        self.preprocessor_crop_sampling_rate_choices = preprocessor_crop_sampling_rate_choices
+        self.preprocessor_empirical_clip_scaler_q_choices = preprocessor_empirical_clip_scaler_q_choices
+        self.preprocessor_empirical_clip_scaler_scale_choices = preprocessor_empirical_clip_scaler_scale_choices
+        self.preprocessor_fir_sampling_rate_choices = preprocessor_fir_sampling_rate_choices
+        self.preprocessor_fir_channels_choices = preprocessor_fir_channels_choices
+        self.preprocessor_fir_filter_params_choices = preprocessor_fir_filter_params_choices
+        self.preprocessor_robust_scaler_lower_quantile_choices = preprocessor_robust_scaler_lower_quantile_choices
+        self.preprocessor_robust_scaler_upper_quantile_choices = preprocessor_robust_scaler_upper_quantile_choices
+        self.preprocessor_spectogram_n_fft_choices = preprocessor_spectogram_n_fft_choices
+        self.preprocessor_spectogram_hop_length_choices = preprocessor_spectogram_hop_length_choices
+        self.preprocessor_spectogram_win_length_choices = preprocessor_spectogram_win_length_choices
+        self.preprocessor_spectogram_epoch_len_samples_choices = preprocessor_spectogram_epoch_len_samples_choices
 
         # Is this really necessary? With our request language, the user has to ensure this himself...
         if 1 not in self.convolution_kernel_size_choices:
@@ -305,6 +326,97 @@ class UtimeRepository:
         def __contains__(self, value: object) -> bool:
             return (isinstance(value, tuple) and all(True if v is None else v in self.dimension_choices for v in value))
 
+    class Preprocessor(Group):
+
+        """
+("ChannelSampler", v["n"])
+or
+("Crop", v["total_input"], v["sampling_rate"], v["where"])
+or
+("EmpiricalClipScaler", v["q"], v["scale"])
+or
+("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])
+or
+("Normalize",)
+or
+("RobustScaler", v["lower_quantile"], v["upper_quantile"])
+or
+("Spectogram", v["n_fft"], v["hop_length"], v["win_length"], v["epoch_len_samples"])
+or
+("ZNormalize", v["use_global_statistics"])
+        """
+        def __init__(self, channel_sampler_n_choices, crop_total_input_choices, crop_sampling_rate_choices,
+                     empirical_clip_scaler_q_choices, empirical_clip_scaler_scale_choices,
+                     fir_sampling_rate_choices, fir_channels_choices, fir_filter_params_choices,
+                     robust_scaler_lower_quantile_choices, robust_scaler_upper_quantile_choices, spectogram_n_fft_choices,
+                     spectogram_hop_length_choices, spectogram_win_length_choices, spectogram_epoch_len_samples_choices):
+            self.channel_sampler_n_choices = channel_sampler_n_choices
+            self.crop_total_input_choices = crop_total_input_choices
+            self.crop_sampling_rate_choices = crop_sampling_rate_choices
+            self.empirical_clip_scaler_q_choices = empirical_clip_scaler_q_choices
+            self.empirical_clip_scaler_scale_choices = empirical_clip_scaler_scale_choices
+            self.fir_sampling_rate_choices = fir_sampling_rate_choices
+            self.fir_channels_choices = fir_channels_choices
+            self.fir_filter_params_choices = fir_filter_params_choices
+            self.robust_scaler_lower_quantile_choices = robust_scaler_lower_quantile_choices
+            self.robust_scaler_upper_quantile_choices = robust_scaler_upper_quantile_choices
+            self.spectogram_n_fft_choices = spectogram_n_fft_choices
+            self.spectogram_hop_length_choices = spectogram_hop_length_choices
+            self.spectogram_win_length_choices = spectogram_win_length_choices
+            self.spectogram_epoch_len_samples_choices = spectogram_epoch_len_samples_choices
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            if (isinstance(value, tuple)):
+                if value[0] == "ChannelSampler":
+                    return len(value) == 2 and value[1] in self.channel_sampler_n_choices
+                elif value[0] == "Crop":
+                    return (len(value) == 4 and
+                            value[1] in self.crop_total_input_choices and
+                            value[2] in self.crop_sampling_rate_choices and
+                            value[3] in ["left", "middle", "right"])
+                elif value[0] == "EmpiricalClipScaler":
+                    return (len(value) == 3 and
+                            value[1] in self.empirical_clip_scaler_q_choices and
+                            value[2] in self.empirical_clip_scaler_scale_choices)
+                elif value[0] == "FIR":
+                    return (len(value) == 5 and
+                            value[1] in self.fir_sampling_rate_choices and
+                            value[2] in self.fir_channels_choices and
+                            value[3] in self.fir_filter_params_choices and
+                            isinstance(value[4], bool))
+                elif value[0] == "Normalize":
+                    return len(value) == 1
+                elif value[0] == "RobustScaler":
+                    return (len(value) == 3 and
+                            value[1] in self.robust_scaler_lower_quantile_choices and
+                            value[2] in self.robust_scaler_upper_quantile_choices)
+                elif value[0] == "Spectogram":
+                    return (len(value) == 5 and
+                            value[1] in self.spectogram_n_fft_choices and
+                            value[2] in self.spectogram_hop_length_choices and
+                            value[3] in self.spectogram_win_length_choices and
+                            value[4] in self.spectogram_epoch_len_samples_choices)
+                elif value[0] == "ZNormalize":
+                    return len(value) == 2 and isinstance(value[1], bool)
+                else:
+                    return False
+            else:
+                return False
+
+    class Maybe_Preprocessor_Tuple(Group):
+        def __init__(self, preprocessors):
+            self.preprocessors = preprocessors
+
+        def __iter__(self):
+            return super().__iter__()
+
+        def __contains__(self, value: object) -> bool:
+            return (isinstance(value, tuple) and all(True if v is None else v in self.preprocessors for v in value))
+
+
     def specification(self):
         dimension = DataGroup("dimension", self.dimension_choices)
         maybe_dimension = DataGroup("dimension", self.dimension_choices + [None])
@@ -316,10 +428,10 @@ class UtimeRepository:
         activation_function = DataGroup("activation_function", self.afs)
         convolution = DataGroup("convolution", self.convs)
         normalization = DataGroup("normalization", self.norms)
-        dimension_list = DataGroup("dimension_list", self.Maybe_Dimension_Tuple(self.dimension_choices))
-        kernel_size_list = DataGroup("kernel_size_list", self.Maybe_Kernel_Size_Tuple(self.convolution_kernel_size_choices))
-        maxpool_size_list = DataGroup("maxpool_size_list", self.Maybe_Maxpool_Size_Tuple(self.maxpool_size_choices))
-        length = DataGroup("length", self.Nat())
+        dimension_list = self.Maybe_Dimension_Tuple(self.dimension_choices)
+        kernel_size_list = self.Maybe_Kernel_Size_Tuple(self.convolution_kernel_size_choices)
+        maxpool_size_list = self.Maybe_Maxpool_Size_Tuple(self.maxpool_size_choices)
+        length = self.Nat()
         maxpool_stride = DataGroup("maxpool_stride", self.maxpool_stride_choices)
         maxpool_padding = DataGroup("maxpool_padding", self.maxpool_padding_choices)
         maxpool_dilation = DataGroup("maxpool_dilation", self.maxpool_dilation_choices)
@@ -327,6 +439,22 @@ class UtimeRepository:
         convolution_padding = DataGroup("convolution_padding", self.convolution_padding_choices)
         convolution_dilation = DataGroup("convolution_dilation", self.convolution_dilations_choices)
         bias = DataGroup("bias", [True, False])
+        preprocessor_tuple = self.Preprocessor(self.preprocessor_channel_sampler_n_choices,
+                                               self.preprocessor_crop_total_input_choices,
+                                               self.preprocessor_crop_sampling_rate_choices,
+                                               self.preprocessor_empirical_clip_scaler_q_choices,
+                                               self.preprocessor_empirical_clip_scaler_scale_choices,
+                                               self.preprocessor_fir_sampling_rate_choices,
+                                               self.preprocessor_fir_channels_choices,
+                                               self.preprocessor_fir_filter_params_choices,
+                                               self.preprocessor_robust_scaler_lower_quantile_choices,
+                                               self.preprocessor_robust_scaler_upper_quantile_choices,
+                                               self.preprocessor_spectogram_n_fft_choices,
+                                               self.preprocessor_spectogram_hop_length_choices,
+                                               self.preprocessor_spectogram_win_length_choices,
+                                               self.preprocessor_spectogram_epoch_len_samples_choices
+                                               )
+        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(preprocessor_tuple)
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1108,6 +1236,81 @@ class UtimeRepository:
                                               )
                                   )
                     ),
+
+            # For simplicity, we only consider loss functions that are not parameterized
+
+            "BCEwithLogits": Constructor("loss_function") & Literal("BCE_with_logits") & Literal(None),
+
+            "CrossEntropy": Constructor("loss_function") & Literal("CrossEntropy") & Literal(None),
+
+            "MAE": Constructor("loss_function") & Literal("MAE") & Literal(None),
+
+            "MSE": Constructor("loss_function") & Literal("MSE") & Literal(None),
+
+            "ChannelSampler": DSL()
+            .parameter("n", DataGroup("ChannelSampler_n", self.preprocessor_channel_sampler_n_choices))
+            .parameter("p", preprocessor_tuple, lambda v: [("ChannelSampler", v["n"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "Crop": DSL()
+            .parameter("total_input", DataGroup("Crop_total_input", self.preprocessor_crop_total_input_choices))
+            .parameter("sampling_rate", DataGroup("Crop_sampling_rate", self.preprocessor_crop_sampling_rate_choices))
+            .parameter("where", DataGroup("Crop_where", ["left", "middle", "right"]))
+            .parameter("p", preprocessor_tuple, lambda v: [("Crop", v["total_input"], v["sampling_rate"], v["where"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "EmpiricalClipScaler": DSL()
+            .parameter("q", DataGroup("EmpiricalClipScaler_q", self.preprocessor_empirical_clip_scaler_q_choices))
+            .parameter("scale", DataGroup("EmpiricalClipScaler_scale", self.preprocessor_empirical_clip_scaler_scale_choices))
+            .parameter("p", preprocessor_tuple, lambda v: [("EmpiricalClipScaler", v["q"], v["scale"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "FIR": DSL()
+            .parameter("sampling_rate", DataGroup("FIR_sampling_rate", self.preprocessor_fir_sampling_rate_choices))
+            .parameter("channels", DataGroup("FIR_channels", self.preprocessor_fir_channels_choices))
+            .parameter("filter_params", DataGroup("FIR_filter_params", self.preprocessor_fir_filter_params_choices))
+            .parameter("zero_phase", DataGroup("FIR_zero_phase", [True, False]))
+            .parameter("p", preprocessor_tuple, lambda v: [("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "Normalize": DSL()
+            .parameter("p", preprocessor_tuple, lambda v: [("Normalize",)])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "RobustScaler": DSL()
+            .parameter("lower_quantile", DataGroup("RobustScaler_lower_quantile", self.preprocessor_robust_scaler_lower_quantile_choices))
+            .parameter("upper_quantile", DataGroup("RobustScaler_upper_quantile", self.preprocessor_robust_scaler_upper_quantile_choices))
+            .parameter("p", preprocessor_tuple, lambda v: [("RobustScaler", v["lower_quantile"], v["upper_quantile"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "Spectogram": DSL()
+            .parameter("n_fft", DataGroup("Spectogram_n_fft", self.preprocessor_spectogram_n_fft_choices))
+            .parameter("hop_length", DataGroup("Spectogram_hop_length", self.preprocessor_spectogram_hop_length_choices))
+            .parameter("win_length", DataGroup("Spectogram_win_length", self.preprocessor_spectogram_win_length_choices))
+            .parameter("epoch_len_samples", DataGroup("Spectogram_epoch_len_samples", self.preprocessor_spectogram_epoch_len_samples_choices))
+            .parameter("p", preprocessor_tuple,
+                       lambda v: [("Spectogram", v["n_fft"], v["hop_length"], v["win_length"], v["epoch_len_samples"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "ZNormalize": DSL()
+            .parameter("use_global_statistics", DataGroup("ZNormalize_use_global_statistics", [True, False]))
+            .parameter("p", preprocessor_tuple, lambda v: [("ZNormalize", v["use_global_statistics"])])
+            .suffix(Constructor("preprocessor", Var("p"))),
+
+            "Preprocessor_Sequence": DSL()  # we might want to consider to have no preprocessor at all
+            # .parameter("p", preprocessor_tuple)
+            .parameter("ps", preprocessor_tuple, lambda v: [()])  # [(v["p"],), (None,)])
+            # .argument("x", Constructor("preprocessor", Var("p")))
+            .suffix(Constructor("preprocessor_sequence", Var("ps"))),
+
+            "Preprocessor_Sequence_Cons": DSL()
+            .parameter("p", preprocessor_tuple)
+            .parameter("pps", preprocessor_tuple)
+            .parameter_constraint(lambda v: len(v["pps"]) > 0 and (v["pps"][0] == v["p"] or v["pps"][0] is None))
+            .parameter("ps", preprocessor_tuple, lambda v: [v["pps"][1:]])
+            .argument("x", Constructor("preprocessor", Var("p")))
+            .argument("xs", Constructor("preprocessor_sequence", Var("ps")))
+            .suffix(Constructor("preprocessor_sequences", Var("pps"))),
 
 
         }

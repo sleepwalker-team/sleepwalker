@@ -133,8 +133,12 @@ class UtimeRepository:
 
         self.norms = ["batch_norm", "conv1d_layer_norm", "channel_wise_norm"] #, None]
 
+        self.losses = ["BCE_with_logits", "CrossEntropy", "MAE", "MSE"]
+
 
     class Nat(Group):
+        name = "Nat"
+
         def __iter__(self):
             return super().__iter__()
 
@@ -142,6 +146,8 @@ class UtimeRepository:
             return isinstance(value, int) and value >= 0
 
     class Nat_Tuple(Group):
+        name = "Nat_Tuple"
+
         def __iter__(self):
             return super().__iter__()
 
@@ -149,6 +155,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(isinstance(v, int) and v >= 0 for v in value)
 
     class Conv_Tuple(Group):
+        name = "Conv_Tuple"
+
         def __init__(self, conv_choices):
             self.conv_choices = conv_choices
 
@@ -159,6 +167,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.conv_choices for v in value)
 
     class Conv_Tuple_Tuple(Group):
+        name = "Conv_Tuple_Tuple"
+
         def __init__(self, conv_choices):
             self.conv_choices = conv_choices
 
@@ -171,6 +181,8 @@ class UtimeRepository:
                         all(c in self.conv_choices for c in v) for v in value))
 
     class AF_Tuple(Group):
+        name = "AF_Tuple"
+
         def __init__(self, af_choices):
             self.af_choices = af_choices
 
@@ -181,6 +193,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.af_choices for v in value)
 
     class Norm_Tuple(Group):
+        name = "Norm_Tuple"
+
         def __init__(self, norm_choices):
             self.norm_choices = norm_choices
 
@@ -191,6 +205,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.norm_choices for v in value)
 
     class Dropout_Tuple(Group):
+        name = "Dropout_Tuple"
+
         def __init__(self, dropout_p_choices):
             self.dropout_p_choices = dropout_p_choices
 
@@ -201,6 +217,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.dropout_p_choices for v in value)
 
     class Kernel_Size_Tuple(Group):
+        name = "Kernel_Size_Tuple"
+
         def __init__(self, kernel_size_choices):
             self.kernel_size_choices = kernel_size_choices
 
@@ -211,6 +229,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.kernel_size_choices for v in value)
 
     class Maxpool_Size_Tuple(Group):
+        name = "Maxpool_Size_Tuple"
+
         def __init__(self, maxpool_size_choices):
             self.maxpool_size_choices = maxpool_size_choices
 
@@ -221,6 +241,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(v in self.maxpool_size_choices for v in value)
 
     class Dimension_Tuple(Group):
+        name = "Dimension_Tuple"
+
         def __init__(self, dimension_choices):
             self.dimension_choices = dimension_choices
 
@@ -231,6 +253,8 @@ class UtimeRepository:
             return (isinstance(value, tuple) and all(v in self.dimension_choices for v in value))
 
     class Maybe_Nat(Group):
+        name = "Maybe_Nat"
+
         def __iter__(self):
             return super().__iter__()
 
@@ -238,6 +262,8 @@ class UtimeRepository:
             return value is None or (isinstance(value, int) and value >= 0)
 
     class Maybe_Nat_Tuple(Group):
+        name = "Maybe_Nat_Tuple"
+
         def __iter__(self):
             return super().__iter__()
 
@@ -245,6 +271,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else isinstance(v, int) and v >= 0 for v in value)
 
     class Maybe_Conv_Tuple(Group):
+        name = "Maybe_Conv_Tuple"
+
         def __init__(self, conv_choices):
             self.conv_choices = conv_choices
 
@@ -255,6 +283,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.conv_choices for v in value)
 
     class Maybe_Conv_Tuple_Tuple(Group):
+        name = "Maybe_Conv_Tuple_Tuple"
+
         def __init__(self, conv_choices):
             self.conv_choices = conv_choices
 
@@ -267,6 +297,8 @@ class UtimeRepository:
                         all(True if c is None else c in self.conv_choices for c in v) for v in value))
 
     class Maybe_AF_Tuple(Group):
+        name = "Maybe_AF_Tuple"
+
         def __init__(self, af_choices):
             self.af_choices = af_choices
 
@@ -277,6 +309,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.af_choices for v in value)
 
     class Maybe_Norm_Tuple(Group):
+        name = "Maybe_Norm_Tuple"
+
         def __init__(self, norm_choices):
             self.norm_choices = norm_choices
 
@@ -287,6 +321,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.norm_choices for v in value)
 
     class Maybe_Dropout_Tuple(Group):
+        name = "Maybe_Dropout_Tuple"
+
         def __init__(self, dropout_p_choices):
             self.dropout_p_choices = dropout_p_choices
 
@@ -297,6 +333,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.dropout_p_choices for v in value)
 
     class Maybe_Kernel_Size_Tuple(Group):
+        name = "Maybe_Kernel_Size_Tuple"
+
         def __init__(self, kernel_size_choices):
             self.kernel_size_choices = kernel_size_choices
 
@@ -307,6 +345,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.kernel_size_choices for v in value)
 
     class Maybe_Maxpool_Size_Tuple(Group):
+        name = "Maybe_Maxpool_Size_Tuple"
+
         def __init__(self, maxpool_size_choices):
             self.maxpool_size_choices = maxpool_size_choices
 
@@ -317,6 +357,8 @@ class UtimeRepository:
             return isinstance(value, tuple) and all(True if v is None else v in self.maxpool_size_choices for v in value)
 
     class Maybe_Dimension_Tuple(Group):
+        name = "Maybe_Dimension_Tuple"
+
         def __init__(self, dimension_choices):
             self.dimension_choices = dimension_choices
 
@@ -327,6 +369,7 @@ class UtimeRepository:
             return (isinstance(value, tuple) and all(True if v is None else v in self.dimension_choices for v in value))
 
     class Preprocessor(Group):
+        name = "Preprocessor"
 
         """
 ("ChannelSampler", v["n"])
@@ -407,6 +450,8 @@ or
                 return False
 
     class Maybe_Preprocessor_Tuple(Group):
+        name = "Maybe_Preprocessor_Tuple"
+
         def __init__(self, preprocessors):
             self.preprocessors = preprocessors
 
@@ -439,7 +484,8 @@ or
         convolution_padding = DataGroup("convolution_padding", self.convolution_padding_choices)
         convolution_dilation = DataGroup("convolution_dilation", self.convolution_dilations_choices)
         bias = DataGroup("bias", [True, False])
-        preprocessor_tuple = self.Preprocessor(self.preprocessor_channel_sampler_n_choices,
+        loss = DataGroup("loss", self.losses)
+        preprocessor = self.Preprocessor(self.preprocessor_channel_sampler_n_choices,
                                                self.preprocessor_crop_total_input_choices,
                                                self.preprocessor_crop_sampling_rate_choices,
                                                self.preprocessor_empirical_clip_scaler_q_choices,
@@ -454,7 +500,7 @@ or
                                                self.preprocessor_spectogram_win_length_choices,
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
-        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(preprocessor_tuple)
+        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(preprocessor)
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1018,7 +1064,7 @@ or
                                 )
                     ),
 
-            "UModel": DSL()
+            "UClassifier": DSL()
             .parameter("in_u", dimension)  # in_u == out_enc
             .parameter("in_enc", dimension)
             .parameter("in_dec", dimension, lambda v: [2 * v["in_u"]])
@@ -1151,7 +1197,7 @@ or
                                          & Constructor("bias", Var("mlp_b"))
                                          )
                       )
-            .suffix(Constructor("u_model",
+            .suffix(Constructor("u_classifier",
                                 Constructor("dimensions", Var("dds"))
                                 & Constructor("kernel_sizes", Var("kks"))
                                 & Constructor("maxpool_sizes", Var("mms"))
@@ -1247,22 +1293,23 @@ or
 
             "MSE": Constructor("loss_function") & Literal("MSE") & Literal(None),
 
+            # TODO: enable None (don't know nondeterminism) for preprocessor parameters by extending the set to to all combinations with None
             "ChannelSampler": DSL()
             .parameter("n", DataGroup("ChannelSampler_n", self.preprocessor_channel_sampler_n_choices))
-            .parameter("p", preprocessor_tuple, lambda v: [("ChannelSampler", v["n"])])
+            .parameter("p", preprocessor, lambda v: [("ChannelSampler", v["n"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "Crop": DSL()
             .parameter("total_input", DataGroup("Crop_total_input", self.preprocessor_crop_total_input_choices))
             .parameter("sampling_rate", DataGroup("Crop_sampling_rate", self.preprocessor_crop_sampling_rate_choices))
             .parameter("where", DataGroup("Crop_where", ["left", "middle", "right"]))
-            .parameter("p", preprocessor_tuple, lambda v: [("Crop", v["total_input"], v["sampling_rate"], v["where"])])
+            .parameter("p", preprocessor, lambda v: [("Crop", v["total_input"], v["sampling_rate"], v["where"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "EmpiricalClipScaler": DSL()
             .parameter("q", DataGroup("EmpiricalClipScaler_q", self.preprocessor_empirical_clip_scaler_q_choices))
             .parameter("scale", DataGroup("EmpiricalClipScaler_scale", self.preprocessor_empirical_clip_scaler_scale_choices))
-            .parameter("p", preprocessor_tuple, lambda v: [("EmpiricalClipScaler", v["q"], v["scale"])])
+            .parameter("p", preprocessor, lambda v: [("EmpiricalClipScaler", v["q"], v["scale"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "FIR": DSL()
@@ -1270,17 +1317,17 @@ or
             .parameter("channels", DataGroup("FIR_channels", self.preprocessor_fir_channels_choices))
             .parameter("filter_params", DataGroup("FIR_filter_params", self.preprocessor_fir_filter_params_choices))
             .parameter("zero_phase", DataGroup("FIR_zero_phase", [True, False]))
-            .parameter("p", preprocessor_tuple, lambda v: [("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])])
+            .parameter("p", preprocessor, lambda v: [("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "Normalize": DSL()
-            .parameter("p", preprocessor_tuple, lambda v: [("Normalize",)])
+            .parameter("p", preprocessor, lambda v: [("Normalize",)])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "RobustScaler": DSL()
             .parameter("lower_quantile", DataGroup("RobustScaler_lower_quantile", self.preprocessor_robust_scaler_lower_quantile_choices))
             .parameter("upper_quantile", DataGroup("RobustScaler_upper_quantile", self.preprocessor_robust_scaler_upper_quantile_choices))
-            .parameter("p", preprocessor_tuple, lambda v: [("RobustScaler", v["lower_quantile"], v["upper_quantile"])])
+            .parameter("p", preprocessor, lambda v: [("RobustScaler", v["lower_quantile"], v["upper_quantile"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "Spectogram": DSL()
@@ -1288,29 +1335,216 @@ or
             .parameter("hop_length", DataGroup("Spectogram_hop_length", self.preprocessor_spectogram_hop_length_choices))
             .parameter("win_length", DataGroup("Spectogram_win_length", self.preprocessor_spectogram_win_length_choices))
             .parameter("epoch_len_samples", DataGroup("Spectogram_epoch_len_samples", self.preprocessor_spectogram_epoch_len_samples_choices))
-            .parameter("p", preprocessor_tuple,
+            .parameter("p", preprocessor,
                        lambda v: [("Spectogram", v["n_fft"], v["hop_length"], v["win_length"], v["epoch_len_samples"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "ZNormalize": DSL()
             .parameter("use_global_statistics", DataGroup("ZNormalize_use_global_statistics", [True, False]))
-            .parameter("p", preprocessor_tuple, lambda v: [("ZNormalize", v["use_global_statistics"])])
+            .parameter("p", preprocessor, lambda v: [("ZNormalize", v["use_global_statistics"])])
             .suffix(Constructor("preprocessor", Var("p"))),
 
             "Preprocessor_Sequence": DSL()  # we might want to consider to have no preprocessor at all
-            # .parameter("p", preprocessor_tuple)
+            # .parameter("p", preprocessor)
             .parameter("ps", preprocessor_tuple, lambda v: [()])  # [(v["p"],), (None,)])
             # .argument("x", Constructor("preprocessor", Var("p")))
             .suffix(Constructor("preprocessor_sequence", Var("ps"))),
 
             "Preprocessor_Sequence_Cons": DSL()
-            .parameter("p", preprocessor_tuple)
+            .parameter("p", preprocessor)
             .parameter("pps", preprocessor_tuple)
             .parameter_constraint(lambda v: len(v["pps"]) > 0 and (v["pps"][0] == v["p"] or v["pps"][0] is None))
             .parameter("ps", preprocessor_tuple, lambda v: [v["pps"][1:]])
             .argument("x", Constructor("preprocessor", Var("p")))
             .argument("xs", Constructor("preprocessor_sequence", Var("ps")))
             .suffix(Constructor("preprocessor_sequences", Var("pps"))),
+
+            "UModel": DSL()
+            .parameter("bd", maybe_dimension)
+            .parameter("bk", maybe_kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m_stride", maxpool_stride)
+            .parameter("m_padding", maxpool_padding)
+            .parameter("m_dilation", maxpool_dilation)
+            .parameter("first_d", dropout_p)
+            .parameter("first_af", activation_function)
+            .parameter("first_conv", convolution)
+            .parameter("first_c_stride", convolution_stride)
+            .parameter("first_c_padding", convolution_padding)
+            .parameter("first_c_dilation", convolution_dilation)
+            .parameter("first_b", bias)
+            .parameter("first_e", normalization_eps)
+            .parameter("first_norm", normalization)
+            .parameter("first_m_stride", maxpool_stride)
+            .parameter("first_m_padding", maxpool_padding)
+            .parameter("first_m_dilation", maxpool_dilation)
+            .parameter("fc_k", kernel_size)
+            .parameter("fc_conv", convolution)
+            .parameter("fc_stride", convolution_stride)
+            .parameter("fc_padding", convolution_padding)
+            .parameter("fc_dilation", convolution_dilation)
+            .parameter("fc_b", bias)
+            .parameter("mlp_in", dimension)
+            .parameter("mlp_out", dimension)
+            .parameter("mlp_b", bias)
+            .parameter("dds", dimension_list)
+            .parameter("kks", kernel_size_list)
+            .parameter("mms", maxpool_size_list)
+            .parameter_constraint(lambda v: len(v["dds"]) > 1 and (len(v["dds"]) == len(v["kks"]) == len(v["mms"]))) # since this should be always instantiated by suffix, this predicate should not be necessary
+            .parameter("loss", loss)
+            .parameter("preps", preprocessor_tuple)
+            .argument("loss_f", Constructor("loss_function") & Var("loss"))
+            .argument("peprocessors", Constructor("preprocessor_sequences", Var("preps")))
+            .argument("u",
+                      Constructor("u_classifier",
+                                              Constructor("dimensions", Var("dds"))
+                                              & Constructor("kernel_sizes", Var("kks"))
+                                              & Constructor("maxpool_sizes", Var("mms"))
+                                              )
+                                  & Constructor("u_first_level", Constructor("convolution", Var("first_conv"))
+                                                & Constructor("convolution_stride", Var("first_c_stride"))
+                                                & Constructor("convolution_padding", Var("first_c_padding"))
+                                                & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                                & Constructor("bias", Var("first_b"))
+                                                & Constructor("activation", Var("first_af"))
+                                                & Constructor("dropout_p", Var("first_d"))
+                                                & Constructor("normalization", Var("first_norm"))
+                                                & Constructor("normalization_epsilon", Var("first_e"))
+                                                & Constructor("maxpool_stride", Var("first_m_stride"))
+                                                & Constructor("maxpool_padding", Var("first_m_padding"))
+                                                & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                                )
+                                  & Constructor("bottleneck",
+                                                Constructor("in_and_out", Var("bd"))
+                                                & Constructor("kernel_size", Var("bk"))
+                                                )
+                                  & Constructor("homogeneous",
+                                                Constructor("convolution", Var("conv"))
+                                                & Constructor("convolution_stride", Var("c_stride"))
+                                                & Constructor("convolution_padding", Var("c_padding"))
+                                                & Constructor("convolution_dilation", Var("c_dilation"))
+                                                & Constructor("bias", Var("b"))
+                                                & Constructor("activation", Var("af"))
+                                                & Constructor("normalization", Var("norm"))
+                                                & Constructor("normalization_epsilon", Var("e"))
+                                                & Constructor("maxpool_stride", Var("m_stride"))
+                                                & Constructor("maxpool_padding", Var("m_padding"))
+                                                & Constructor("maxpool_dilation", Var("m_dilation"))
+                                                )
+                                  & Constructor("u_final_conv",
+                                                Constructor("kernel_size", Var("fc_k"))
+                                                & Constructor("convolution", Var("fc_conv"))
+                                                & Constructor("convolution_stride", Var("fc_stride"))
+                                                & Constructor("convolution_padding", Var("fc_padding"))
+                                                & Constructor("convolution_dilation", Var("fc_dilation"))
+                                                & Constructor("bias", Var("fc_b"))
+                                                )
+                                  & Constructor("u_linear_classifier",
+                                                Constructor("linear_layer",
+                                                            Constructor("input", Var("mlp_in"))
+                                                            & Constructor("output", Var("mlp_out"))
+                                                            & Constructor("bias", Var("mlp_b"))
+                                                            )
+                                                )
+                      )
+            .suffix(Constructor("u_model",
+                                Constructor("u_classifier",
+                                            Constructor("dimensions", Var("dds"))
+                                            & Constructor("kernel_sizes", Var("kks"))
+                                            & Constructor("maxpool_sizes", Var("mms"))
+                                            )
+                                & Constructor("u_first_level", Constructor("convolution", Var("first_conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("first_c_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("first_c_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("first_b"))
+                                              & Constructor("bias", Literal(None))
+                                              & Constructor("activation", Var("first_af"))
+                                              & Constructor("activation", Literal(None))
+                                              & Constructor("dropout_p", Var("first_d"))
+                                              & Constructor("dropout_p", Literal(None))
+                                              & Constructor("normalization", Var("first_norm"))
+                                              & Constructor("normalization", Literal(None))
+                                              & Constructor("normalization_epsilon", Var("first_e"))
+                                              & Constructor("normalization_epsilon", Literal(None))
+                                              & Constructor("maxpool_stride", Var("first_m_stride"))
+                                              & Constructor("maxpool_stride", Literal(None))
+                                              & Constructor("maxpool_padding", Var("first_m_padding"))
+                                              & Constructor("maxpool_padding", Literal(None))
+                                              & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                              & Constructor("maxpool_dilation", Literal(None))
+                                              )
+                                & Constructor("bottleneck",
+                                              Constructor("in_and_out", Var("bd"))
+                                              & Constructor("kernel_size", Var("bk"))
+                                              )
+                                & Constructor("homogeneous",
+                                              Constructor("convolution", Var("conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("c_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("c_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("c_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("b"))
+                                              & Constructor("bias", Literal(None))
+                                              & Constructor("activation", Var("af"))
+                                              & Constructor("activation", Literal(None))
+                                              & Constructor("dropout_p", Var("d"))
+                                              & Constructor("dropout_p", Literal(None))
+                                              & Constructor("normalization", Var("norm"))
+                                              & Constructor("normalization", Literal(None))
+                                              & Constructor("normalization_epsilon", Var("e"))
+                                              & Constructor("normalization_epsilon", Literal(None))
+                                              & Constructor("maxpool_stride", Var("m_stride"))
+                                              & Constructor("maxpool_stride", Literal(None))
+                                              & Constructor("maxpool_padding", Var("m_padding"))
+                                              & Constructor("maxpool_padding", Literal(None))
+                                              & Constructor("maxpool_dilation", Var("m_dilation"))
+                                              & Constructor("maxpool_dilation", Literal(None))
+                                              )
+                                & Constructor("u_final_conv",
+                                              Constructor("kernel_size", Var("fc_k"))
+                                              & Constructor("kernel_size", Literal(None))
+                                              & Constructor("convolution", Var("fc_conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("fc_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("fc_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("fc_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("fc_b"))
+                                              & Constructor("bias", Literal(None))
+                                              )
+                                & Constructor("u_linear_classifier",
+                                              Constructor("linear_layer",
+                                                          Constructor("input", Var("mlp_in"))
+                                                          & Constructor("input", Literal(None))
+                                                          & Constructor("output", Var("mlp_out"))
+                                                          & Constructor("output", Literal(None))
+                                                          & Constructor("bias", Var("mlp_b"))
+                                                          & Constructor("bias", Literal(None))
+                                                          )
+                                              )
+                                & Constructor("loss_function", Var("loss"))
+                                & Constructor("loss_function", Literal(None))
+                                & Constructor("preprocessors", Var("preps"))
+                                )
+                    )
 
 
         }
@@ -1340,11 +1574,11 @@ or
                                             dds, ds, kks, ks, mms, ms, enc, dec, u_model:
                                 f"U_Model_Structure({enc}, {dec}, {u_model})"),
             "LinearLayer": (lambda i, o, b: f"LinearLayer({i}, {o}, {b})"),
-            "UModel": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
+            "UClassifier": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
                               first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
                               fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
                               dds, ds, kks, ks, mms, ms, enc, dec, u, dc, mlp:
-                       f"U_Model({enc}, {dec}, {u}, {dc}, {mlp})"),
+                       f"U_Classifier({enc}, {dec}, {u}, {dc}, {mlp})"),
 
         }
 
@@ -1440,7 +1674,15 @@ if __name__ == "__main__":
                            convolution_kernel_size_choices=[5, 3, 2], convolution_stride_choices=[1, ],
                            convolution_padding_choices=[0, ], convolution_dilations_choices=[1, ],
                            maxpool_size_choices=[3, 5], maxpool_stride_choices=[1,], maxpool_padding_choices=[0, ],
-                           maxpool_dilation_choices=[1, ])
+                           maxpool_dilation_choices=[1, ],
+                           preprocessor_channel_sampler_n_choices=[1],
+                           preprocessor_crop_total_input_choices=[128], preprocessor_crop_sampling_rate_choices=[64],
+                           preprocessor_empirical_clip_scaler_q_choices=[0.9], preprocessor_empirical_clip_scaler_scale_choices=[1],
+                           preprocessor_fir_sampling_rate_choices=[64], preprocessor_fir_channels_choices=["channel"],
+                           preprocessor_fir_filter_params_choices={"channel": "filter_param"},
+                           preprocessor_robust_scaler_lower_quantile_choices=[0.25], preprocessor_robust_scaler_upper_quantile_choices=[0.75],
+                           preprocessor_spectogram_n_fft_choices=[256], preprocessor_spectogram_hop_length_choices=[64],
+                           preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1])
 
     target0 = (
             Constructor("u_structure",
@@ -1494,7 +1736,7 @@ if __name__ == "__main__":
                           )
     )
 
-    target2 = (Constructor("u_model",
+    target2 = (Constructor("u_classifier",
                                 Constructor("dimensions", Literal((256, 128, 128)))
                                 & Constructor("kernel_sizes", Literal((2, 3, 5)))
                                 & Constructor("maxpool_sizes", Literal((5, 5, 3)))
@@ -1547,7 +1789,7 @@ if __name__ == "__main__":
                                   )
                )
 
-    target3 = (Constructor("u_model",
+    target3 = (Constructor("u_classifier",
                            Constructor("dimensions", Literal((None, 128, 128)))
                            & Constructor("kernel_sizes", Literal((2, None, 5)))
                            & Constructor("maxpool_sizes", Literal((None, 5, None)))
@@ -1600,8 +1842,14 @@ if __name__ == "__main__":
                              )
                )
 
+    target4 = Constructor("u_model",
+                          target2
+                          & Constructor("loss_function", Literal("MSE"))
+                          & Constructor("preprocessors", Literal(()))
+                          )
 
-    target = target3
+    # TODO: debug Preprocessor group
+    target = target4
 
     synthesizer = Synthesizer(repo.specification(), {})
 
@@ -1610,7 +1858,7 @@ if __name__ == "__main__":
     trees = search_space.enumerate_trees(target, 10)
 
     for t in trees:
-        #print(t)
-        print(t.interpret(repo.pretty_term_algebra()))
+        print(t)
+        #print(t.interpret(repo.pretty_term_algebra()))
 
 

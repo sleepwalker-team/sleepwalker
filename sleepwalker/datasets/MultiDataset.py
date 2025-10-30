@@ -61,7 +61,7 @@ class MultiDataset(Dataset):
         return self.extra_target 
 
     def n_patients(self):
-        return sum([d.n_patients for d in self.datasets])
+        return sum([d.get_n_patients() for d in self.datasets])
 
     def __len__(self):
         return self.len

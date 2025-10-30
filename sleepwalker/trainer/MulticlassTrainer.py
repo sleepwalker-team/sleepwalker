@@ -345,7 +345,7 @@ class MulticlassTrainer(ABC):
                         logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
                         shutil.rmtree(self.best_checkpoint)
                     
-                    self.best_checkpoint = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix="sleepwalker_best_model")) 
+                    self.best_checkpoint = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix="sleepwalker_best_model_")) 
                     self.best_model_idx = imin
 
                 if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):

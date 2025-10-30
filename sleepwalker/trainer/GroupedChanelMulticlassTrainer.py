@@ -36,19 +36,19 @@ class ChannelTensor:
         # -> (n_repeat, T, G)
         return torch.stack(out, dim=0)
 
-def sample_channels(data, n_repeat, groups, rng):
-    new_data = []
-    for _ in range(n_repeat):
-        selected = []
+# def sample_channels(data, n_repeat, groups, rng):
+#     new_data = []
+#     for _ in range(n_repeat):
+#         selected = []
 
-        for g in groups:
-            available = [col for col in g if col in data.columns]
-            if not available:
-                raise ValueError(f"No available columns in group {g}")
+#         for g in groups:
+#             available = [col for col in g if col in data.columns]
+#             if not available:
+#                 raise ValueError(f"No available columns in group {g}")
             
-            selected.append(rng.choice(available))
-        new_data.append(torch.from_numpy(data[selected].values).float())
-    return new_data
+#             selected.append(rng.choice(available))
+#         new_data.append(torch.from_numpy(data[selected].values).float())
+#     return new_data
     
 class GroupedChanelMulticlassTrainer(MulticlassTrainer):
     def __init__(
@@ -124,7 +124,7 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
                         new_x.append(x.sample(self.n_repeat_train, self.rng))
 
                     x = torch.vstack(new_x).to(device)
-                    x = model.apply_preprocessors(x, idx)
+                    x = model.apply_preprocessors(x, idx) 
                     model.preprocessors[idx].update(x)
                     logger.progress_advance(batch_size)
             else:

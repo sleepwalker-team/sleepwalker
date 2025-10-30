@@ -24,7 +24,8 @@ class Spectogram(Preprocessor):
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
         x = data
         B, T, D = x.shape
-        self.window = self.window.to(x.device)
+        if self.window.device != x.device:
+            self.window = self.window.to(x.device)
         
         if self.epoch_len_samples is not None:
             L = T // self.epoch_len_samples

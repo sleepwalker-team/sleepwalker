@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import bisect
 from collections import Counter, defaultdict
 import copy
 from dataclasses import dataclass
 from functools import partial
 import os
 import traceback
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -123,7 +124,8 @@ class BaseDataset(Dataset, ABC):
         remove_unmapped_events : bool = True, 
         get_item: Optional[Callable] = None,
         transform: Optional[Any] = None,
-        online_filtering:bool = True,
+        # online_filtering:bool = True,
+        cache_patients:int = 0,
         num_workers:int = 4,
         online_max_tries:int = 128
         # event_type: str = "window",
@@ -142,15 +144,11 @@ class BaseDataset(Dataset, ABC):
         self.target_resolution = pd.to_timedelta(target_resolution)
         self.get_item_callback = get_item        
         self.transform = transform
-        self.online_filtering = online_filtering
+        self.cache_patients = cache_patients
+        self.cache = {}
+
         self.online_max_tries = online_max_tries
         self.initialized = False
-        # self.num_workers = int(num_workers)
-        # self.event_type = event_type
-        # self.normalizer_fit_strategy = normalizer_fit_strategy or {"mode": "full"}
-
-        # # Channels
-        # self._specs = [ChannelSpec(**c) if not isinstance(c, ChannelSpec) else c for c in channels]
 
         # # Events/classes
         if event_mapping is not None:
@@ -190,8 +188,11 @@ class BaseDataset(Dataset, ABC):
         freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
         return int(self.total_input.total_seconds() / freq.total_seconds())
 
+    def get_n_patients(self) -> int:
+        return len(self.patients)
+
     def __len__(self):
-        return len(self.ids)
+        return sum([p[3] for p in self.patients])
 
     def get_events(self, df, start_date):
         start_date += self.total_input // 2 - self.target_resolution // 2
@@ -200,32 +201,7 @@ class BaseDataset(Dataset, ABC):
         freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
         return df.query(start_date, end_date, freq=freq, sparse=False, labels=self.classes)
 
-        # time_index = pd.date_range(start=start_date, end=end_date, freq=freq)
-
-        # onehot_df = pd.DataFrame(0, index=time_index, columns=self.classes, dtype=int)
-
-        # dff = df[(df["Starttime"] >= start_date) & (df["Endtime"] <= end_date)]
-        # for _, row in dff.iterrows():
-        #     label = row["Label"]
-        #     if label not in self.classes:
-        #         continue
-        #     event_start = row["Starttime"]
-        #     event_end = row["Endtime"]
-        #     # Set 1 for all time points within the event interval
-        #     mask = (onehot_df.index >= event_start) & (onehot_df.index < event_end)
-        #     onehot_df.loc[mask, label] = 1
-
-        # return onehot_df
-
-        # target_window_is_middle
-        #duration_by_label = dff.groupby("Label")["Duration"].sum().to_dict()
-        #return torch.tensor([duration_by_label.get(c, 0.0) for c in self.classes])
-        # dff_sum = dff.sum(axis=0) * self.target_resolution.total_seconds()
-        # return torch.tensor(dff_sum[self.classes].values)
-
-    def prepare_patient(self, edf_path) -> Tuple[str, list[int], Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[dict], int]:
-        ids = []
-        n_skipped = 0
+    def prepare_patient(self, edf_path) -> Tuple[str, int, Optional[EventIndex], Optional[EventIndex], Optional[dict], Optional[pd.Timestamp], Set[str]]:
         channel_names = [c.name for c in self.channels]
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
@@ -246,7 +222,9 @@ class BaseDataset(Dataset, ABC):
             for col in normalizers.keys():
                 if col in data_df.columns:
                     X = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                    normalizers[col].fit(X = X, fs = self.sample_frequency) 
+                    normalizers[col].fit(X = X) 
+
+            # TODO If caching, then transform data inplace and return -> 
 
             if self.event_mapping is not None:
                 if self.has_extra_target():
@@ -279,43 +257,58 @@ class BaseDataset(Dataset, ABC):
                 df = None
                 df_additional = None
 
-            if self.get_item_callback is not None and not self.online_filtering:
-                while start < end-self.total_input:
-                    if self.get_item_callback is not None:
-                        item = self.get_item(edf_path, start, normalizers)
-                        if item is not None:
-                            ids.append((edf_path, start))
-                        else:
-                            n_skipped += 1
-                    else:
-                        ids.append((edf_path, start))
-                    start += self.target_resolution
-            else:
-                ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
+            n_items = int((end-self.total_input-start)/self.target_resolution)
 
-            if len(ids) == 0:
+            if n_items == 0:
                 raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
+                
+            return edf_path, n_items, df, df_additional, normalizers, start, classes.union(extra_classes) 
 
-            return edf_path, ids, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
+            # if self.get_item_callback is not None and not self.online_filtering:
+            #     while start < end-self.total_input:
+            #         if self.get_item_callback is not None:
+            #             item = self.get_item(edf_path, start, normalizers)
+            #             if item is not None:
+            #                 ids.append((edf_path, start))
+            #             else:
+            #                 n_skipped += 1
+            #         else:
+            #             ids.append((edf_path, start))
+            #         start += self.target_resolution
+
+            #     if len(ids) == 0:
+            #         raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")    
+            #     return edf_path, ids, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
+            # else:
+            #     n_items = int((end-self.total_input).total_seconds()/self.target_resolution.total_seconds())
+            #     ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
+
+            #     if n_items == 0:
+            #         raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
+                 
+            #     return edf_path, n_items, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
         #except (OSError, ValueError, KeyError) as e:
         except Exception as e:
             logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
             # logger.warning(traceback.format_exc())
             # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
 
-            return edf_path, ids, None, None, None, n_skipped, classes.union(extra_classes) # type: ignore
+            return edf_path, 0, None, None, None, None, classes.union(extra_classes) # type: ignore
 
     def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
+        if self.cache_patients > 0:
+            rng = np.random.default_rng()
+            patients = rng.choice(patients, size=self.cache_patients, replace=False)
+
         events = {}
         events_additional = {}
         
-        all_ids = []
+        upper_bounds = []
+        final_patients = []
+
         all_normalizers = {}
         all_classes = set()
-        n_patients = 0
-        n_skipped_total = 0
         total_n_patients = len(patients)
-        final_patients = [] 
 
         if num_workers > 1:
             pool = multiprocessing.Pool(num_workers)
@@ -324,20 +317,25 @@ class BaseDataset(Dataset, ABC):
             iter_objects = patients
 
         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
+
+        lower = 0
         for ret_value in iter_objects: 
             if num_workers > 1:
-                fpath, ids, df, df_additional, normalizers, n_skipped, classes = ret_value
+                fpath, n_items, df, df_additional, normalizers, start_date, classes = ret_value
             else:
-                fpath, ids, df, df_additional, normalizers, n_skipped, classes = self.prepare_patient(ret_value)
+                fpath, n_items, df, df_additional, normalizers, start_date, classes = self.prepare_patient(ret_value)
             
-            if len(ids) > 0:
-                all_ids.extend(ids)
+            # if len(ids) > 0:
+            if n_items > 0:
+                final_patients.append( (fpath, lower, start_date, n_items) )
+                upper_bounds.append(lower + n_items)
+                lower += n_items
+
                 events[fpath] = df
                 all_normalizers[fpath] = normalizers
                 events_additional[fpath] = df_additional
-                n_patients += 1
-                n_skipped_total += n_skipped # type: ignore
-                final_patients.append(fpath)
+                # n_patients += 1
+                # n_skipped_total += n_skipped # type: ignore
                 all_classes = all_classes.union(classes)
             logger.progress_advance(1)
         
@@ -348,15 +346,16 @@ class BaseDataset(Dataset, ABC):
             pool.join() # type: ignore
         
         self.patients = final_patients        
-        self.ids = all_ids
+        self.upper_bounds = upper_bounds
         self.events = events
         self.events_additional = events_additional
-        self.n_patients = n_patients
+        # self.n_patients = n_patients
         self.all_normalizers = all_normalizers
         if len(self.event_mapping) == 0:
             self.classes = sorted(list(all_classes))
 
-        logger.info(f"Dataset initialized with {self.n_patients}/{total_n_patients} patients. Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. ")
+        #  Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. 
+        logger.info(f"Dataset initialized with {len(self.patients)}/{total_n_patients} patients.There are {len(self)} windows available.")
         self.initialized = True
 
     def get_item(self, edf_path:str, start_date:pd.Timestamp, normalizers:Optional[dict[str,Normalizer]]):
@@ -369,7 +368,7 @@ class BaseDataset(Dataset, ABC):
             for col, norm in normalizers.items():
                 if col in x_df.columns:
                     vals = x_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                    x_df[col] = norm.transform(vals, self.sample_frequency).ravel()
+                    x_df[col] = norm.transform(vals).ravel()
 
         # Target time at center for window/sequence modes
         t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
@@ -409,25 +408,28 @@ class BaseDataset(Dataset, ABC):
         return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        edf_path, start_date = self.ids[idx]
-        normalizer = self.all_normalizers[edf_path]
-        item = self.get_item(edf_path, start_date, normalizer)
-
         cnt = 0
-        while item is None:
-            idx = np.random.choice(range(len(self.ids)))
-            edf_path, start_date = self.ids[idx]
+        item = None
+
+        while True:
+            pidx = bisect.bisect_right(self.upper_bounds, idx)
+            edf_path, lower, start_date, n_items = self.patients[pidx]
+            new_idx = idx - lower 
+            cur_date = start_date + self.target_resolution * new_idx 
             normalizer = self.all_normalizers[edf_path]
             
             try:
-                item = self.get_item(edf_path, start_date, normalizer)
+                item = self.get_item(edf_path, cur_date, normalizer)
             except Exception as e:
                 pass
             finally:
-                cnt += 1
-                if cnt > self.online_max_tries:
+                if cnt > self.online_max_tries or item is not None:
                     break
+
+                cnt += 1
+                idx = np.random.choice(range(len(self)))
         
-        if cnt > self.online_max_tries:
+        if cnt > self.online_max_tries or item is None:
             raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {edf_path}")
-        return item
+        else:
+            return item

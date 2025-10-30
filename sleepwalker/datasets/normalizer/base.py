@@ -7,9 +7,9 @@ from abc import ABC, abstractmethod
 class Normalizer(ABC):
 
     @abstractmethod
-    def fit(self, X: np.ndarray, fs: float) -> "Normalizer":
+    def fit(self, X: np.ndarray) -> Normalizer:
         ...
 
     @abstractmethod
-    def transform(self, X: np.ndarray, fs: float) -> np.ndarray:
+    def transform(self, X: np.ndarray) -> np.ndarray:
         ...

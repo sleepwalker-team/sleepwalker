@@ -29,8 +29,8 @@ class Normalize(Preprocessor):
             new_M2 = self.M2 + batch_M2 + delta**2 * self.count * batch_count / total_count
 
             # Commit updates
-            self.mean = new_mean
-            self.M2 = new_M2
+            self.mean.copy_(new_mean)
+            self.M2.copy_(new_M2)
             self.count = total_count
 
     def requires_warmup(self) -> bool:

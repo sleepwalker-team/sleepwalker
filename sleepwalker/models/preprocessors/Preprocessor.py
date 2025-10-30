@@ -7,6 +7,7 @@ class Preprocessor(nn.Module, ABC):
     def __init__(self):
         super().__init__()
 
+    @torch.inference_mode()
     @abstractmethod
     def update(self, data: torch.Tensor):
         ...

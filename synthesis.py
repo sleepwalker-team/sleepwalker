@@ -408,8 +408,56 @@ or
             self.spectogram_win_length_choices = spectogram_win_length_choices
             self.spectogram_epoch_len_samples_choices = spectogram_epoch_len_samples_choices
 
+        def iter_channel_sampler(self):
+            for n in self.channel_sampler_n_choices:
+                yield ("ChannelSampler", n)
+
+        def iter_crop(self):
+            for total_input in self.crop_total_input_choices:
+                for sampling_rate in self.crop_sampling_rate_choices:
+                    for where in ["left", "middle", "right"]:
+                        yield ("Crop", total_input, sampling_rate, where)
+
+        def iter_empirical_clip_scaler(self):
+            for q in self.empirical_clip_scaler_q_choices:
+                for scale in self.empirical_clip_scaler_scale_choices:
+                    yield ("EmpiricalClipScaler", q, scale)
+
+        def iter_fir(self):
+            for sampling_rate in self.fir_sampling_rate_choices:
+                for channels in self.fir_channels_choices:
+                    for filter_params in self.fir_filter_params_choices:
+                        for zero_phase in [True, False]:
+                            yield ("FIR", sampling_rate, channels, filter_params, zero_phase)
+
+        def iter_normalize(self):
+            yield ("Normalize",)
+
+        def iter_robust_scaler(self):
+            for lower_quantile in self.robust_scaler_lower_quantile_choices:
+                for upper_quantile in self.robust_scaler_upper_quantile_choices:
+                    yield ("RobustScaler", lower_quantile, upper_quantile)
+
+        def iter_spectogram(self):
+            for n_fft in self.spectogram_n_fft_choices:
+                for hop_length in self.spectogram_hop_length_choices:
+                    for win_length in self.spectogram_win_length_choices:
+                        for epoch_len_samples in self.spectogram_epoch_len_samples_choices:
+                            yield ("Spectogram", n_fft, hop_length, win_length, epoch_len_samples)
+
+        def iter_znormalize(self):
+            for use_global_statistics in [True, False]:
+                yield ("ZNormalize", use_global_statistics)
+
         def __iter__(self):
-            return super().__iter__()
+            yield from self.iter_channel_sampler()
+            yield from self.iter_crop()
+            yield from self.iter_empirical_clip_scaler()
+            yield from self.iter_fir()
+            yield from self.iter_normalize()
+            yield from self.iter_robust_scaler()
+            yield from self.iter_spectogram()
+            yield from self.iter_znormalize()
 
         def __contains__(self, value: object) -> bool:
             if (isinstance(value, tuple)):
@@ -448,6 +496,135 @@ or
                     return False
             else:
                 return False
+
+
+    class Maybe_Preprocessor(Group):
+            name = "Maybe_Preprocessor"
+
+            def __init__(self, channel_sampler_n_choices, crop_total_input_choices, crop_sampling_rate_choices,
+                         empirical_clip_scaler_q_choices, empirical_clip_scaler_scale_choices,
+                         fir_sampling_rate_choices, fir_channels_choices, fir_filter_params_choices,
+                         robust_scaler_lower_quantile_choices, robust_scaler_upper_quantile_choices,
+                         spectogram_n_fft_choices,
+                         spectogram_hop_length_choices, spectogram_win_length_choices,
+                         spectogram_epoch_len_samples_choices):
+                self.channel_sampler_n_choices = channel_sampler_n_choices
+                self.channel_sampler_n_choices.append(None)
+                self.crop_total_input_choices = crop_total_input_choices
+                self.crop_total_input_choices.append(None)
+                self.crop_sampling_rate_choices = crop_sampling_rate_choices
+                self.crop_sampling_rate_choices.append(None)
+                self.empirical_clip_scaler_q_choices = empirical_clip_scaler_q_choices
+                self.empirical_clip_scaler_q_choices.append(None)
+                self.empirical_clip_scaler_scale_choices = empirical_clip_scaler_scale_choices
+                self.empirical_clip_scaler_scale_choices.append(None)
+                self.fir_sampling_rate_choices = fir_sampling_rate_choices
+                self.fir_sampling_rate_choices.append(None)
+                self.fir_channels_choices = fir_channels_choices
+                self.fir_channels_choices.append(None)
+                self.fir_filter_params_choices = fir_filter_params_choices
+                self.fir_filter_params_choices.append(None)
+                self.robust_scaler_lower_quantile_choices = robust_scaler_lower_quantile_choices
+                self.robust_scaler_lower_quantile_choices.append(None)
+                self.robust_scaler_upper_quantile_choices = robust_scaler_upper_quantile_choices
+                self.robust_scaler_upper_quantile_choices.append(None)
+                self.spectogram_n_fft_choices = spectogram_n_fft_choices
+                self.spectogram_n_fft_choices.append(None)
+                self.spectogram_hop_length_choices = spectogram_hop_length_choices
+                self.spectogram_hop_length_choices.append(None)
+                self.spectogram_win_length_choices = spectogram_win_length_choices
+                self.spectogram_win_length_choices.append(None)
+                self.spectogram_epoch_len_samples_choices = spectogram_epoch_len_samples_choices
+                self.spectogram_epoch_len_samples_choices.append(None)
+
+            def iter_channel_sampler(self):
+                for n in self.channel_sampler_n_choices:
+                    yield ("ChannelSampler", n)
+
+            def iter_crop(self):
+                for total_input in self.crop_total_input_choices:
+                    for sampling_rate in self.crop_sampling_rate_choices:
+                        for where in ["left", "middle", "right"]:
+                            yield ("Crop", total_input, sampling_rate, where)
+
+            def iter_empirical_clip_scaler(self):
+                for q in self.empirical_clip_scaler_q_choices:
+                    for scale in self.empirical_clip_scaler_scale_choices:
+                        yield ("EmpiricalClipScaler", q, scale)
+
+            def iter_fir(self):
+                for sampling_rate in self.fir_sampling_rate_choices:
+                    for channels in self.fir_channels_choices:
+                        for filter_params in self.fir_filter_params_choices:
+                            for zero_phase in [True, False]:
+                                yield ("FIR", sampling_rate, channels, filter_params, zero_phase)
+
+            def iter_normalize(self):
+                yield ("Normalize",)
+
+            def iter_robust_scaler(self):
+                for lower_quantile in self.robust_scaler_lower_quantile_choices:
+                    for upper_quantile in self.robust_scaler_upper_quantile_choices:
+                        yield ("RobustScaler", lower_quantile, upper_quantile)
+
+            def iter_spectogram(self):
+                for n_fft in self.spectogram_n_fft_choices:
+                    for hop_length in self.spectogram_hop_length_choices:
+                        for win_length in self.spectogram_win_length_choices:
+                            for epoch_len_samples in self.spectogram_epoch_len_samples_choices:
+                                yield ("Spectogram", n_fft, hop_length, win_length, epoch_len_samples)
+
+            def iter_znormalize(self):
+                for use_global_statistics in [True, False]:
+                    yield ("ZNormalize", use_global_statistics)
+
+            def __iter__(self):
+                yield from self.iter_channel_sampler()
+                yield from self.iter_crop()
+                yield from self.iter_empirical_clip_scaler()
+                yield from self.iter_fir()
+                yield from self.iter_normalize()
+                yield from self.iter_robust_scaler()
+                yield from self.iter_spectogram()
+                yield from self.iter_znormalize()
+
+            def __contains__(self, value: object) -> bool:
+                if (isinstance(value, tuple)):
+                    if value[0] == "ChannelSampler":
+                        return len(value) == 2 and value[1] in self.channel_sampler_n_choices
+                    elif value[0] == "Crop":
+                        return (len(value) == 4 and
+                                value[1] in self.crop_total_input_choices and
+                                value[2] in self.crop_sampling_rate_choices and
+                                value[3] in ["left", "middle", "right"])
+                    elif value[0] == "EmpiricalClipScaler":
+                        return (len(value) == 3 and
+                                value[1] in self.empirical_clip_scaler_q_choices and
+                                value[2] in self.empirical_clip_scaler_scale_choices)
+                    elif value[0] == "FIR":
+                        return (len(value) == 5 and
+                                value[1] in self.fir_sampling_rate_choices and
+                                value[2] in self.fir_channels_choices and
+                                value[3] in self.fir_filter_params_choices and
+                                isinstance(value[4], bool))
+                    elif value[0] == "Normalize":
+                        return len(value) == 1
+                    elif value[0] == "RobustScaler":
+                        return (len(value) == 3 and
+                                value[1] in self.robust_scaler_lower_quantile_choices and
+                                value[2] in self.robust_scaler_upper_quantile_choices)
+                    elif value[0] == "Spectogram":
+                        return (len(value) == 5 and
+                                value[1] in self.spectogram_n_fft_choices and
+                                value[2] in self.spectogram_hop_length_choices and
+                                value[3] in self.spectogram_win_length_choices and
+                                value[4] in self.spectogram_epoch_len_samples_choices)
+                    elif value[0] == "ZNormalize":
+                        return len(value) == 2 and isinstance(value[1], bool)
+                    else:
+                        return False
+                else:
+                    return False
 
     class Maybe_Preprocessor_Tuple(Group):
         name = "Maybe_Preprocessor_Tuple"
@@ -500,7 +677,22 @@ or
                                                self.preprocessor_spectogram_win_length_choices,
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
-        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(preprocessor)
+        maybe_preprocessor = self.Maybe_Preprocessor(self.preprocessor_channel_sampler_n_choices,
+                                               self.preprocessor_crop_total_input_choices,
+                                               self.preprocessor_crop_sampling_rate_choices,
+                                               self.preprocessor_empirical_clip_scaler_q_choices,
+                                               self.preprocessor_empirical_clip_scaler_scale_choices,
+                                               self.preprocessor_fir_sampling_rate_choices,
+                                               self.preprocessor_fir_channels_choices,
+                                               self.preprocessor_fir_filter_params_choices,
+                                               self.preprocessor_robust_scaler_lower_quantile_choices,
+                                               self.preprocessor_robust_scaler_upper_quantile_choices,
+                                               self.preprocessor_spectogram_n_fft_choices,
+                                               self.preprocessor_spectogram_hop_length_choices,
+                                               self.preprocessor_spectogram_win_length_choices,
+                                               self.preprocessor_spectogram_epoch_len_samples_choices
+                                               )
+        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1293,11 +1485,10 @@ or
 
             "MSE": Constructor("loss_function") & Literal("MSE") & Literal(None),
 
-            # TODO: enable None (don't know nondeterminism) for preprocessor parameters by extending the set to to all combinations with None
             "ChannelSampler": DSL()
             .parameter("n", DataGroup("ChannelSampler_n", self.preprocessor_channel_sampler_n_choices))
             .parameter("p", preprocessor, lambda v: [("ChannelSampler", v["n"])])
-            .suffix(Constructor("preprocessor", Var("p"))),
+            .suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Literal(("ChannelSampler", None)))),
 
             "Crop": DSL()
             .parameter("total_input", DataGroup("Crop_total_input", self.preprocessor_crop_total_input_choices))
@@ -1351,13 +1542,13 @@ or
             .suffix(Constructor("preprocessor_sequence", Var("ps"))),
 
             "Preprocessor_Sequence_Cons": DSL()
-            .parameter("p", preprocessor)
+            .parameter("p", maybe_preprocessor)
             .parameter("pps", preprocessor_tuple)
             .parameter_constraint(lambda v: len(v["pps"]) > 0 and (v["pps"][0] == v["p"] or v["pps"][0] is None))
             .parameter("ps", preprocessor_tuple, lambda v: [v["pps"][1:]])
             .argument("x", Constructor("preprocessor", Var("p")))
             .argument("xs", Constructor("preprocessor_sequence", Var("ps")))
-            .suffix(Constructor("preprocessor_sequences", Var("pps"))),
+            .suffix(Constructor("preprocessor_sequence", Var("pps"))),
 
             "UModel": DSL()
             .parameter("bd", maybe_dimension)
@@ -1402,7 +1593,7 @@ or
             .parameter("loss", loss)
             .parameter("preps", preprocessor_tuple)
             .argument("loss_f", Constructor("loss_function") & Var("loss"))
-            .argument("peprocessors", Constructor("preprocessor_sequences", Var("preps")))
+            .argument("preprocessors", Constructor("preprocessor_sequence", Var("preps")))
             .argument("u",
                       Constructor("u_classifier",
                                               Constructor("dimensions", Var("dds"))
@@ -1679,7 +1870,7 @@ if __name__ == "__main__":
                            preprocessor_crop_total_input_choices=[128], preprocessor_crop_sampling_rate_choices=[64],
                            preprocessor_empirical_clip_scaler_q_choices=[0.9], preprocessor_empirical_clip_scaler_scale_choices=[1],
                            preprocessor_fir_sampling_rate_choices=[64], preprocessor_fir_channels_choices=["channel"],
-                           preprocessor_fir_filter_params_choices={"channel": "filter_param"},
+                           preprocessor_fir_filter_params_choices=[(("channel", "filter_param"),)],
                            preprocessor_robust_scaler_lower_quantile_choices=[0.25], preprocessor_robust_scaler_upper_quantile_choices=[0.75],
                            preprocessor_spectogram_n_fft_choices=[256], preprocessor_spectogram_hop_length_choices=[64],
                            preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1])
@@ -1845,10 +2036,13 @@ if __name__ == "__main__":
     target4 = Constructor("u_model",
                           target2
                           & Constructor("loss_function", Literal("MSE"))
-                          & Constructor("preprocessors", Literal(()))
+                          & Constructor("preprocessors", Literal((
+                                            ("ChannelSampler", None),
+                                            ("FIR", 64, None, None, False),
+                                            None
+                                            )))
                           )
 
-    # TODO: debug Preprocessor group
     target = target4
 
     synthesizer = Synthesizer(repo.specification(), {})

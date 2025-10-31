@@ -37,16 +37,18 @@ import torch.multiprocessing as mp
 
 mp.set_sharing_strategy('file_system')
 
-batch_size = 256
+batch_size = 512
 # batch_size = 196
 epochs = 200
 total_input = "630s"
 target_resolution = "30s"
 n_samples = 200_000
 experiment_name = "grouped_transformer"
-num_workers_dataset = 8
-num_workers_dataloader = 8
+num_workers_dataset = 12
+num_workers_dataloader = 12
 sample_frequency = 100
+preload_windows = 30_000
+
 groups = [[
     "F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2",  # ABC, MNC, MROS, Ruhrland
     "C3_M2", "C4_M1", "O2_M1", "O1_M2", # Apples
@@ -64,13 +66,12 @@ with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
     TRACKING_URI=f.read().strip()
 ARTIFACT_URI="/raid/mlruns"
 
-#logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
-
+logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
 logger.start_run(run_name=experiment_name)
 
 # TRAIN / VAL
 def build_abc(edf_path):
-    edf_files = get_edf_files_in_repo(edf_path, recursive=True)[:10] # XXX
+    edf_files = get_edf_files_in_repo(edf_path, recursive=True) #[:10] # XXX
     train_patients, test_patients = random_split(edf_files, test_frac=0.1)
     
     def _create(patients):
@@ -101,9 +102,9 @@ def build_abc(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows,
             total_input = total_input, 
-            target_resolution = target_resolution
+            target_resolution = target_resolution,
         )
 
     with suppress_stdout_logging(logger):
@@ -111,7 +112,7 @@ def build_abc(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -145,7 +146,7 @@ def build_apples(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -155,7 +156,7 @@ def build_apples(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
     logger.info(f"Loaded {train_ds.get_n_patients()} / {len(train_patients)} patients for training and {test_ds.get_n_patients()} / {len(test_patients)} patients for validation")
@@ -189,7 +190,7 @@ def build_cap(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -199,7 +200,7 @@ def build_cap(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -238,7 +239,7 @@ def build_isruc(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -248,7 +249,7 @@ def build_isruc(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -282,7 +283,7 @@ def build_mnc(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -292,7 +293,7 @@ def build_mnc(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -328,7 +329,7 @@ def build_nchsdb(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -338,7 +339,7 @@ def build_nchsdb(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -371,7 +372,7 @@ def build_mros(edf_path):
             sample_frequency = sample_frequency,
             event_mapping = event_mapping,
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -381,7 +382,7 @@ def build_mros(edf_path):
         train_ds = _create(train_patients)
         logger.uncontext()
 
-        logger.context("TEST")
+        logger.context("VAL")
         test_ds = _create(test_patients)
         logger.uncontext()
 
@@ -391,7 +392,7 @@ def build_mros(edf_path):
 # TEST
 
 def build_sleepedfx(edf_path):
-    edf_files = get_edf_files_in_repo(edf_path, recursive=True)[:10] # XXX
+    edf_files = get_edf_files_in_repo(edf_path, recursive=True)# [:10] # XXX
 
     with suppress_stdout_logging(logger):
         dataset = SleepEDFx(
@@ -411,7 +412,7 @@ def build_sleepedfx(edf_path):
                 "sleep stage r": "rem"
             },
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -441,7 +442,7 @@ def build_svuh_ucd(edf_path):
                     "5": "n3"
             },
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -476,7 +477,7 @@ def build_ruhrland(edf_path):
                 "rem": "rem"
             },
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups), 
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -504,7 +505,7 @@ def build_shhs(edf_path):
                 "rem sleep|5": "rem"
             },
             get_item = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups), 
-            #online_filtering = True, 
+            preload_windows = preload_windows, 
             total_input = total_input, 
             target_resolution = target_resolution
         )
@@ -517,29 +518,29 @@ logger.context("ABC")
 ds.append(build_abc("/raid/sleepwalker/abc"))
 logger.uncontext()
 
-# logger.context("Apples")
-# ds.append(build_apples("/raid/sleepwalker/apples/polysomnography"))
-# logger.uncontext()
+logger.context("Apples")
+ds.append(build_apples("/raid/sleepwalker/apples/polysomnography"))
+logger.uncontext()
 
-# logger.context("CAP")
-# ds.append(build_cap("/raid/sleepwalker/cap"))
-# logger.uncontext()
+logger.context("CAP")
+ds.append(build_cap("/raid/sleepwalker/cap"))
+logger.uncontext()
 
-# logger.context("ISRUC")
-# ds.append(build_isruc("/raid/sleepwalker/isruc"))
-# logger.uncontext()
+logger.context("ISRUC")
+ds.append(build_isruc("/raid/sleepwalker/isruc"))
+logger.uncontext()
 
-# logger.context("MNC")
-# ds.append(build_mnc("/raid/sleepwalker/mnc/cnc"))
-# logger.uncontext()
+logger.context("MNC")
+ds.append(build_mnc("/raid/sleepwalker/mnc/cnc"))
+logger.uncontext()
 
-# logger.context("NCHSDB")
-# ds.append(build_nchsdb("/raid/sleepwalker/nchsdb/sleep_data"))
-# logger.uncontext()
+logger.context("NCHSDB")
+ds.append(build_nchsdb("/raid/sleepwalker/nchsdb/sleep_data"))
+logger.uncontext()
 
-# logger.context("MROS")
-# ds.append(build_mros("/raid/sleepwalker/mros"))
-# logger.uncontext()
+logger.context("MROS")
+ds.append(build_mros("/raid/sleepwalker/mros"))
+logger.uncontext()
 
 train_ds = [d[0] for d in ds]
 val_ds = [d[1] for d in ds]
@@ -548,24 +549,32 @@ test_ds = []
 test_ds_names = []
 
 logger.context("SleepEDFx")
+logger.context("TEST")
 test_ds.append(build_sleepedfx("/raid/sleepwalker/sleep-edfx"))
+logger.uncontext()
 test_ds_names.append("SleepEDFx")
 logger.uncontext()
 
-# logger.context("Ruhrland")
-# test_ds.append(build_ruhrland("/raid/sleepwalker/ruhrlandklinik/raw"))
-# test_ds_names.append("Ruhrland")
-# logger.uncontext()
+logger.context("Ruhrland")
+logger.context("TEST")
+test_ds.append(build_ruhrland("/raid/sleepwalker/ruhrlandklinik/raw"))
+test_ds_names.append("Ruhrland")
+logger.uncontext()
+logger.uncontext()
 
-# logger.context("SVUH-UCD")
-# test_ds.append(build_svuh_ucd("/raid/sleepwalker/svuh-ucd"))
-# test_ds_names.append("SVUH-UCD")
-# logger.uncontext()
+logger.context("SVUH-UCD")
+logger.context("TEST")
+test_ds.append(build_svuh_ucd("/raid/sleepwalker/svuh-ucd"))
+test_ds_names.append("SVUH-UCD")
+logger.uncontext()
+logger.uncontext()
 
-# logger.context("SHHS")
-# test_ds.append(build_shhs("/raid/sleepwalker/shhs"))
-# test_ds_names.append("SHHS")
-# logger.uncontext()
+logger.context("SHHS")
+logger.context("TEST")
+test_ds.append(build_shhs("/raid/sleepwalker/shhs"))
+test_ds_names.append("SHHS")
+logger.uncontext()
+logger.uncontext()
 
 if os.path.exists("sleepwalker.log"):
     os.remove("sleepwalker.log")

@@ -7,8 +7,9 @@ import copy
 from dataclasses import dataclass
 from functools import partial
 import os
+import random
 import traceback
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,46 @@ import multiprocessing
 class ChannelConfig:
     name: str
     normalizer: Optional[Normalizer] = None  # externally created (may be None)
+
+@dataclass
+class EDFFile: 
+    channels: List[str]
+    path: str
+    start_date: pd.Timestamp
+    length: int = 0
+    X: Optional[pd.DataFrame] = None
+    classes: Optional[Set[str]] = None
+    labels: Optional[EventIndex] = None
+    labels_extra: Optional[EventIndex] = None
+    normalizers: Optional[dict[str, Normalizer]] = None
+
+    def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
+        if self.X is None:
+            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type)
+            
+            if self.normalizers:
+                for col, norm in self.normalizers.items():
+                    if col in x_df.columns:
+                        vals = x_df[col].to_numpy(dtype=float).reshape(-1, 1)
+                        x_df[col] = norm.transform(vals).ravel()
+
+            return x_df
+        else:
+            return self.X.loc[start_date:end_date]
+    
+    def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
+        if self.labels_extra:
+            freq = pd.to_timedelta(1.0 / sample_frequency, unit="s")
+            return self.labels_extra.query(start_date, end_date, freq=freq, sparse=False, labels=classes)
+        else:
+            return None
+
+    def get_y(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
+        if self.labels:
+            freq = pd.to_timedelta(1.0 / sample_frequency, unit="s")
+            return self.labels.query(start_date, end_date, freq=freq, sparse=False, labels=classes)
+        else:
+            return None
 
 def batch_collate(batch, ignore_list = ["time", "patient"]):
     final_dict = defaultdict(list)
@@ -64,22 +105,11 @@ class EventIndex:
             self.starts[lab] = s
             self.ends[lab]   = e  # already sorted after merge
 
-    # @staticmethod
-    # def _merge_overlaps(s: np.ndarray, e: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    #     ms, me = [s[0]], [e[0]]
-    #     for i in range(1, s.size):
-    #         if s[i] <= me[-1]:           # overlaps or touches (since end is exclusive this is fine)
-    #             if e[i] > me[-1]:
-    #                 me[-1] = e[i]
-    #         else:
-    #             ms.append(s[i]); me.append(e[i])
-    #     return np.asarray(ms, dtype=np.int64), np.asarray(me, dtype=np.int64)
-
     def query(
         self,
         start: pd.Timestamp | str,
         end: pd.Timestamp | str,
-        freq: str,
+        freq: str|pd.Timedelta,
         dtype: str = "int8",
         sparse: bool = False,
         labels: list = []
@@ -124,13 +154,9 @@ class BaseDataset(Dataset, ABC):
         remove_unmapped_events : bool = True, 
         get_item: Optional[Callable] = None,
         transform: Optional[Any] = None,
-        # online_filtering:bool = True,
-        cache_patients:int = 0,
+        preload_windows:int = 0,
         num_workers:int = 4,
         online_max_tries:int = 128
-        # event_type: str = "window",
-        # normalizer_fit_strategy: Optional[Mapping[str, Any]] = None,
-        # num_workers: int = 0,
     ) -> None:
         super().__init__()
         
@@ -144,11 +170,11 @@ class BaseDataset(Dataset, ABC):
         self.target_resolution = pd.to_timedelta(target_resolution)
         self.get_item_callback = get_item        
         self.transform = transform
-        self.cache_patients = cache_patients
-        self.cache = {}
-
+        self.preload_windows = preload_windows
+        self.all_patients = patients
         self.online_max_tries = online_max_tries
         self.initialized = False
+        self.num_workers = num_workers
 
         # # Events/classes
         if event_mapping is not None:
@@ -163,13 +189,7 @@ class BaseDataset(Dataset, ABC):
 
         # Prepared state
         self.ids = []
-        self.initialize(patients, num_workers)
-        # self._patients: List[str] = []
-        # self._extractors: Dict[str, SignalExtractor] = {}
-        # self._events: Dict[str, pd.DataFrame] = {}
-        # self._ids: List[Tuple[str, pd.Timestamp]] = []
-        # self._class_index: Optional[np.ndarray] = None
-        # Always call prepare(patients) explicitly after constructing
+        self.initialize(self.all_patients, self.num_workers)
 
     @abstractmethod
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
@@ -189,19 +209,18 @@ class BaseDataset(Dataset, ABC):
         return int(self.total_input.total_seconds() / freq.total_seconds())
 
     def get_n_patients(self) -> int:
-        return len(self.patients)
+        return len(self.file_handles)
 
     def __len__(self):
-        return sum([p[3] for p in self.patients])
+        return self.preload_windows if self.preload_windows else sum([f.length for f in self.file_handles])
 
-    def get_events(self, df, start_date):
-        start_date += self.total_input // 2 - self.target_resolution // 2
-        end_date = start_date + self.target_resolution
+    def on_epoch_end(self):
+        if self.preload_windows:
+            patients = list(self.all_patients)
+            random.shuffle(patients)
+            self.initialize(patients, self.num_workers)
 
-        freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
-        return df.query(start_date, end_date, freq=freq, sparse=False, labels=self.classes)
-
-    def prepare_patient(self, edf_path) -> Tuple[str, int, Optional[EventIndex], Optional[EventIndex], Optional[dict], Optional[pd.Timestamp], Set[str]]:
+    def prepare_patient(self, edf_path) -> Optional[EDFFile]:
         channel_names = [c.name for c in self.channels]
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
@@ -224,7 +243,10 @@ class BaseDataset(Dataset, ABC):
                     X = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
                     normalizers[col].fit(X = X) 
 
-            # TODO If caching, then transform data inplace and return -> 
+            if self.preload_windows > 0:
+                for col in normalizers.keys():
+                    if col in data_df.columns:
+                        data_df[col] = normalizers[col].transform(data_df[col].to_numpy(dtype=float).reshape(-1, 1))
 
             if self.event_mapping is not None:
                 if self.has_extra_target():
@@ -259,128 +281,191 @@ class BaseDataset(Dataset, ABC):
 
             n_items = int((end-self.total_input-start)/self.target_resolution)
 
-            if n_items == 0:
+            if n_items <= 0:
                 raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
-                
-            return edf_path, n_items, df, df_additional, normalizers, start, classes.union(extra_classes) 
 
-            # if self.get_item_callback is not None and not self.online_filtering:
-            #     while start < end-self.total_input:
-            #         if self.get_item_callback is not None:
-            #             item = self.get_item(edf_path, start, normalizers)
-            #             if item is not None:
-            #                 ids.append((edf_path, start))
-            #             else:
-            #                 n_skipped += 1
-            #         else:
-            #             ids.append((edf_path, start))
-            #         start += self.target_resolution
-
-            #     if len(ids) == 0:
-            #         raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")    
-            #     return edf_path, ids, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
-            # else:
-            #     n_items = int((end-self.total_input).total_seconds()/self.target_resolution.total_seconds())
-            #     ids = [(edf_path, t) for t in pd.date_range(start, end - self.total_input, freq=self.target_resolution)]
-
-            #     if n_items == 0:
-            #         raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
-                 
-            #     return edf_path, n_items, df, df_additional, normalizers, n_skipped, classes.union(extra_classes) # type: ignore
-        #except (OSError, ValueError, KeyError) as e:
+            return EDFFile(path=edf_path, X = data_df if self.preload_windows > 0 else None, channels=list(data_df.columns), length=n_items, labels=df, labels_extra=df_additional, start_date=start, classes=classes.union(extra_classes), normalizers=normalizers)
         except Exception as e:
             logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
-            # logger.warning(traceback.format_exc())
-            # logger.warning(f"Cannot read edf file: {fpath} due to {e}")
 
-            return edf_path, 0, None, None, None, None, classes.union(extra_classes) # type: ignore
+            return None #EDFFile(path=edf_path, classes=classes.union(extra_classes))
 
-    def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
-        if self.cache_patients > 0:
-            rng = np.random.default_rng()
-            patients = rng.choice(patients, size=self.cache_patients, replace=False)
-
-        events = {}
-        events_additional = {}
-        
-        upper_bounds = []
-        final_patients = []
-
-        all_normalizers = {}
-        all_classes = set()
+    def initialize(self, patients: Sequence[str | os.PathLike], num_workers: int = 4) -> None:
+        """
+        Initialize dataset by preparing EDF files for all (or some) patients.
+        Supports parallel loading via multiprocessing.Pool with true early stop.
+        """
         total_n_patients = len(patients)
+        file_handles, lower_bounds, upper_bounds = [], [], []
+        all_classes = set()
+        lower, n_windows = 0, 0
 
-        if num_workers > 1:
-            pool = multiprocessing.Pool(num_workers)
-            iter_objects = pool.imap_unordered(partial(self.prepare_patient), patients)
-        else:
-            iter_objects = patients
-
-        logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
-
-        lower = 0
-        for ret_value in iter_objects: 
-            if num_workers > 1:
-                fpath, n_items, df, df_additional, normalizers, start_date, classes = ret_value
-            else:
-                fpath, n_items, df, df_additional, normalizers, start_date, classes = self.prepare_patient(ret_value)
-            
-            # if len(ids) > 0:
-            if n_items > 0:
-                final_patients.append( (fpath, lower, start_date, n_items) )
-                upper_bounds.append(lower + n_items)
-                lower += n_items
-
-                events[fpath] = df
-                all_normalizers[fpath] = normalizers
-                events_additional[fpath] = df_additional
-                # n_patients += 1
-                # n_skipped_total += n_skipped # type: ignore
-                all_classes = all_classes.union(classes)
-            logger.progress_advance(1)
+        target_windows = self.preload_windows if self.preload_windows > 0 else None
         
+        logger.progress_start(self.preload_windows if self.preload_windows > 0 else len(patients), desc="Preparing labels and sliding windows", leave=True)
+
+        if num_workers <= 1:
+            for p in patients:
+                edf = self.prepare_patient(p)
+
+                if edf:
+                    if self.preload_windows:
+                        logger.progress_advance(edf.length)
+
+                    file_handles.append(edf)
+                    lower_bounds.append(lower)
+                    upper_bounds.append(lower + edf.length)
+                    lower += edf.length
+                    n_windows += edf.length
+
+                    if edf.classes is not None:
+                        all_classes |= set(edf.classes)
+                
+                if not self.preload_windows:
+                    logger.progress_advance(1)
+
+                if target_windows and n_windows >= target_windows:
+                    logger.debug(f"Reached preload limit ({n_windows}/{target_windows}).")
+                    break
+        else:
+            with multiprocessing.Pool(num_workers) as pool:
+                idx = 0
+                while idx < len(patients):
+                    batch = patients[idx : idx + num_workers]
+                    results = pool.map(self.prepare_patient, batch)
+                    idx += len(batch)
+
+                    for edf in results:
+                        if edf:
+                            if self.preload_windows:
+                                logger.progress_advance(edf.length)
+                            file_handles.append(edf)
+                            lower_bounds.append(lower)
+                            upper_bounds.append(lower + edf.length)
+                            lower += edf.length
+                            n_windows += edf.length
+
+                            if edf.classes is not None:
+                                all_classes |= set(edf.classes)
+                        
+                        if not self.preload_windows:
+                            logger.progress_advance(1)
+
+                        if target_windows and n_windows >= target_windows:
+                            logger.debug(f"Reached preload limit ({n_windows}/{target_windows}).")
+                            pool.close()
+                            pool.join()
+                            idx = len(patients)  # force exit
+                            break
+
+                    if target_windows and n_windows >= target_windows:
+                        break
+
         logger.progress_close()
 
-        if num_workers > 1:
-            pool.close() # type: ignore
-            pool.join() # type: ignore
-        
-        self.patients = final_patients        
+        self.file_handles = file_handles
+        self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
-        self.events = events
-        self.events_additional = events_additional
-        # self.n_patients = n_patients
-        self.all_normalizers = all_normalizers
-        if len(self.event_mapping) == 0:
+
+        if not self.event_mapping:
             self.classes = sorted(list(all_classes))
 
-        #  Skipped {n_skipped_total} windows due to insufficient labels. There are {len(self.ids)} windows remaining. 
-        logger.info(f"Dataset initialized with {len(self.patients)}/{total_n_patients} patients.There are {len(self)} windows available.")
+        logger.info(
+            f"Dataset initialized with {len(self.file_handles)}/{total_n_patients} patients. "
+            f"Total windows: {len(self)}. Classes: {len(self.classes)}"
+        )
         self.initialized = True
 
-    def get_item(self, edf_path:str, start_date:pd.Timestamp, normalizers:Optional[dict[str,Normalizer]]):
+    # def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
+    #     file_handles = []
+    #     upper_bounds = []
+    #     lower_bounds = []
+    #     all_classes = set()
+    #     total_n_patients = len(patients)
+
+    #     if self.preload_windows > 0:
+    #         n_windows = 0
+    #         idx = 0
+    #         lower = 0
+    #         # TODO Load in parallel 
+    #         # TODO Make num_workers = {0, 1} case nicer
+    #         # TODO Logging
+
+    #         while n_windows < self.preload_windows and idx < len(patients):
+    #             p = patients[idx]
+
+    #             edf = self.prepare_patient(p)
+    #             if edf:
+    #                 file_handles.append(edf)
+
+    #                 lower_bounds.append(lower)
+    #                 upper_bounds.append(lower + edf.length)
+    #                 lower += edf.length
+
+    #                 if edf.classes is not None:
+    #                     all_classes = all_classes.union(edf.classes)
+
+    #                 n_windows += edf.length
+    #             idx += 1
+    #     else:
+    #         if num_workers > 1:
+    #             pool = multiprocessing.Pool(num_workers)
+    #             iter_objects = pool.imap_unordered(partial(self.prepare_patient), patients)
+    #         else:
+    #             iter_objects = patients
+
+    #         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
+
+    #         lower = 0
+    #         for ret_value in iter_objects: 
+    #             if num_workers > 1:
+    #                 edf = cast(EDFFile, ret_value)
+    #             else:
+    #                 edf = self.prepare_patient(ret_value)
+                
+    #             if edf:
+    #                 file_handles.append(edf)
+
+    #                 lower_bounds.append(lower)
+    #                 upper_bounds.append(lower + edf.length)
+    #                 lower += edf.length
+
+    #                 if edf.classes is not None:
+    #                     all_classes = all_classes.union(edf.classes)
+    #             logger.progress_advance(1)
+            
+    #         logger.progress_close()
+
+    #         if num_workers > 1:
+    #             pool.close() 
+    #             pool.join() 
+
+    #     self.upper_bounds = upper_bounds
+    #     self.file_handles = file_handles
+    #     self.lower_bounds= lower_bounds
+
+    #     if not self.event_mapping: # len(self.event_mapping) == 0
+    #         self.classes = sorted(list(all_classes))
+
+    #     logger.info(f"Dataset initialized with {len(self.file_handles)}/{total_n_patients} patients. There are {len(self)} windows available.")
+    #     self.initialized = True
+
+    def get_item(self, file: EDFFile, start_date: pd.Timestamp):
+        # start_date:pd.Timestamp, end_date, channels, sample_frequency, resample_type)
         end_date = start_date + self.total_input
-        channel_names = [c.name for c in self.channels]
-        x_df = edf_to_df(edf_path, channel_names, start_date, end_date, self.sample_frequency, self.resample_type)
-        
-        # and normalizers.get(col) is not None:
-        if normalizers:
-            for col, norm in normalizers.items():
-                if col in x_df.columns:
-                    vals = x_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                    x_df[col] = norm.transform(vals).ravel()
+        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
 
         # Target time at center for window/sequence modes
         t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
-        item: Dict[str, Any] = {"patient": edf_path, "time": t_center}
+        item: Dict[str, Any] = {"patient": file.path, "time": t_center}
         
-        if self.event_mapping is not None and len(self.classes) > 0:
-            y_df = self.events[edf_path]
-            item["target"] = self.get_events(y_df, start_date)
-        
-            if self.has_extra_target():
-                additional_df = self.events_additional[edf_path]
-                item["target_extra"] = self.get_events(additional_df, start_date)
+        #if self.event_mapping is not None and len(self.classes) > 0:
+        if file.labels:
+            end_date_label = start_date + self.target_resolution
+
+            item["target"] = file.get_y(start_date, end_date_label, self.sample_frequency, self.classes) 
+            if file.labels_extra:
+                item["target_extra"] = file.get_y_extra(start_date, end_date_label, self.sample_frequency, self.classes) 
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for
@@ -413,13 +498,13 @@ class BaseDataset(Dataset, ABC):
 
         while True:
             pidx = bisect.bisect_right(self.upper_bounds, idx)
-            edf_path, lower, start_date, n_items = self.patients[pidx]
-            new_idx = idx - lower 
-            cur_date = start_date + self.target_resolution * new_idx 
-            normalizer = self.all_normalizers[edf_path]
+            file = self.file_handles[pidx]
+            
+            new_idx = idx - self.lower_bounds[pidx] 
+            cur_date = file.start_date + self.target_resolution * new_idx 
             
             try:
-                item = self.get_item(edf_path, cur_date, normalizer)
+                item = self.get_item(file, cur_date)
             except Exception as e:
                 pass
             finally:
@@ -430,6 +515,6 @@ class BaseDataset(Dataset, ABC):
                 idx = np.random.choice(range(len(self)))
         
         if cnt > self.online_max_tries or item is None:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {edf_path}")
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.fpath}")
         else:
             return item

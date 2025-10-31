@@ -65,6 +65,8 @@ class TqdmProgress:
         import tqdm
         self._pbar = tqdm.tqdm(total=total, desc=desc, leave=leave)
         self._formatter = formatter
+        self.total = total
+        self.consumed = 0
 
     def _format_with_fmt(self, msg: str, level: str = "INFO") -> str:
         frame = inspect.currentframe().f_back.f_back
@@ -95,7 +97,9 @@ class TqdmProgress:
         self._pbar.refresh()
 
     def advance(self, n: int = 1) -> None:
+        n = min(n, self.total - self.consumed)
         self._pbar.update(n)
+        self.consumed += n
 
     def close(self) -> None:
         self._pbar.close()
@@ -367,7 +371,7 @@ class UnifiedLogger:
         if logging.INFO < self._level:
             self._pbar = NullProgress()
             return self._pbar
-    
+
         try:
             self._pbar.close()
         except Exception:
@@ -411,8 +415,6 @@ class UnifiedLogger:
         self._pbar.advance(n)
 
     def progress_close(self): self._pbar.close()
-
-
 
 @contextmanager
 def suppress_stdout_logging(logger: UnifiedLogger):

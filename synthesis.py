@@ -78,7 +78,11 @@ class UtimeRepository:
                  preprocessor_fir_sampling_rate_choices, preprocessor_fir_channels_choices, preprocessor_fir_filter_params_choices,
                  preprocessor_robust_scaler_lower_quantile_choices, preprocessor_robust_scaler_upper_quantile_choices,
                  preprocessor_spectogram_n_fft_choices, preprocessor_spectogram_hop_length_choices,
-                 preprocessor_spectogram_win_length_choices, preprocessor_spectogram_epoch_len_samples_choices
+                 preprocessor_spectogram_win_length_choices, preprocessor_spectogram_epoch_len_samples_choices,
+                 n_samples,
+                 abc_channel_choices, abc_event_mapping, abc_num_workers, abc_sample_frequency, abc_total_input,
+                 abc_target_resolution,
+                 batch_size
                  ):
         self.dimension_choices = dimension_choices + [x for x in map(lambda x: x * 2, dimension_choices) if x not in dimension_choices]
         self.normalization_eps_choices = normalization_eps_choices
@@ -106,6 +110,14 @@ class UtimeRepository:
         self.preprocessor_spectogram_hop_length_choices = preprocessor_spectogram_hop_length_choices
         self.preprocessor_spectogram_win_length_choices = preprocessor_spectogram_win_length_choices
         self.preprocessor_spectogram_epoch_len_samples_choices = preprocessor_spectogram_epoch_len_samples_choices
+        self.n_samples = n_samples
+        self.abc_channel_choices = abc_channel_choices
+        self.abc_event_mapping = abc_event_mapping
+        self.abc_num_workers = abc_num_workers
+        self.abc_sample_frequency = abc_sample_frequency
+        self.abc_total_input = abc_total_input
+        self.abc_target_resolution = abc_target_resolution
+        self.batch_size = batch_size
 
         # Is this really necessary? With our request language, the user has to ensure this himself...
         if 1 not in self.convolution_kernel_size_choices:
@@ -680,6 +692,16 @@ or
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
         preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
+        n_samples = DataGroup("n_samples", self.n_samples)
+        """
+        abc_channels = DataGroup("Channel", 
+                                            ["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2", "E1", "E2", "ECG1", 
+                                             "ECG2", "LLeg1", "LLeg2", "RLeg1", "RLeg2", "Chin1", "Chin2", "Chin3", 
+                                             "Airflow", "Abdo", "Thor", "Snore", "Sum", "PosSensor", "Ox Status", 
+                                             "Pulse", "SpO2", "Nasal Pressure", "CPAP Flow", "CPAP Press", "Pleth",
+                                             "Derived HR", "Light", "Manual Pos"]) # ohne Respiration Rate, weil keine 100%
+        """
+        abc_channels = DataGroup("abc_channels", self.abc_channel_choices)
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1753,7 +1775,91 @@ or
                                 & Constructor("loss_function", Literal(None))
                                 & Constructor("preprocessors", Var("preps"))
                                 )
-                    )
+                    ),
+
+            # TODO: make stuff below noneable
+
+            "NoSampler": Constructor("Sampler", Literal("NoSampler")),
+
+            "RandomSampler": DSL()
+            .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
+            .parameter("num_samples", n_samples)
+            .suffix(Constructor("Sampler", Literal("RandomSampler")
+                                & Constructor("replacement", Var("replacement"))
+                                & Constructor("num_samples", Var("num_samples"))
+                                )
+                    ),
+
+            "ABC_Dataset": DSL()
+            .parameter("annotator", DataGroup("ABC_Dataset_Annotator", ["nsrr", "profusion"]))
+            .parameter("channels", abc_channels)
+            .parameter("num_workers", DataGroup("ABC_Dataset_Num_Workers", self.abc_num_workers))
+            .parameter("sample_frequency", DataGroup("ABC_Dataset_Sample_Frequency", self.abc_sample_frequency))
+            .parameter("event_mapping", DataGroup("ABC_Dataset_Event_Mapping", self.abc_event_mapping))
+            .parameter("online_filtering", DataGroup("ABC_Dataset_Online_Filtering", [True, False]))
+            .parameter("total_input", DataGroup("ABC_Dataset_Total_Input", self.abc_total_input))
+            .parameter("target_resolution", DataGroup("ABC_Dataset_Target_Resolution", self.abc_target_resolution))
+            .suffix(Constructor("Dataset", Literal("ABC_Dataset")
+                                & Constructor("annotator", Var("annotator"))
+                                & Constructor("channels", Var("channels"))
+                                & Constructor("num_workers", Var("num_workers"))
+                                & Constructor("sample_frequency", Var("sample_frequency"))
+                                & Constructor("event_mapping", Var("event_mapping"))
+                                & Constructor("online_filtering", Var("online_filtering"))
+                                & Constructor("total_input", Var("total_input"))
+                                & Constructor("target_resolution", Var("target_resolution"))
+                                )
+                    ),
+
+            "DataLoader": DSL()
+            .parameter("annotator", DataGroup("ABC_Dataset_Annotator", ["nsrr", "profusion"]))
+            .parameter("channels", abc_channels)
+            .parameter("num_workers", DataGroup("ABC_Dataset_Num_Workers", self.abc_num_workers))
+            .parameter("sample_frequency", DataGroup("ABC_Dataset_Sample_Frequency", self.abc_sample_frequency))
+            .parameter("event_mapping", DataGroup("ABC_Dataset_Event_Mapping", self.abc_event_mapping))
+            .parameter("online_filtering", DataGroup("ABC_Dataset_Online_Filtering", [True, False]))
+            .parameter("total_input", DataGroup("ABC_Dataset_Total_Input", self.abc_total_input))
+            .parameter("target_resolution", DataGroup("ABC_Dataset_Target_Resolution", self.abc_target_resolution))
+            .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
+            .parameter("num_samples", n_samples)
+            .parameter("sampler", DataGroup("Sampler", ["NoSampler", "RandomSampler"]))
+            .parameter("batch_size", DataGroup("DataLoader_Batch_Size", self.batch_size))
+            .argument("s", Constructor("Sampler", Var("sampler")
+                                       & Constructor("replacement", Var("replacement"))
+                                       & Constructor("num_samples", Var("num_samples"))
+                                       )
+                      )
+            .argument("d", Constructor("Dataset", Literal("ABC_Dataset")
+                                & Constructor("annotator", Var("annotator"))
+                                & Constructor("channels", Var("channels"))
+                                & Constructor("num_workers", Var("num_workers"))
+                                & Constructor("sample_frequency", Var("sample_frequency"))
+                                & Constructor("event_mapping", Var("event_mapping"))
+                                & Constructor("online_filtering", Var("online_filtering"))
+                                & Constructor("total_input", Var("total_input"))
+                                & Constructor("target_resolution", Var("target_resolution"))
+                                )
+                      )
+            .suffix(Constructor("dataloader",
+                                Constructor("Sampler",
+                                            Var("sampler")
+                                            & Constructor("replacement", Var("replacement"))
+                                            & Constructor("num_samples", Var("num_samples"))
+                                            )
+                                & Constructor("Dataset",
+                                              Literal("ABC_Dataset")
+                                              & Constructor("annotator", Var("annotator"))
+                                              & Constructor("channels", Var("channels"))
+                                              & Constructor("num_workers", Var("num_workers"))
+                                              & Constructor("sample_frequency", Var("sample_frequency"))
+                                              & Constructor("event_mapping", Var("event_mapping"))
+                                              & Constructor("online_filtering", Var("online_filtering"))
+                                              & Constructor("total_input", Var("total_input"))
+                                              & Constructor("target_resolution", Var("target_resolution"))
+                                              )
+                                & Constructor("batch_size", Var("batch_size"))
+                                )
+                    ),
 
 
         }

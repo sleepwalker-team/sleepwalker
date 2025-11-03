@@ -212,7 +212,10 @@ class BaseDataset(Dataset, ABC):
         return len(self.file_handles)
 
     def __len__(self):
-        return self.preload_windows if self.preload_windows else sum([f.length for f in self.file_handles])
+        if self.preload_windows:
+            return min(self.preload_windows, sum([f.length for f in self.file_handles]))
+        else:
+            return sum([f.length for f in self.file_handles])
 
     def on_epoch_end(self):
         if self.preload_windows:

@@ -84,7 +84,9 @@ class UtimeRepository:
                  abc_target_resolution,
                  batch_size,
                  optimizer_learning_rate, optimizer_learning_rate_decay, optimizer_weight_decay, optimizer_eps,
-                 optimizer_beta, optimizer_initial_accumulator_value, optimizer_momentum, optimizer_dampening
+                 optimizer_beta, optimizer_initial_accumulator_value, optimizer_momentum, optimizer_dampening,
+                 lr_scheduler_start_factor_choices, lr_scheduler_end_factor_choices, lr_scheduler_total_iters_choices,
+                 lr_scheduler_step_size_choices, lr_scheduler_gamma_choices, lr_scheduler_last_epoch_choices
                  ):
         self.dimension_choices = dimension_choices + [x for x in map(lambda x: x * 2, dimension_choices) if x not in dimension_choices]
         self.normalization_eps_choices = normalization_eps_choices
@@ -128,6 +130,12 @@ class UtimeRepository:
         self.optimizer_initial_accumulator_value = optimizer_initial_accumulator_value
         self.optimizer_momentum = optimizer_momentum
         self.optimizer_dampening = optimizer_dampening
+        self.lr_scheduler_start_factor_choices = lr_scheduler_start_factor_choices
+        self.lr_scheduler_end_factor_choices = lr_scheduler_end_factor_choices
+        self.lr_scheduler_total_iters_choices = lr_scheduler_total_iters_choices
+        self.lr_scheduler_step_size_choices = lr_scheduler_step_size_choices
+        self.lr_scheduler_gamma_choices = lr_scheduler_gamma_choices
+        self.lr_scheduler_last_epoch_choices = lr_scheduler_last_epoch_choices
 
         # Is this really necessary? With our request language, the user has to ensure this himself...
         if 1 not in self.convolution_kernel_size_choices:
@@ -641,6 +649,70 @@ or
                 else:
                     return False
 
+    class LR_Scheduler(Group):
+            name = "LR_Scheduler"
+
+            """
+            ("LinearLR", start_factor, end_factor, total_iters, last_epoch)
+            ("StepLR", step_size, gamma, last_epoch)
+            ("ExponentialLR", gamma, last_epoch)
+            """
+
+            def __init__(self, start_factor_choices, end_factor_choices, total_iters_choices,
+                         step_size_choices, gamma_choices, last_epoch_choices):
+                self.start_factor_choices = start_factor_choices
+                self.end_factor_choices = end_factor_choices
+                self.total_iters_choices = total_iters_choices
+                self.step_size_choices = step_size_choices
+                self.gamma_choices = gamma_choices
+                self.last_epoch_choices = last_epoch_choices
+
+
+            def iter_linear_lr(self):
+                for start_factor in self.start_factor_choices:
+                    for end_factor in self.end_factor_choices:
+                        for total_iters in self.total_iters_choices:
+                            for last_epoch in self.last_epoch_choices:
+                                yield ("LinearLR", start_factor, end_factor, total_iters, last_epoch)
+
+            def iter_step_lr(self):
+                for step_size in self.step_size_choices:
+                    for gamma in self.gamma_choices:
+                        for last_epoch in self.last_epoch_choices:
+                            yield ("StepLR", step_size, gamma, last_epoch)
+
+            def iter_exponential_lr(self):
+                for gamma in self.gamma_choices:
+                    for last_epoch in self.last_epoch_choices:
+                        yield ("ExponentialLR", gamma, last_epoch)
+
+            def __iter__(self):
+                yield from self.iter_linear_lr()
+                yield from self.iter_step_lr()
+                yield from self.iter_exponential_lr()
+
+            def __contains__(self, value: object) -> bool:
+                if (isinstance(value, tuple)):
+                    if value[0] == "LinearLR":
+                        return (len(value) == 5 and
+                                value[1] in self.start_factor_choices and
+                                value[2] in self.end_factor_choices and
+                                value[3] in self.total_iters_choices and
+                                value[4] in self.last_epoch_choices)
+                    elif value[0] == "StepLR":
+                        return (len(value) == 4 and
+                                value[1] in self.step_size_choices and
+                                value[2] in self.gamma_choices and
+                                value[3] in self.last_epoch_choices)
+                    elif value[0] == "ExponentialLR":
+                        return (len(value) == 3 and
+                                value[1] in self.gamma_choices and
+                                value[2] in self.last_epoch_choices)
+                    else:
+                        return False
+                else:
+                    return False
+
     def specification(self):
         dimension = DataGroup("dimension", self.dimension_choices)
         maybe_dimension = DataGroup("dimension", self.dimension_choices + [None])
@@ -729,6 +801,24 @@ or
                                          self.optimizer_initial_accumulator_value + [None],
                                          self.optimizer_momentum + [None],
                                          self.optimizer_dampening + [None])
+        lr_scheduler_start_factor = DataGroup("lr_scheduler_start_factor", self.lr_scheduler_start_factor_choices)
+        lr_scheduler_end_factor = DataGroup("lr_scheduler_end_factor", self.lr_scheduler_end_factor_choices)
+        lr_scheduler_total_iters = DataGroup("lr_scheduler_total_iters", self.lr_scheduler_total_iters_choices)
+        lr_scheduler_step_size = DataGroup("lr_scheduler_step_size", self.lr_scheduler_step_size_choices)
+        lr_scheduler_gamma = DataGroup("lr_scheduler_gamma", self.lr_scheduler_gamma_choices)
+        lr_scheduler_last_epoch = DataGroup("lr_scheduler_last_epoch", self.lr_scheduler_last_epoch_choices)
+        lr_scheduler = self.LR_Scheduler(self.lr_scheduler_start_factor_choices,
+                                        self.lr_scheduler_end_factor_choices,
+                                        self.lr_scheduler_total_iters_choices,
+                                        self.lr_scheduler_step_size_choices,
+                                        self.lr_scheduler_gamma_choices,
+                                        self.lr_scheduler_last_epoch_choices)
+        maybe_lr_scheduler = self.LR_Scheduler(self.lr_scheduler_start_factor_choices + [None],
+                                        self.lr_scheduler_end_factor_choices + [None],
+                                        self.lr_scheduler_total_iters_choices + [None],
+                                        self.lr_scheduler_step_size_choices + [None],
+                                        self.lr_scheduler_gamma_choices + [None],
+                                        self.lr_scheduler_last_epoch_choices + [None])
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1806,14 +1896,25 @@ or
 
             # TODO: make stuff below noneable
 
-            "NoSampler": Constructor("Sampler", Literal("NoSampler")),
+            "NoSampler": DSL()
+            .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
+            .parameter("num_samples", n_samples)
+            .suffix(Constructor("Sampler", Literal("NoSampler")
+                                & Constructor("replacement", Var("replacement"))
+                                & Constructor("replacement", Literal(None))
+                                & Constructor("num_samples", Var("num_samples"))
+                                & Constructor("num_samples", Literal(None))
+                                )
+                    ),
 
             "RandomSampler": DSL()
             .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
             .parameter("num_samples", n_samples)
             .suffix(Constructor("Sampler", Literal("RandomSampler")
                                 & Constructor("replacement", Var("replacement"))
+                                & Constructor("replacement", Literal(None))
                                 & Constructor("num_samples", Var("num_samples"))
+                                & Constructor("num_samples", Literal(None))
                                 )
                     ),
 
@@ -1887,14 +1988,6 @@ or
                                 & Constructor("batch_size", Var("batch_size"))
                                 )
                     ),
-
-            """
-                        ("Adagrad", learning_rate, learning_rate_decay, weight_decay, initial_accumulator_value, eps)
-                        ("Adam", learning_rate, beta, eps, weight_decay, amsgrad = [True, False])
-                        ("AdamW", learning_rate, beta, eps, weight_decay, amsgrad = [True, False])
-                        ("Adamax", learning_rate, beta, eps, weight_decay)
-                        ("SGD", learning_rate, momentum, dampening, weight_decay, nesterov = [True, False])
-                        """ :(),
 
             "Adagrad": DSL()
             .parameter("lr", optimizer_learning_rate)
@@ -1974,6 +2067,326 @@ or
                                   )
             .suffix(Constructor("optimizer", Var("p_none"))),
 
+            "LinearLR": DSL()
+            .parameter("start_factor", lr_scheduler_start_factor)
+            .parameter("end_factor", lr_scheduler_end_factor)
+            .parameter("total_iters", lr_scheduler_total_iters)
+            .parameter("last_epoch", lr_scheduler_last_epoch)
+            .parameter("p_none", maybe_lr_scheduler)
+            .parameter_constraint(lambda v: v["p_none"][0] == "LinearLR"
+                                            and (v["p_none"][1] == v["start_factor"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["end_factor"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["total_iters"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["last_epoch"] or v["p_none"][4] is None)
+                                  )
+            .suffix(Constructor("lr_scheduler", Var("p_none"))),
+
+            "StepLR": DSL()
+            .parameter("step_size", lr_scheduler_step_size)
+            .parameter("gamma", lr_scheduler_gamma)
+            .parameter("last_epoch", lr_scheduler_last_epoch)
+            .parameter("p_none", maybe_lr_scheduler)
+            .parameter_constraint(lambda v: v["p_none"][0] == "StepLR"
+                                            and (v["p_none"][1] == v["step_size"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["gamma"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["last_epoch"] or v["p_none"][3] is None)
+                                  )
+            .suffix(Constructor("lr_scheduler", Var("p_none"))),
+
+            "ExponentialLR": DSL()
+            .parameter("gamma", lr_scheduler_gamma)
+            .parameter("last_epoch", lr_scheduler_last_epoch)
+            .parameter("p_none", maybe_lr_scheduler)
+            .parameter_constraint(lambda v: v["p_none"][0] == "ExponentialLR"
+                                            and (v["p_none"][1] == v["gamma"] or v["p_none"][2] is None)
+                                            and (v["p_none"][2] == v["last_epoch"] or v["p_none"][3] is None)
+                                  )
+            .suffix(Constructor("lr_scheduler", Var("p_none"))),
+
+            "MulticlassTrainer": DSL()
+            .parameter("bd", maybe_dimension)
+            .parameter("bk", maybe_kernel_size)
+            .parameter("d", dropout_p)
+            .parameter("af", activation_function)
+            .parameter("conv", convolution)
+            .parameter("c_stride", convolution_stride)
+            .parameter("c_padding", convolution_padding)
+            .parameter("c_dilation", convolution_dilation)
+            .parameter("b", bias)
+            .parameter("e", normalization_eps)
+            .parameter("norm", normalization)
+            .parameter("m_stride", maxpool_stride)
+            .parameter("m_padding", maxpool_padding)
+            .parameter("m_dilation", maxpool_dilation)
+            .parameter("first_d", dropout_p)
+            .parameter("first_af", activation_function)
+            .parameter("first_conv", convolution)
+            .parameter("first_c_stride", convolution_stride)
+            .parameter("first_c_padding", convolution_padding)
+            .parameter("first_c_dilation", convolution_dilation)
+            .parameter("first_b", bias)
+            .parameter("first_e", normalization_eps)
+            .parameter("first_norm", normalization)
+            .parameter("first_m_stride", maxpool_stride)
+            .parameter("first_m_padding", maxpool_padding)
+            .parameter("first_m_dilation", maxpool_dilation)
+            .parameter("fc_k", kernel_size)
+            .parameter("fc_conv", convolution)
+            .parameter("fc_stride", convolution_stride)
+            .parameter("fc_padding", convolution_padding)
+            .parameter("fc_dilation", convolution_dilation)
+            .parameter("fc_b", bias)
+            .parameter("mlp_in", dimension)
+            .parameter("mlp_out", dimension)
+            .parameter("mlp_b", bias)
+            .parameter("dds", dimension_list)
+            .parameter("kks", kernel_size_list)
+            .parameter("mms", maxpool_size_list)
+            .parameter_constraint(lambda v: len(v["dds"]) > 1 and (len(v["dds"]) == len(v["kks"]) == len(v["mms"])))  # since this should be always instantiated by suffix, this predicate should not be necessary
+            .parameter("loss", loss)
+            .parameter("preps", preprocessor_tuple)
+            .parameter("annotator", DataGroup("ABC_Dataset_Annotator", ["nsrr", "profusion"]))
+            .parameter("channels", abc_channels)
+            .parameter("num_workers", DataGroup("ABC_Dataset_Num_Workers", self.abc_num_workers))
+            .parameter("sample_frequency", DataGroup("ABC_Dataset_Sample_Frequency", self.abc_sample_frequency))
+            .parameter("event_mapping", DataGroup("ABC_Dataset_Event_Mapping", self.abc_event_mapping))
+            .parameter("online_filtering", DataGroup("ABC_Dataset_Online_Filtering", [True, False]))
+            .parameter("total_input", DataGroup("ABC_Dataset_Total_Input", self.abc_total_input))
+            .parameter("target_resolution", DataGroup("ABC_Dataset_Target_Resolution", self.abc_target_resolution))
+            .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
+            .parameter("num_samples", n_samples)
+            .parameter("sampler", DataGroup("Sampler", ["NoSampler", "RandomSampler"]))
+            .parameter("batch_size", DataGroup("DataLoader_Batch_Size", self.batch_size))
+            .parameter("opti", maybe_optimizer)
+            .parameter("lr_sched", maybe_lr_scheduler)
+            .argument("model",
+                      Constructor("u_model",
+                                Constructor("u_classifier",
+                                            Constructor("dimensions", Var("dds"))
+                                            & Constructor("kernel_sizes", Var("kks"))
+                                            & Constructor("maxpool_sizes", Var("mms"))
+                                            )
+                                & Constructor("u_first_level", Constructor("convolution", Var("first_conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("first_c_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("first_c_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("first_b"))
+                                              & Constructor("bias", Literal(None))
+                                              & Constructor("activation", Var("first_af"))
+                                              & Constructor("activation", Literal(None))
+                                              & Constructor("dropout_p", Var("first_d"))
+                                              & Constructor("dropout_p", Literal(None))
+                                              & Constructor("normalization", Var("first_norm"))
+                                              & Constructor("normalization", Literal(None))
+                                              & Constructor("normalization_epsilon", Var("first_e"))
+                                              & Constructor("normalization_epsilon", Literal(None))
+                                              & Constructor("maxpool_stride", Var("first_m_stride"))
+                                              & Constructor("maxpool_stride", Literal(None))
+                                              & Constructor("maxpool_padding", Var("first_m_padding"))
+                                              & Constructor("maxpool_padding", Literal(None))
+                                              & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                              & Constructor("maxpool_dilation", Literal(None))
+                                              )
+                                & Constructor("bottleneck",
+                                              Constructor("in_and_out", Var("bd"))
+                                              & Constructor("kernel_size", Var("bk"))
+                                              )
+                                & Constructor("homogeneous",
+                                              Constructor("convolution", Var("conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("c_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("c_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("c_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("b"))
+                                              & Constructor("bias", Literal(None))
+                                              & Constructor("activation", Var("af"))
+                                              & Constructor("activation", Literal(None))
+                                              & Constructor("dropout_p", Var("d"))
+                                              & Constructor("dropout_p", Literal(None))
+                                              & Constructor("normalization", Var("norm"))
+                                              & Constructor("normalization", Literal(None))
+                                              & Constructor("normalization_epsilon", Var("e"))
+                                              & Constructor("normalization_epsilon", Literal(None))
+                                              & Constructor("maxpool_stride", Var("m_stride"))
+                                              & Constructor("maxpool_stride", Literal(None))
+                                              & Constructor("maxpool_padding", Var("m_padding"))
+                                              & Constructor("maxpool_padding", Literal(None))
+                                              & Constructor("maxpool_dilation", Var("m_dilation"))
+                                              & Constructor("maxpool_dilation", Literal(None))
+                                              )
+                                & Constructor("u_final_conv",
+                                              Constructor("kernel_size", Var("fc_k"))
+                                              & Constructor("kernel_size", Literal(None))
+                                              & Constructor("convolution", Var("fc_conv"))
+                                              & Constructor("convolution", Literal(None))
+                                              & Constructor("convolution_stride", Var("fc_stride"))
+                                              & Constructor("convolution_stride", Literal(None))
+                                              & Constructor("convolution_padding", Var("fc_padding"))
+                                              & Constructor("convolution_padding", Literal(None))
+                                              & Constructor("convolution_dilation", Var("fc_dilation"))
+                                              & Constructor("convolution_dilation", Literal(None))
+                                              & Constructor("bias", Var("fc_b"))
+                                              & Constructor("bias", Literal(None))
+                                              )
+                                & Constructor("u_linear_classifier",
+                                              Constructor("linear_layer",
+                                                          Constructor("input", Var("mlp_in"))
+                                                          & Constructor("input", Literal(None))
+                                                          & Constructor("output", Var("mlp_out"))
+                                                          & Constructor("output", Literal(None))
+                                                          & Constructor("bias", Var("mlp_b"))
+                                                          & Constructor("bias", Literal(None))
+                                                          )
+                                              )
+                                & Constructor("loss_function", Var("loss"))
+                                & Constructor("loss_function", Literal(None))
+                                & Constructor("preprocessors", Var("preps"))
+                                )
+                      )
+            .argument("dataloader",
+                      Constructor("dataloader",
+                                  Constructor("Sampler",
+                                              Var("sampler")
+                                              & Constructor("replacement", Var("replacement"))
+                                              & Constructor("num_samples", Var("num_samples"))
+                                              )
+                                  & Constructor("Dataset",
+                                                Literal("ABC_Dataset")
+                                                & Constructor("annotator", Var("annotator"))
+                                                & Constructor("channels", Var("channels"))
+                                                & Constructor("num_workers", Var("num_workers"))
+                                                & Constructor("sample_frequency", Var("sample_frequency"))
+                                                & Constructor("event_mapping", Var("event_mapping"))
+                                                & Constructor("online_filtering", Var("online_filtering"))
+                                                & Constructor("total_input", Var("total_input"))
+                                                & Constructor("target_resolution", Var("target_resolution"))
+                                                )
+                                  & Constructor("batch_size", Var("batch_size"))
+                                  )
+                      )
+            .argument("optimizer", Constructor("optimizer", Var("opti")))
+            .argument("lr_scheduler", Constructor("lr_scheduler", Var("lr_sched")))
+            .suffix(Constructor("trainer",
+                                Constructor("u_model",
+                                            Constructor("u_classifier",
+                                                        Constructor("dimensions", Var("dds"))
+                                                        & Constructor("kernel_sizes", Var("kks"))
+                                                        & Constructor("maxpool_sizes", Var("mms"))
+                                                        )
+                                            & Constructor("u_first_level", Constructor("convolution", Var("first_conv"))
+                                                          & Constructor("convolution", Literal(None))
+                                                          & Constructor("convolution_stride", Var("first_c_stride"))
+                                                          & Constructor("convolution_stride", Literal(None))
+                                                          & Constructor("convolution_padding", Var("first_c_padding"))
+                                                          & Constructor("convolution_padding", Literal(None))
+                                                          & Constructor("convolution_dilation", Var("first_c_dilation"))
+                                                          & Constructor("convolution_dilation", Literal(None))
+                                                          & Constructor("bias", Var("first_b"))
+                                                          & Constructor("bias", Literal(None))
+                                                          & Constructor("activation", Var("first_af"))
+                                                          & Constructor("activation", Literal(None))
+                                                          & Constructor("dropout_p", Var("first_d"))
+                                                          & Constructor("dropout_p", Literal(None))
+                                                          & Constructor("normalization", Var("first_norm"))
+                                                          & Constructor("normalization", Literal(None))
+                                                          & Constructor("normalization_epsilon", Var("first_e"))
+                                                          & Constructor("normalization_epsilon", Literal(None))
+                                                          & Constructor("maxpool_stride", Var("first_m_stride"))
+                                                          & Constructor("maxpool_stride", Literal(None))
+                                                          & Constructor("maxpool_padding", Var("first_m_padding"))
+                                                          & Constructor("maxpool_padding", Literal(None))
+                                                          & Constructor("maxpool_dilation", Var("first_m_dilation"))
+                                                          & Constructor("maxpool_dilation", Literal(None))
+                                                          )
+                                            & Constructor("bottleneck",
+                                                          Constructor("in_and_out", Var("bd"))
+                                                          & Constructor("kernel_size", Var("bk"))
+                                                          )
+                                            & Constructor("homogeneous",
+                                                          Constructor("convolution", Var("conv"))
+                                                          & Constructor("convolution", Literal(None))
+                                                          & Constructor("convolution_stride", Var("c_stride"))
+                                                          & Constructor("convolution_stride", Literal(None))
+                                                          & Constructor("convolution_padding", Var("c_padding"))
+                                                          & Constructor("convolution_padding", Literal(None))
+                                                          & Constructor("convolution_dilation", Var("c_dilation"))
+                                                          & Constructor("convolution_dilation", Literal(None))
+                                                          & Constructor("bias", Var("b"))
+                                                          & Constructor("bias", Literal(None))
+                                                          & Constructor("activation", Var("af"))
+                                                          & Constructor("activation", Literal(None))
+                                                          & Constructor("dropout_p", Var("d"))
+                                                          & Constructor("dropout_p", Literal(None))
+                                                          & Constructor("normalization", Var("norm"))
+                                                          & Constructor("normalization", Literal(None))
+                                                          & Constructor("normalization_epsilon", Var("e"))
+                                                          & Constructor("normalization_epsilon", Literal(None))
+                                                          & Constructor("maxpool_stride", Var("m_stride"))
+                                                          & Constructor("maxpool_stride", Literal(None))
+                                                          & Constructor("maxpool_padding", Var("m_padding"))
+                                                          & Constructor("maxpool_padding", Literal(None))
+                                                          & Constructor("maxpool_dilation", Var("m_dilation"))
+                                                          & Constructor("maxpool_dilation", Literal(None))
+                                                          )
+                                            & Constructor("u_final_conv",
+                                                          Constructor("kernel_size", Var("fc_k"))
+                                                          & Constructor("kernel_size", Literal(None))
+                                                          & Constructor("convolution", Var("fc_conv"))
+                                                          & Constructor("convolution", Literal(None))
+                                                          & Constructor("convolution_stride", Var("fc_stride"))
+                                                          & Constructor("convolution_stride", Literal(None))
+                                                          & Constructor("convolution_padding", Var("fc_padding"))
+                                                          & Constructor("convolution_padding", Literal(None))
+                                                          & Constructor("convolution_dilation", Var("fc_dilation"))
+                                                          & Constructor("convolution_dilation", Literal(None))
+                                                          & Constructor("bias", Var("fc_b"))
+                                                          & Constructor("bias", Literal(None))
+                                                          )
+                                            & Constructor("u_linear_classifier",
+                                                          Constructor("linear_layer",
+                                                                      Constructor("input", Var("mlp_in"))
+                                                                      & Constructor("input", Literal(None))
+                                                                      & Constructor("output", Var("mlp_out"))
+                                                                      & Constructor("output", Literal(None))
+                                                                      & Constructor("bias", Var("mlp_b"))
+                                                                      & Constructor("bias", Literal(None))
+                                                                      )
+                                                          )
+                                            & Constructor("loss_function", Var("loss"))
+                                            & Constructor("loss_function", Literal(None))
+                                            & Constructor("preprocessors", Var("preps"))
+                                            )
+                                & Constructor("dataloader",
+                                              Constructor("Sampler",
+                                                          Var("sampler")
+                                                          & Constructor("replacement", Var("replacement"))
+                                                          & Constructor("num_samples", Var("num_samples"))
+                                                          )
+                                              & Constructor("Dataset",
+                                                            Literal("ABC_Dataset")
+                                                            & Constructor("annotator", Var("annotator"))
+                                                            & Constructor("channels", Var("channels"))
+                                                            & Constructor("num_workers", Var("num_workers"))
+                                                            & Constructor("sample_frequency", Var("sample_frequency"))
+                                                            & Constructor("event_mapping", Var("event_mapping"))
+                                                            & Constructor("online_filtering", Var("online_filtering"))
+                                                            & Constructor("total_input", Var("total_input"))
+                                                            & Constructor("target_resolution", Var("target_resolution"))
+                                                            )
+                                              & Constructor("batch_size", Var("batch_size"))
+                                              )
+
+                                & Constructor("optimizer", Var("opti"))
+                                & Constructor("lr_scheduler", Var("lr_sched"))
+                                )
+                    ),
 
 
         }
@@ -2041,6 +2454,40 @@ or
                                m_s, m_p, m_d, f_d, f_af, f_c, f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p,
                                f_m_d, fc_k, fc_c, fc_s, fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms,
                                loss, preps, loss_f, preprocessors, u: f"UModel({loss_f}, {preprocessors}, {u})"),
+
+            "NoSampler": lambda r, n: f"NoSampler",
+
+            "RandomSampler": lambda r, n: f"RandomSampler({r}, {n})",
+
+            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr: f"ABC_Dataset({a}, {c}, {nw}, {sf}, {em}, {of}, {ti}, {tr})",
+
+            "DataLoader": lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d: f"DataLoader({s}, {d}, {bs})",
+
+            "Adagrad": lambda lr, lr_d, w_d, i_a_v, eps, p_none: f"Adagrad({lr}, {lr_d}, {w_d}, {i_a_v}, {eps})",
+
+            "Adam": lambda lr, beta, eps, w_d, amsgrad, p_none: f"Adam({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+
+            "AdamW": lambda lr, beta, eps, w_d, amsgrad, p_none: f"AdamW({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+
+            "Adamax": lambda lr, beta, eps, w_d, p_none: f"Adamax({lr}, {beta}, {eps}, {w_d})",
+
+            "SGD": lambda lr, m, d, w_d, n, p_none: f"SGD({lr}, {m}, {d}, {w_d}, {n})",
+
+            "LinearLR": lambda sf, ef, ti, le, p_none: f"LinearLR({sf}, {ef}, {ti}, {le})",
+
+            "StepLR": lambda s, g, l, p_none: f"StepLR({s}, {g}, {l})",
+
+            "ExponentialLR": lambda g, l, p_none: f"ExponentialLR({g}, {l})",
+
+            "MulticlassTrainer": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm, m_s, m_p, m_d, f_d, f_af, f_c,
+                                         f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
+                                         fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps,
+                                         annotator, channels, num_w, sample_f, event_map, online_f, total_in,
+                                         target_res, replacement, num_s, sampler, batch_size, opti, lr_sched,
+                                         model, dataloader, optimizer, lr_scheduler:
+                                  f"MulticlassTrainer({model}, {dataloader}, {optimizer}, {lr_scheduler})"),
+
+
 
         }
 
@@ -2144,7 +2591,17 @@ if __name__ == "__main__":
                            preprocessor_fir_filter_params_choices=[(("channel", "filter_param"),)],
                            preprocessor_robust_scaler_lower_quantile_choices=[0.25], preprocessor_robust_scaler_upper_quantile_choices=[0.75],
                            preprocessor_spectogram_n_fft_choices=[256], preprocessor_spectogram_hop_length_choices=[64],
-                           preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1])
+                           preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1],
+                           n_samples=[10000],
+                           abc_channel_choices=[("Sp02", "ECG1", "ECG2", "Thor")],
+                           abc_event_mapping=[(("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)],
+                           abc_num_workers=[32], abc_sample_frequency=[10, 100],
+                           abc_total_input=["30s"], abc_target_resolution=["1s"],
+                           batch_size=[32], optimizer_learning_rate=[1e-3], optimizer_learning_rate_decay=[0], optimizer_weight_decay=[0, 1e-4],
+                           optimizer_eps=[1e-10], optimizer_beta=[(0.9, 0.999)], optimizer_initial_accumulator_value=[0], optimizer_momentum=[0],
+                           optimizer_dampening=[0], lr_scheduler_start_factor_choices=[1], lr_scheduler_end_factor_choices=[1e-2],
+                           lr_scheduler_total_iters_choices=[50], lr_scheduler_step_size_choices=[30], lr_scheduler_gamma_choices=[0.1, 0.95],
+                           lr_scheduler_last_epoch_choices=[-1])
 
     target0 = (
             Constructor("u_structure",
@@ -2308,13 +2765,37 @@ if __name__ == "__main__":
                           target2
                           & Constructor("loss_function", Literal("MSE"))
                           & Constructor("preprocessors", Literal((
-                                            ("ChannelSampler", None),
-                                            ("FIR", 64, None, None, False),
-                                            None
+                                            ("ChannelSampler", 1),
+                                            ("FIR", 64, "channel", (("channel", "filter_param"),), False),
                                             )))
                           )
 
-    target = target4
+    target5 = Constructor("trainer",
+                          target4
+                          & Constructor("dataloader",
+                                              Constructor("Sampler",
+                                                          Literal("RandomSampler")
+                                                          & Constructor("replacement", Literal(True))
+                                                          & Constructor("num_samples", Literal(10000))
+                                                          )
+                                              & Constructor("Dataset",
+                                                            Literal("ABC_Dataset")
+                                                            & Constructor("annotator", Literal("nsrr"))
+                                                            & Constructor("channels", Literal(("Sp02", "ECG1", "ECG2", "Thor")))
+                                                            & Constructor("num_workers", Literal(32))
+                                                            & Constructor("sample_frequency", Literal(100))
+                                                            & Constructor("event_mapping", Literal((("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)))
+                                                            & Constructor("online_filtering", Literal(True))
+                                                            & Constructor("total_input", Literal("30s"))
+                                                            & Constructor("target_resolution", Literal("1s"))
+                                                            )
+                                              & Constructor("batch_size", Literal(32))
+                                              )
+                                & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
+                                & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
+                          )
+
+    target = target5
 
     synthesizer = Synthesizer(repo.specification(), {})
 

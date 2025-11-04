@@ -527,6 +527,120 @@ or
             else:
                 return False
 
+    class Maybe_Preprocessor(Group):
+            name = "Maybe_Preprocessor"
+
+            def __init__(self, channel_sampler_n_choices, crop_total_input_choices, crop_sampling_rate_choices,
+                         empirical_clip_scaler_q_choices, empirical_clip_scaler_scale_choices,
+                         fir_sampling_rate_choices, fir_channels_choices, fir_filter_params_choices,
+                         robust_scaler_lower_quantile_choices, robust_scaler_upper_quantile_choices,
+                         spectogram_n_fft_choices,
+                         spectogram_hop_length_choices, spectogram_win_length_choices,
+                         spectogram_epoch_len_samples_choices):
+                self.channel_sampler_n_choices = channel_sampler_n_choices + [None]
+                self.crop_total_input_choices = crop_total_input_choices + [None]
+                self.crop_sampling_rate_choices = crop_sampling_rate_choices + [None]
+                self.empirical_clip_scaler_q_choices = empirical_clip_scaler_q_choices + [None]
+                self.empirical_clip_scaler_scale_choices = empirical_clip_scaler_scale_choices + [None]
+                self.fir_sampling_rate_choices = fir_sampling_rate_choices + [None]
+                self.fir_channels_choices = fir_channels_choices + [None]
+                self.fir_filter_params_choices = fir_filter_params_choices + [None]
+                self.robust_scaler_lower_quantile_choices = robust_scaler_lower_quantile_choices + [None]
+                self.robust_scaler_upper_quantile_choices = robust_scaler_upper_quantile_choices + [None]
+                self.spectogram_n_fft_choices = spectogram_n_fft_choices + [None]
+                self.spectogram_hop_length_choices = spectogram_hop_length_choices + [None]
+                self.spectogram_win_length_choices = spectogram_win_length_choices + [None]
+                self.spectogram_epoch_len_samples_choices = spectogram_epoch_len_samples_choices + [None]
+
+            def iter_channel_sampler(self):
+                for n in self.channel_sampler_n_choices:
+                    yield ("ChannelSampler", n)
+
+            def iter_crop(self):
+                for total_input in self.crop_total_input_choices:
+                    for sampling_rate in self.crop_sampling_rate_choices:
+                        for where in ["left", "middle", "right", None]:
+                            yield ("Crop", total_input, sampling_rate, where)
+
+            def iter_empirical_clip_scaler(self):
+                for q in self.empirical_clip_scaler_q_choices:
+                    for scale in self.empirical_clip_scaler_scale_choices:
+                        yield ("EmpiricalClipScaler", q, scale)
+
+            def iter_fir(self):
+                for sampling_rate in self.fir_sampling_rate_choices:
+                    for channels in self.fir_channels_choices:
+                        for filter_params in self.fir_filter_params_choices:
+                            for zero_phase in [True, False, None]:
+                                yield ("FIR", sampling_rate, channels, filter_params, zero_phase)
+
+            def iter_normalize(self):
+                yield ("Normalize",)
+
+            def iter_robust_scaler(self):
+                for lower_quantile in self.robust_scaler_lower_quantile_choices:
+                    for upper_quantile in self.robust_scaler_upper_quantile_choices:
+                        yield ("RobustScaler", lower_quantile, upper_quantile)
+
+            def iter_spectogram(self):
+                for n_fft in self.spectogram_n_fft_choices:
+                    for hop_length in self.spectogram_hop_length_choices:
+                        for win_length in self.spectogram_win_length_choices:
+                            for epoch_len_samples in self.spectogram_epoch_len_samples_choices:
+                                yield ("Spectogram", n_fft, hop_length, win_length, epoch_len_samples)
+
+            def iter_znormalize(self):
+                for use_global_statistics in [True, False, None]:
+                    yield ("ZNormalize", use_global_statistics)
+
+            def __iter__(self):
+                yield from self.iter_channel_sampler()
+                yield from self.iter_crop()
+                yield from self.iter_empirical_clip_scaler()
+                yield from self.iter_fir()
+                yield from self.iter_normalize()
+                yield from self.iter_robust_scaler()
+                yield from self.iter_spectogram()
+                yield from self.iter_znormalize()
+
+            def __contains__(self, value: object) -> bool:
+                if (isinstance(value, tuple)):
+                    if value[0] == "ChannelSampler":
+                        return len(value) == 2 and value[1] in self.channel_sampler_n_choices
+                    elif value[0] == "Crop":
+                        return (len(value) == 4 and
+                                value[1] in self.crop_total_input_choices and
+                                value[2] in self.crop_sampling_rate_choices and
+                                value[3] in ["left", "middle", "right", None])
+                    elif value[0] == "EmpiricalClipScaler":
+                        return (len(value) == 3 and
+                                value[1] in self.empirical_clip_scaler_q_choices and
+                                value[2] in self.empirical_clip_scaler_scale_choices)
+                    elif value[0] == "FIR":
+                        return (len(value) == 5 and
+                                value[1] in self.fir_sampling_rate_choices and
+                                value[2] in self.fir_channels_choices and
+                                value[3] in self.fir_filter_params_choices and
+                                value[4] in [True, False, None])
+                    elif value[0] == "Normalize":
+                        return len(value) == 1
+                    elif value[0] == "RobustScaler":
+                        return (len(value) == 3 and
+                                value[1] in self.robust_scaler_lower_quantile_choices and
+                                value[2] in self.robust_scaler_upper_quantile_choices)
+                    elif value[0] == "Spectogram":
+                        return (len(value) == 5 and
+                                value[1] in self.spectogram_n_fft_choices and
+                                value[2] in self.spectogram_hop_length_choices and
+                                value[3] in self.spectogram_win_length_choices and
+                                value[4] in self.spectogram_epoch_len_samples_choices)
+                    elif value[0] == "ZNormalize":
+                        return len(value) == 2 and value[1] in [True, False, None]
+                    else:
+                        return False
+                else:
+                    return False
+
     class Maybe_Preprocessor_Tuple(Group):
         name = "Maybe_Preprocessor_Tuple"
 
@@ -540,8 +654,8 @@ or
             return (isinstance(value, tuple) and all(True if v is None else v in self.preprocessors for v in value))
 
 
-    class Optimizer(Group):
-            name = "Optimizer"
+    class Maybe_Optimizer(Group):
+            name = "Maybe_Optimizer"
 
             """
             ("Adagrad", learning_rate, learning_rate_decay, weight_decay, initial_accumulator_value, eps)
@@ -553,14 +667,14 @@ or
 
             def __init__(self, learning_rate, learning_rate_decay, weight_decay, eps, beta, initial_accumulator_value,
                          momentum, dampening):
-                self.learning_rate = learning_rate
-                self.learning_rate_decay = learning_rate_decay
-                self.weight_decay = weight_decay
-                self.eps = eps
-                self.beta = beta
-                self.initial_accumulator_value = initial_accumulator_value
-                self.momentum = momentum
-                self.dampening = dampening
+                self.learning_rate = learning_rate + [None]
+                self.learning_rate_decay = learning_rate_decay + [None]
+                self.weight_decay = weight_decay + [None]
+                self.eps = eps + [None]
+                self.beta = beta + [None]
+                self.initial_accumulator_value = initial_accumulator_value + [None]
+                self.momentum = momentum + [None]
+                self.dampening = dampening + [None]
 
             def iter_adagrad(self):
                 for lr in self.learning_rate:
@@ -575,7 +689,7 @@ or
                     for b in self.beta:
                         for e in self.eps:
                             for wd in self.weight_decay:
-                                for amsgrad in [True, False]:
+                                for amsgrad in [True, False, None]:
                                     yield ("Adam", lr, b, e, wd, amsgrad)
 
             def iter_adamw(self):
@@ -583,7 +697,7 @@ or
                     for b in self.beta:
                         for e in self.eps:
                             for wd in self.weight_decay:
-                                for amsgrad in [True, False]:
+                                for amsgrad in [True, False, None]:
                                     yield ("AdamW", lr, b, e, wd, amsgrad)
 
             def iter_adamax(self):
@@ -598,7 +712,7 @@ or
                     for m in self.momentum:
                         for d in self.dampening:
                             for wd in self.weight_decay:
-                                for nesterov in [True, False]:
+                                for nesterov in [True, False, None]:
                                     yield ("SGD", lr, m, d, wd, nesterov)
 
             def __iter__(self):
@@ -623,14 +737,14 @@ or
                                 value[2] in self.beta and
                                 value[3] in self.eps and
                                 value[4] in self.weight_decay and
-                                value[5] in [True, False])
+                                value[5] in [True, False, None])
                     elif value[0] == "AdamW":
                         return (len(value) == 6 and
                                 value[1] in self.learning_rate and
                                 value[2] in self.beta and
                                 value[3] in self.eps and
                                 value[4] in self.weight_decay and
-                                value[5] in [True, False])
+                                value[5] in [True, False, None])
                     elif value[0] == "Adamax":
                         return (len(value) == 5 and
                                 value[1] in self.learning_rate and
@@ -643,14 +757,14 @@ or
                                 value[2] in self.momentum and
                                 value[3] in self.dampening and
                                 value[4] in self.weight_decay and
-                                value[5] in [True, False])
+                                value[5] in [True, False, None])
                     else:
                         return False
                 else:
                     return False
 
-    class LR_Scheduler(Group):
-            name = "LR_Scheduler"
+    class Maybe_LR_Scheduler(Group):
+            name = "Maybe_LR_Scheduler"
 
             """
             ("LinearLR", start_factor, end_factor, total_iters, last_epoch)
@@ -660,12 +774,12 @@ or
 
             def __init__(self, start_factor_choices, end_factor_choices, total_iters_choices,
                          step_size_choices, gamma_choices, last_epoch_choices):
-                self.start_factor_choices = start_factor_choices
-                self.end_factor_choices = end_factor_choices
-                self.total_iters_choices = total_iters_choices
-                self.step_size_choices = step_size_choices
-                self.gamma_choices = gamma_choices
-                self.last_epoch_choices = last_epoch_choices
+                self.start_factor_choices = start_factor_choices + [None]
+                self.end_factor_choices = end_factor_choices + [None]
+                self.total_iters_choices = total_iters_choices + [None]
+                self.step_size_choices = step_size_choices + [None]
+                self.gamma_choices = gamma_choices + [None]
+                self.last_epoch_choices = last_epoch_choices + [None]
 
 
             def iter_linear_lr(self):
@@ -751,20 +865,20 @@ or
                                                self.preprocessor_spectogram_win_length_choices,
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
-        maybe_preprocessor = self.Preprocessor(self.preprocessor_channel_sampler_n_choices + [None],
-                                               self.preprocessor_crop_total_input_choices + [None],
-                                               self.preprocessor_crop_sampling_rate_choices + [None],
-                                               self.preprocessor_empirical_clip_scaler_q_choices + [None],
-                                               self.preprocessor_empirical_clip_scaler_scale_choices + [None],
-                                               self.preprocessor_fir_sampling_rate_choices + [None],
-                                               self.preprocessor_fir_channels_choices + [None],
-                                               self.preprocessor_fir_filter_params_choices + [None],
-                                               self.preprocessor_robust_scaler_lower_quantile_choices + [None],
-                                               self.preprocessor_robust_scaler_upper_quantile_choices + [None],
-                                               self.preprocessor_spectogram_n_fft_choices + [None],
-                                               self.preprocessor_spectogram_hop_length_choices + [None],
-                                               self.preprocessor_spectogram_win_length_choices + [None],
-                                               self.preprocessor_spectogram_epoch_len_samples_choices + [None]
+        maybe_preprocessor = self.Maybe_Preprocessor(self.preprocessor_channel_sampler_n_choices,
+                                               self.preprocessor_crop_total_input_choices,
+                                               self.preprocessor_crop_sampling_rate_choices,
+                                               self.preprocessor_empirical_clip_scaler_q_choices,
+                                               self.preprocessor_empirical_clip_scaler_scale_choices,
+                                               self.preprocessor_fir_sampling_rate_choices,
+                                               self.preprocessor_fir_channels_choices,
+                                               self.preprocessor_fir_filter_params_choices,
+                                               self.preprocessor_robust_scaler_lower_quantile_choices,
+                                               self.preprocessor_robust_scaler_upper_quantile_choices,
+                                               self.preprocessor_spectogram_n_fft_choices,
+                                               self.preprocessor_spectogram_hop_length_choices,
+                                               self.preprocessor_spectogram_win_length_choices,
+                                               self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
         preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
         n_samples = DataGroup("n_samples", self.n_samples)
@@ -785,40 +899,26 @@ or
         optimizer_initial_accumulator_value = DataGroup("optimizer_initial_accumulator_value", self.optimizer_initial_accumulator_value)
         optimizer_momentum = DataGroup("optimizer_momentum", self.optimizer_momentum)
         optimizer_dampening = DataGroup("optimizer_dampening", self.optimizer_dampening)
-        optimizer = self.Optimizer(self.optimizer_learning_rate,
-                                   self.optimizer_learning_rate_decay,
-                                   self.optimizer_weight_decay,
-                                   self.optimizer_eps,
-                                   self.optimizer_beta,
-                                   self.optimizer_initial_accumulator_value,
-                                   self.optimizer_momentum,
-                                   self.optimizer_dampening)
-        maybe_optimizer = self.Optimizer(self.optimizer_learning_rate + [None],
-                                         self.optimizer_learning_rate_decay + [None],
-                                         self.optimizer_weight_decay + [None],
-                                         self.optimizer_eps + [None],
-                                         self.optimizer_beta + [None],
-                                         self.optimizer_initial_accumulator_value + [None],
-                                         self.optimizer_momentum + [None],
-                                         self.optimizer_dampening + [None])
+        maybe_optimizer = self.Maybe_Optimizer(self.optimizer_learning_rate,
+                                         self.optimizer_learning_rate_decay,
+                                         self.optimizer_weight_decay,
+                                         self.optimizer_eps,
+                                         self.optimizer_beta,
+                                         self.optimizer_initial_accumulator_value,
+                                         self.optimizer_momentum,
+                                         self.optimizer_dampening)
         lr_scheduler_start_factor = DataGroup("lr_scheduler_start_factor", self.lr_scheduler_start_factor_choices)
         lr_scheduler_end_factor = DataGroup("lr_scheduler_end_factor", self.lr_scheduler_end_factor_choices)
         lr_scheduler_total_iters = DataGroup("lr_scheduler_total_iters", self.lr_scheduler_total_iters_choices)
         lr_scheduler_step_size = DataGroup("lr_scheduler_step_size", self.lr_scheduler_step_size_choices)
         lr_scheduler_gamma = DataGroup("lr_scheduler_gamma", self.lr_scheduler_gamma_choices)
         lr_scheduler_last_epoch = DataGroup("lr_scheduler_last_epoch", self.lr_scheduler_last_epoch_choices)
-        lr_scheduler = self.LR_Scheduler(self.lr_scheduler_start_factor_choices,
-                                        self.lr_scheduler_end_factor_choices,
-                                        self.lr_scheduler_total_iters_choices,
-                                        self.lr_scheduler_step_size_choices,
-                                        self.lr_scheduler_gamma_choices,
-                                        self.lr_scheduler_last_epoch_choices)
-        maybe_lr_scheduler = self.LR_Scheduler(self.lr_scheduler_start_factor_choices + [None],
-                                        self.lr_scheduler_end_factor_choices + [None],
-                                        self.lr_scheduler_total_iters_choices + [None],
-                                        self.lr_scheduler_step_size_choices + [None],
-                                        self.lr_scheduler_gamma_choices + [None],
-                                        self.lr_scheduler_last_epoch_choices + [None])
+        maybe_lr_scheduler = self.Maybe_LR_Scheduler(self.lr_scheduler_start_factor_choices,
+                                               self.lr_scheduler_end_factor_choices,
+                                               self.lr_scheduler_total_iters_choices,
+                                               self.lr_scheduler_step_size_choices,
+                                               self.lr_scheduler_gamma_choices,
+                                               self.lr_scheduler_last_epoch_choices)
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -2099,7 +2199,7 @@ or
             .parameter("p_none", maybe_lr_scheduler)
             .parameter_constraint(lambda v: v["p_none"][0] == "ExponentialLR"
                                             and (v["p_none"][1] == v["gamma"] or v["p_none"][2] is None)
-                                            and (v["p_none"][2] == v["last_epoch"] or v["p_none"][3] is None)
+                                            and (v["p_none"][2] == v["last_epoch"] or v["p_none"][2] is None)
                                   )
             .suffix(Constructor("lr_scheduler", Var("p_none"))),
 
@@ -2367,24 +2467,36 @@ or
                                               Constructor("Sampler",
                                                           Var("sampler")
                                                           & Constructor("replacement", Var("replacement"))
+                                                          & Constructor("replacement", Literal(None))
                                                           & Constructor("num_samples", Var("num_samples"))
+                                                          & Constructor("num_samples", Literal(None))
                                                           )
                                               & Constructor("Dataset",
                                                             Literal("ABC_Dataset")
                                                             & Constructor("annotator", Var("annotator"))
+                                                            & Constructor("annotator", Literal(None))
                                                             & Constructor("channels", Var("channels"))
+                                                            & Constructor("channels", Literal(None))
                                                             & Constructor("num_workers", Var("num_workers"))
+                                                            & Constructor("num_workers",  Literal(None))
                                                             & Constructor("sample_frequency", Var("sample_frequency"))
+                                                            & Constructor("sample_frequency", Literal(None))
                                                             & Constructor("event_mapping", Var("event_mapping"))
+                                                            & Constructor("event_mapping", Literal(None))
                                                             & Constructor("online_filtering", Var("online_filtering"))
+                                                            & Constructor("online_filtering", Literal(None))
                                                             & Constructor("total_input", Var("total_input"))
+                                                            & Constructor("total_input", Literal(None))
                                                             & Constructor("target_resolution", Var("target_resolution"))
+                                                            & Constructor("target_resolution", Literal(None))
                                                             )
                                               & Constructor("batch_size", Var("batch_size"))
+                                              & Constructor("batch_size", Literal(None))
                                               )
-
                                 & Constructor("optimizer", Var("opti"))
+                                & Constructor("optimizer", Literal(None))
                                 & Constructor("lr_scheduler", Var("lr_sched"))
+                                & Constructor("lr_scheduler", Literal(None))
                                 )
                     ),
 
@@ -2770,7 +2882,17 @@ if __name__ == "__main__":
                                             )))
                           )
 
-    target5 = Constructor("trainer",
+    target5 = Constructor("u_model",
+                          target2
+                          & Constructor("loss_function", Literal("MSE"))
+                          & Constructor("preprocessors", Literal((
+                              ("ChannelSampler", 1),
+                              ("FIR", 64, None, None, False),
+                              None
+                          )))
+                          )
+
+    target6 = Constructor("trainer",
                           target4
                           & Constructor("dataloader",
                                               Constructor("Sampler",
@@ -2795,7 +2917,36 @@ if __name__ == "__main__":
                                 & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
                           )
 
-    target = target5
+    target7 = Constructor("trainer",
+                          target4
+                          & Constructor("dataloader",
+                                        Constructor("Sampler",
+                                                    Literal("RandomSampler")
+                                                    & Constructor("replacement", Literal(True))
+                                                    & Constructor("num_samples", Literal(10000))
+                                                    )
+                                        & Constructor("Dataset",
+                                                      Literal("ABC_Dataset")
+                                                      & Constructor("annotator", Literal("nsrr"))
+                                                      & Constructor("channels",
+                                                                    Literal(("Sp02", "ECG1", "ECG2", "Thor")))
+                                                      & Constructor("num_workers", Literal(32))
+                                                      & Constructor("sample_frequency", Literal(100))
+                                                      & Constructor("event_mapping", Literal(
+                                                          (("hypopnea|hypopnea", "hypopnea"),
+                                                           ("central apnea|central apnea", "apnea"),
+                                                           ("obstructive apnea|obstructive apnea", "apnea"),)))
+                                                      & Constructor("online_filtering", Literal(True))
+                                                      & Constructor("total_input", Literal("30s"))
+                                                      & Constructor("target_resolution", Literal("1s"))
+                                                      )
+                                        & Constructor("batch_size", Literal(32))
+                                        )
+                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
+                          & Constructor("lr_scheduler", Literal(None)) # TODO: None in Parameter-Tuples needs to be resolved at top level
+                          )
+
+    target = target7
 
     synthesizer = Synthesizer(repo.specification(), {})
 

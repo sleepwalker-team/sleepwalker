@@ -82,7 +82,9 @@ class UtimeRepository:
                  n_samples,
                  abc_channel_choices, abc_event_mapping, abc_num_workers, abc_sample_frequency, abc_total_input,
                  abc_target_resolution,
-                 batch_size
+                 batch_size,
+                 optimizer_learning_rate, optimizer_learning_rate_decay, optimizer_weight_decay, optimizer_eps,
+                 optimizer_beta, optimizer_initial_accumulator_value, optimizer_momentum, optimizer_dampening
                  ):
         self.dimension_choices = dimension_choices + [x for x in map(lambda x: x * 2, dimension_choices) if x not in dimension_choices]
         self.normalization_eps_choices = normalization_eps_choices
@@ -118,6 +120,14 @@ class UtimeRepository:
         self.abc_total_input = abc_total_input
         self.abc_target_resolution = abc_target_resolution
         self.batch_size = batch_size
+        self.optimizer_learning_rate = optimizer_learning_rate
+        self.optimizer_learning_rate_decay = optimizer_learning_rate_decay
+        self.optimizer_weight_decay = optimizer_weight_decay
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_beta = optimizer_beta
+        self.optimizer_initial_accumulator_value = optimizer_initial_accumulator_value
+        self.optimizer_momentum = optimizer_momentum
+        self.optimizer_dampening = optimizer_dampening
 
         # Is this really necessary? With our request language, the user has to ensure this himself...
         if 1 not in self.convolution_kernel_size_choices:
@@ -509,122 +519,6 @@ or
             else:
                 return False
 
-
-    class Maybe_Preprocessor(Group):
-            name = "Maybe_Preprocessor"
-
-            def __init__(self, channel_sampler_n_choices, crop_total_input_choices, crop_sampling_rate_choices,
-                         empirical_clip_scaler_q_choices, empirical_clip_scaler_scale_choices,
-                         fir_sampling_rate_choices, fir_channels_choices, fir_filter_params_choices,
-                         robust_scaler_lower_quantile_choices, robust_scaler_upper_quantile_choices,
-                         spectogram_n_fft_choices,
-                         spectogram_hop_length_choices, spectogram_win_length_choices,
-                         spectogram_epoch_len_samples_choices):
-                self.channel_sampler_n_choices = channel_sampler_n_choices + [None]
-                self.crop_total_input_choices = crop_total_input_choices + [None]
-                self.crop_sampling_rate_choices = crop_sampling_rate_choices + [None]
-                self.empirical_clip_scaler_q_choices = empirical_clip_scaler_q_choices + [None]
-                self.empirical_clip_scaler_scale_choices = empirical_clip_scaler_scale_choices + [None]
-                self.fir_sampling_rate_choices = fir_sampling_rate_choices + [None]
-                self.fir_channels_choices = fir_channels_choices + [None]
-                self.fir_filter_params_choices = fir_filter_params_choices + [None]
-                self.robust_scaler_lower_quantile_choices = robust_scaler_lower_quantile_choices + [None]
-                self.robust_scaler_upper_quantile_choices = robust_scaler_upper_quantile_choices + [None]
-                self.spectogram_n_fft_choices = spectogram_n_fft_choices + [None]
-                self.spectogram_hop_length_choices = spectogram_hop_length_choices + [None]
-                self.spectogram_win_length_choices = spectogram_win_length_choices + [None]
-                self.spectogram_epoch_len_samples_choices = spectogram_epoch_len_samples_choices + [None]
-
-
-            def iter_channel_sampler(self):
-                for n in self.channel_sampler_n_choices:
-                    yield ("ChannelSampler", n)
-
-            def iter_crop(self):
-                for total_input in self.crop_total_input_choices:
-                    for sampling_rate in self.crop_sampling_rate_choices:
-                        for where in ["left", "middle", "right"]:
-                            yield ("Crop", total_input, sampling_rate, where)
-
-            def iter_empirical_clip_scaler(self):
-                for q in self.empirical_clip_scaler_q_choices:
-                    for scale in self.empirical_clip_scaler_scale_choices:
-                        yield ("EmpiricalClipScaler", q, scale)
-
-            def iter_fir(self):
-                for sampling_rate in self.fir_sampling_rate_choices:
-                    for channels in self.fir_channels_choices:
-                        for filter_params in self.fir_filter_params_choices:
-                            for zero_phase in [True, False]:
-                                yield ("FIR", sampling_rate, channels, filter_params, zero_phase)
-
-            def iter_normalize(self):
-                yield ("Normalize",)
-
-            def iter_robust_scaler(self):
-                for lower_quantile in self.robust_scaler_lower_quantile_choices:
-                    for upper_quantile in self.robust_scaler_upper_quantile_choices:
-                        yield ("RobustScaler", lower_quantile, upper_quantile)
-
-            def iter_spectogram(self):
-                for n_fft in self.spectogram_n_fft_choices:
-                    for hop_length in self.spectogram_hop_length_choices:
-                        for win_length in self.spectogram_win_length_choices:
-                            for epoch_len_samples in self.spectogram_epoch_len_samples_choices:
-                                yield ("Spectogram", n_fft, hop_length, win_length, epoch_len_samples)
-
-            def iter_znormalize(self):
-                for use_global_statistics in [True, False]:
-                    yield ("ZNormalize", use_global_statistics)
-
-            def __iter__(self):
-                yield from self.iter_channel_sampler()
-                yield from self.iter_crop()
-                yield from self.iter_empirical_clip_scaler()
-                yield from self.iter_fir()
-                yield from self.iter_normalize()
-                yield from self.iter_robust_scaler()
-                yield from self.iter_spectogram()
-                yield from self.iter_znormalize()
-
-            def __contains__(self, value: object) -> bool:
-                if (isinstance(value, tuple)):
-                    if value[0] == "ChannelSampler":
-                        return len(value) == 2 and value[1] in self.channel_sampler_n_choices
-                    elif value[0] == "Crop":
-                        return (len(value) == 4 and
-                                value[1] in self.crop_total_input_choices and
-                                value[2] in self.crop_sampling_rate_choices and
-                                value[3] in ["left", "middle", "right"])
-                    elif value[0] == "EmpiricalClipScaler":
-                        return (len(value) == 3 and
-                                value[1] in self.empirical_clip_scaler_q_choices and
-                                value[2] in self.empirical_clip_scaler_scale_choices)
-                    elif value[0] == "FIR":
-                        return (len(value) == 5 and
-                                value[1] in self.fir_sampling_rate_choices and
-                                value[2] in self.fir_channels_choices and
-                                value[3] in self.fir_filter_params_choices and
-                                isinstance(value[4], bool))
-                    elif value[0] == "Normalize":
-                        return len(value) == 1
-                    elif value[0] == "RobustScaler":
-                        return (len(value) == 3 and
-                                value[1] in self.robust_scaler_lower_quantile_choices and
-                                value[2] in self.robust_scaler_upper_quantile_choices)
-                    elif value[0] == "Spectogram":
-                        return (len(value) == 5 and
-                                value[1] in self.spectogram_n_fft_choices and
-                                value[2] in self.spectogram_hop_length_choices and
-                                value[3] in self.spectogram_win_length_choices and
-                                value[4] in self.spectogram_epoch_len_samples_choices)
-                    elif value[0] == "ZNormalize":
-                        return len(value) == 2 and isinstance(value[1], bool)
-                    else:
-                        return False
-                else:
-                    return False
-
     class Maybe_Preprocessor_Tuple(Group):
         name = "Maybe_Preprocessor_Tuple"
 
@@ -637,6 +531,115 @@ or
         def __contains__(self, value: object) -> bool:
             return (isinstance(value, tuple) and all(True if v is None else v in self.preprocessors for v in value))
 
+
+    class Optimizer(Group):
+            name = "Optimizer"
+
+            """
+            ("Adagrad", learning_rate, learning_rate_decay, weight_decay, initial_accumulator_value, eps)
+            ("Adam", learning_rate, betas, eps, weight_decay, amsgrad = [True, False])
+            ("AdamW", learning_rate, betas, eps, weight_decay, amsgrad = [True, False])
+            ("Adamax", learning_rate, betas, eps, weight_decay)
+            ("SGD", learning_rate, momentum, dampening, weight_decay, nesterov = [True, False])
+            """
+
+            def __init__(self, learning_rate, learning_rate_decay, weight_decay, eps, beta, initial_accumulator_value,
+                         momentum, dampening):
+                self.learning_rate = learning_rate
+                self.learning_rate_decay = learning_rate_decay
+                self.weight_decay = weight_decay
+                self.eps = eps
+                self.beta = beta
+                self.initial_accumulator_value = initial_accumulator_value
+                self.momentum = momentum
+                self.dampening = dampening
+
+            def iter_adagrad(self):
+                for lr in self.learning_rate:
+                    for lr_decay in self.learning_rate_decay:
+                        for wd in self.weight_decay:
+                            for init_acc in self.initial_accumulator_value:
+                                for e in self.eps:
+                                    yield ("Adagrad", lr, lr_decay, wd, init_acc, e)
+
+            def iter_adam(self):
+                for lr in self.learning_rate:
+                    for b in self.beta:
+                        for e in self.eps:
+                            for wd in self.weight_decay:
+                                for amsgrad in [True, False]:
+                                    yield ("Adam", lr, b, e, wd, amsgrad)
+
+            def iter_adamw(self):
+                for lr in self.learning_rate:
+                    for b in self.beta:
+                        for e in self.eps:
+                            for wd in self.weight_decay:
+                                for amsgrad in [True, False]:
+                                    yield ("AdamW", lr, b, e, wd, amsgrad)
+
+            def iter_adamax(self):
+                for lr in self.learning_rate:
+                    for b in self.beta:
+                        for e in self.eps:
+                            for wd in self.weight_decay:
+                                yield ("Adamax", lr, b, e, wd)
+
+            def iter_sgd(self):
+                for lr in self.learning_rate:
+                    for m in self.momentum:
+                        for d in self.dampening:
+                            for wd in self.weight_decay:
+                                for nesterov in [True, False]:
+                                    yield ("SGD", lr, m, d, wd, nesterov)
+
+            def __iter__(self):
+                yield from self.iter_adagrad()
+                yield from self.iter_adam()
+                yield from self.iter_adamw()
+                yield from self.iter_adamax()
+                yield from self.iter_sgd()
+
+            def __contains__(self, value: object) -> bool:
+                if (isinstance(value, tuple)):
+                    if value[0] == "Adagrad":
+                        return (len(value) == 6 and
+                                value[1] in self.learning_rate and
+                                value[2] in self.learning_rate_decay and
+                                value[3] in self.weight_decay and
+                                value[4] in self.initial_accumulator_value and
+                                value[5] in self.eps)
+                    elif value[0] == "Adam":
+                        return (len(value) == 6 and
+                                value[1] in self.learning_rate and
+                                value[2] in self.beta and
+                                value[3] in self.eps and
+                                value[4] in self.weight_decay and
+                                value[5] in [True, False])
+                    elif value[0] == "AdamW":
+                        return (len(value) == 6 and
+                                value[1] in self.learning_rate and
+                                value[2] in self.beta and
+                                value[3] in self.eps and
+                                value[4] in self.weight_decay and
+                                value[5] in [True, False])
+                    elif value[0] == "Adamax":
+                        return (len(value) == 5 and
+                                value[1] in self.learning_rate and
+                                value[2] in self.beta and
+                                value[3] in self.eps and
+                                value[4] in self.weight_decay)
+                    elif value[0] == "SGD":
+                        return (len(value) == 6 and
+                                value[1] in self.learning_rate and
+                                value[2] in self.momentum and
+                                value[3] in self.dampening and
+                                value[4] in self.weight_decay and
+                                value[5] in [True, False])
+                    else:
+                        return False
+                else:
+                    return False
 
     def specification(self):
         dimension = DataGroup("dimension", self.dimension_choices)
@@ -676,20 +679,20 @@ or
                                                self.preprocessor_spectogram_win_length_choices,
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
-        maybe_preprocessor = self.Maybe_Preprocessor(self.preprocessor_channel_sampler_n_choices,
-                                               self.preprocessor_crop_total_input_choices,
-                                               self.preprocessor_crop_sampling_rate_choices,
-                                               self.preprocessor_empirical_clip_scaler_q_choices,
-                                               self.preprocessor_empirical_clip_scaler_scale_choices,
-                                               self.preprocessor_fir_sampling_rate_choices,
-                                               self.preprocessor_fir_channels_choices,
-                                               self.preprocessor_fir_filter_params_choices,
-                                               self.preprocessor_robust_scaler_lower_quantile_choices,
-                                               self.preprocessor_robust_scaler_upper_quantile_choices,
-                                               self.preprocessor_spectogram_n_fft_choices,
-                                               self.preprocessor_spectogram_hop_length_choices,
-                                               self.preprocessor_spectogram_win_length_choices,
-                                               self.preprocessor_spectogram_epoch_len_samples_choices
+        maybe_preprocessor = self.Preprocessor(self.preprocessor_channel_sampler_n_choices + [None],
+                                               self.preprocessor_crop_total_input_choices + [None],
+                                               self.preprocessor_crop_sampling_rate_choices + [None],
+                                               self.preprocessor_empirical_clip_scaler_q_choices + [None],
+                                               self.preprocessor_empirical_clip_scaler_scale_choices + [None],
+                                               self.preprocessor_fir_sampling_rate_choices + [None],
+                                               self.preprocessor_fir_channels_choices + [None],
+                                               self.preprocessor_fir_filter_params_choices + [None],
+                                               self.preprocessor_robust_scaler_lower_quantile_choices + [None],
+                                               self.preprocessor_robust_scaler_upper_quantile_choices + [None],
+                                               self.preprocessor_spectogram_n_fft_choices + [None],
+                                               self.preprocessor_spectogram_hop_length_choices + [None],
+                                               self.preprocessor_spectogram_win_length_choices + [None],
+                                               self.preprocessor_spectogram_epoch_len_samples_choices + [None]
                                                )
         preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
         n_samples = DataGroup("n_samples", self.n_samples)
@@ -702,6 +705,30 @@ or
                                              "Derived HR", "Light", "Manual Pos"]) # ohne Respiration Rate, weil keine 100%
         """
         abc_channels = DataGroup("abc_channels", self.abc_channel_choices)
+        optimizer_learning_rate = DataGroup("optimizer_learning_rate", self.optimizer_learning_rate)
+        optimizer_learning_rate_decay = DataGroup("optimizer_learning_rate_decay", self.optimizer_learning_rate_decay)
+        optimizer_weight_decay = DataGroup("optimizer_weight_decay", self.optimizer_weight_decay)
+        optimizer_eps = DataGroup("optimizer_eps", self.optimizer_eps)
+        optimizer_beta = DataGroup("optimizer_beta", self.optimizer_beta)
+        optimizer_initial_accumulator_value = DataGroup("optimizer_initial_accumulator_value", self.optimizer_initial_accumulator_value)
+        optimizer_momentum = DataGroup("optimizer_momentum", self.optimizer_momentum)
+        optimizer_dampening = DataGroup("optimizer_dampening", self.optimizer_dampening)
+        optimizer = self.Optimizer(self.optimizer_learning_rate,
+                                   self.optimizer_learning_rate_decay,
+                                   self.optimizer_weight_decay,
+                                   self.optimizer_eps,
+                                   self.optimizer_beta,
+                                   self.optimizer_initial_accumulator_value,
+                                   self.optimizer_momentum,
+                                   self.optimizer_dampening)
+        maybe_optimizer = self.Optimizer(self.optimizer_learning_rate + [None],
+                                         self.optimizer_learning_rate_decay + [None],
+                                         self.optimizer_weight_decay + [None],
+                                         self.optimizer_eps + [None],
+                                         self.optimizer_beta + [None],
+                                         self.optimizer_initial_accumulator_value + [None],
+                                         self.optimizer_momentum + [None],
+                                         self.optimizer_dampening + [None])
 
         return {
             "ReLu": Constructor("activation_function") & Literal("ReLu") & Literal(None),
@@ -1860,6 +1887,93 @@ or
                                 & Constructor("batch_size", Var("batch_size"))
                                 )
                     ),
+
+            """
+                        ("Adagrad", learning_rate, learning_rate_decay, weight_decay, initial_accumulator_value, eps)
+                        ("Adam", learning_rate, beta, eps, weight_decay, amsgrad = [True, False])
+                        ("AdamW", learning_rate, beta, eps, weight_decay, amsgrad = [True, False])
+                        ("Adamax", learning_rate, beta, eps, weight_decay)
+                        ("SGD", learning_rate, momentum, dampening, weight_decay, nesterov = [True, False])
+                        """ :(),
+
+            "Adagrad": DSL()
+            .parameter("lr", optimizer_learning_rate)
+            .parameter("lr_d", optimizer_learning_rate_decay)
+            .parameter("w_d", optimizer_weight_decay)
+            .parameter("i_a_v", optimizer_initial_accumulator_value)
+            .parameter("eps", optimizer_eps)
+            .parameter("p_none", maybe_optimizer)
+            .parameter_constraint(lambda v: v["p_none"][0] == "Adagrad"
+                                            and (v["p_none"][1] == v["lr"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["lr_d"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["w_d"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["i_a_v"] or v["p_none"][4] is None)
+                                            and (v["p_none"][5] == v["eps"] or v["p_none"][5] is None)
+                                  )
+            .suffix(Constructor("optimizer", Var("p_none"))),
+
+            "Adam": DSL()
+            .parameter("lr", optimizer_learning_rate)
+            .parameter("beta", optimizer_beta)
+            .parameter("eps", optimizer_eps)
+            .parameter("w_d", optimizer_weight_decay)
+            .parameter("amsgrad", DataGroup("Optimizer_Adam_Amsgrad", [True, False]))
+            .parameter("p_none", maybe_optimizer)
+            .parameter_constraint(lambda v: v["p_none"][0] == "Adam"
+                                            and (v["p_none"][1] == v["lr"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["beta"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["eps"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["w_d"] or v["p_none"][4] is None)
+                                            and (v["p_none"][5] == v["amsgrad"] or v["p_none"][5] is None)
+                                  )
+            .suffix(Constructor("optimizer", Var("p_none"))),
+
+            "AdamW": DSL()
+            .parameter("lr", optimizer_learning_rate)
+            .parameter("beta", optimizer_beta)
+            .parameter("eps", optimizer_eps)
+            .parameter("w_d", optimizer_weight_decay)
+            .parameter("amsgrad", DataGroup("Optimizer_AdamW_Amsgrad", [True, False]))
+            .parameter("p_none", maybe_optimizer)
+            .parameter_constraint(lambda v: v["p_none"][0] == "AdamW"
+                                            and (v["p_none"][1] == v["lr"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["beta"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["eps"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["w_d"] or v["p_none"][4] is None)
+                                            and (v["p_none"][5] == v["amsgrad"] or v["p_none"][5] is None)
+                                  )
+            .suffix(Constructor("optimizer", Var("p_none"))),
+
+            "Adamax": DSL()
+            .parameter("lr", optimizer_learning_rate)
+            .parameter("beta", optimizer_beta)
+            .parameter("eps", optimizer_eps)
+            .parameter("w_d", optimizer_weight_decay)
+            .parameter("p_none", maybe_optimizer)
+            .parameter_constraint(lambda v: v["p_none"][0] == "Adamax"
+                                            and (v["p_none"][1] == v["lr"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["beta"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["eps"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["w_d"] or v["p_none"][4] is None)
+                                  )
+            .suffix(Constructor("optimizer", Var("p_none"))),
+
+            "SGD": DSL()
+            .parameter("lr", optimizer_learning_rate)
+            .parameter("momentum", optimizer_momentum)
+            .parameter("dampening", optimizer_dampening)
+            .parameter("w_d", optimizer_weight_decay)
+            .parameter("nesterov", DataGroup("Optimizer_SGD_nesterov", [True, False]))
+            .parameter("p_none", maybe_optimizer)
+            .parameter_constraint(lambda v: v["p_none"][0] == "SGD"
+                                            and (v["p_none"][1] == v["lr"] or v["p_none"][1] is None)
+                                            and (v["p_none"][2] == v["momentum"] or v["p_none"][2] is None)
+                                            and (v["p_none"][3] == v["dampening"] or v["p_none"][3] is None)
+                                            and (v["p_none"][4] == v["w_d"] or v["p_none"][4] is None)
+                                            and (v["p_none"][5] == v["nesterov"] or v["p_none"][5] is None)
+                                  )
+            .suffix(Constructor("optimizer", Var("p_none"))),
+
 
 
         }

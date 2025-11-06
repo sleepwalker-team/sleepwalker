@@ -904,9 +904,16 @@ or
                     else:
                         return False
                 else:
-                    return False
+                    return value is None
 
             def unfold_none(self, maybe_optimizer):
+                if maybe_optimizer is None:
+                    old_result = self.__iter__()
+                    result = []
+                    for t in old_result:
+                        if None not in t:
+                            result.append(t)
+                    return result
                 name = maybe_optimizer[0]
                 result = [(name,)]
                 for i, p in enumerate(maybe_optimizer[1:]):
@@ -1093,9 +1100,16 @@ or
                     else:
                         return False
                 else:
-                    return False
+                    return value is None
 
             def unfold_none(self, maybe_lr_scheduler):
+                if maybe_lr_scheduler is None:
+                    old_result = self.__iter__()
+                    result = []
+                    for t in old_result:
+                        if None not in t:
+                            result.append(t)
+                    return result
                 name = maybe_lr_scheduler[0]
                 result = [(name,)]
                 for i, p in enumerate(maybe_lr_scheduler[1:]):
@@ -3277,8 +3291,8 @@ if __name__ == "__main__":
                                                       )
                                         & Constructor("batch_size", Literal(32))
                                         )
-                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, None)))
-                          & Constructor("lr_scheduler", Literal(("LinearLR", None, 1e-2, 50, -1))) # TODO: Tuple dürfen auch None sein
+                          & Constructor("optimizer", Literal(None))
+                          & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1))) # TODO: Tuple dürfen auch None sein
                           )
 
     target = target7
@@ -3290,7 +3304,7 @@ if __name__ == "__main__":
     trees = search_space.enumerate_trees(target, 10)
 
     for t in trees:
-        print(t)
-        #print(t.interpret(repo.pretty_term_algebra()))
+        #print(t)
+        print(t.interpret(repo.pretty_term_algebra()))
 
 

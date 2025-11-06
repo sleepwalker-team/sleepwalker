@@ -536,14 +536,13 @@ or
                 j = i + 1
                 if p is not None:
                     old_result = result
+                    result = []
                     for t in old_result:
-                        result.remove(t)
                         result.append(t + (p,))
                 else:
                     old_result = result
                     result = []
                     for t in old_result:
-                        # Skip this preprocessor
                         if name == "ChannelSampler":
                             if j == 1:
                                 for n in self.channel_sampler_n_choices:
@@ -907,6 +906,131 @@ or
                 else:
                     return False
 
+            def unfold_none(self, maybe_optimizer):
+                name = maybe_optimizer[0]
+                result = [(name,)]
+                for i, p in enumerate(maybe_optimizer[1:]):
+                    j = i + 1
+                    if p is not None:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            result.append(t + (p,))
+                    else:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            if name == "Adagrad":
+                                if j == 1:
+                                    for lr in self.learning_rate:
+                                        if lr is not None:
+                                            result.append(t + (lr,))
+                                elif j == 2:
+                                    for lr_decay in self.learning_rate_decay:
+                                        if lr_decay is not None:
+                                            result.append(t + (lr_decay,))
+                                elif j == 3:
+                                    for wd in self.weight_decay:
+                                        if wd is not None:
+                                            result.append(t + (wd,))
+                                elif j == 4:
+                                    for init_acc in self.initial_accumulator_value:
+                                        if init_acc is not None:
+                                            result.append(t + (init_acc,))
+                                elif j == 5:
+                                    for e in self.eps:
+                                        if e is not None:
+                                            result.append(t + (e,))
+                                else:
+                                    raise ValueError("Unexpected index in Adagrad optimizer")
+                            if name == "Adam":
+                                if j == 1:
+                                    for lr in self.learning_rate:
+                                        if lr is not None:
+                                            result.append(t + (lr,))
+                                elif j == 2:
+                                    for b in self.beta:
+                                        if b is not None:
+                                            result.append(t + (b,))
+                                elif j == 3:
+                                    for e in self.eps:
+                                        if e is not None:
+                                            result.append(t + (e,))
+                                elif j == 4:
+                                    for wd in self.weight_decay:
+                                        if wd is not None:
+                                            result.append(t + (wd,))
+                                elif j == 5:
+                                    for amsgrad in [True, False]:
+                                        result.append(t + (amsgrad,))
+                                else:
+                                    raise ValueError("Unexpected index in Adam optimizer")
+                            if name == "AdamW":
+                                if j == 1:
+                                    for lr in self.learning_rate:
+                                        if lr is not None:
+                                            result.append(t + (lr,))
+                                elif j == 2:
+                                    for b in self.beta:
+                                        if b is not None:
+                                            result.append(t + (b,))
+                                elif j == 3:
+                                    for e in self.eps:
+                                        if e is not None:
+                                            result.append(t + (e,))
+                                elif j == 4:
+                                    for wd in self.weight_decay:
+                                        if wd is not None:
+                                            result.append(t + (wd,))
+                                elif j == 5:
+                                    for amsgrad in [True, False]:
+                                        result.append(t + (amsgrad,))
+                                else:
+                                    raise ValueError("Unexpected index in AdamW optimizer")
+                            if name == "Adamax":
+                                if j == 1:
+                                    for lr in self.learning_rate:
+                                        if lr is not None:
+                                            result.append(t + (lr,))
+                                elif j == 2:
+                                    for b in self.beta:
+                                        if b is not None:
+                                            result.append(t + (b,))
+                                elif j == 3:
+                                    for e in self.eps:
+                                        if e is not None:
+                                            result.append(t + (e,))
+                                elif j == 4:
+                                    for wd in self.weight_decay:
+                                        if wd is not None:
+                                            result.append(t + (wd,))
+                                else:
+                                    raise ValueError("Unexpected index in Adamax optimizer")
+                            if name == "SGD":
+                                if j == 1:
+                                    for lr in self.learning_rate:
+                                        if lr is not None:
+                                            result.append(t + (lr,))
+                                elif j == 2:
+                                    for m in self.momentum:
+                                        if m is not None:
+                                            result.append(t + (m,))
+                                elif j == 3:
+                                    for d in self.dampening:
+                                        if d is not None:
+                                            result.append(t + (d,))
+                                elif j == 4:
+                                    for wd in self.weight_decay:
+                                        if wd is not None:
+                                            result.append(t + (wd,))
+                                elif j == 5:
+                                    for nesterov in [True, False]:
+                                        result.append(t + (nesterov,))
+                                else:
+                                    raise ValueError("Unexpected index in SGD optimizer")
+                return result
+
+
     class Maybe_LR_Scheduler(Group):
             name = "Maybe_LR_Scheduler"
 
@@ -970,6 +1094,67 @@ or
                         return False
                 else:
                     return False
+
+            def unfold_none(self, maybe_lr_scheduler):
+                name = maybe_lr_scheduler[0]
+                result = [(name,)]
+                for i, p in enumerate(maybe_lr_scheduler[1:]):
+                    j = i + 1
+                    if p is not None:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            result.append(t + (p,))
+                    else:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            if name == "LinearLR":
+                                if j == 1:
+                                    for start_factor in self.start_factor_choices:
+                                        if start_factor is not None:
+                                            result.append(t + (start_factor,))
+                                elif j == 2:
+                                    for end_factor in self.end_factor_choices:
+                                        if end_factor is not None:
+                                            result.append(t + (end_factor,))
+                                elif j == 3:
+                                    for total_iters in self.total_iters_choices:
+                                        if total_iters is not None:
+                                            result.append(t + (total_iters,))
+                                elif j == 4:
+                                    for last_epoch in self.last_epoch_choices:
+                                        if last_epoch is not None:
+                                            result.append(t + (last_epoch,))
+                                else:
+                                    raise ValueError("Unexpected index in LinearLR scheduler")
+                            if name == "StepLR":
+                                if j == 1:
+                                    for step_size in self.step_size_choices:
+                                        if step_size is not None:
+                                            result.append(t + (step_size,))
+                                elif j == 2:
+                                    for gamma in self.gamma_choices:
+                                        if gamma is not None:
+                                            result.append(t + (gamma,))
+                                elif j == 3:
+                                    for last_epoch in self.last_epoch_choices:
+                                        if last_epoch is not None:
+                                            result.append(t + (last_epoch,))
+                                else:
+                                    raise ValueError("Unexpected index in StepLR scheduler")
+                            if name == "ExponentialLR":
+                                if j == 1:
+                                    for gamma in self.gamma_choices:
+                                        if gamma is not None:
+                                            result.append(t + (gamma,))
+                                elif j == 2:
+                                    for last_epoch in self.last_epoch_choices:
+                                        if last_epoch is not None:
+                                            result.append(t + (last_epoch,))
+                                else:
+                                    raise ValueError("Unexpected index in ExponentialLR scheduler")
+                return result
 
     def specification(self):
         dimension = DataGroup("dimension", self.dimension_choices)
@@ -2144,8 +2329,6 @@ or
                                 )
                     ),
 
-            # TODO: make stuff below noneable
-
             "NoSampler": DSL()
             .parameter("replacement", DataGroup("Sampler_Replacement", [True, False]))
             .parameter("num_samples", n_samples)
@@ -2408,8 +2591,10 @@ or
             .parameter("num_samples", n_samples)
             .parameter("sampler", DataGroup("Sampler", ["NoSampler", "RandomSampler"]))
             .parameter("batch_size", DataGroup("DataLoader_Batch_Size", self.batch_size))
-            .parameter("opti", maybe_optimizer)
-            .parameter("lr_sched", maybe_lr_scheduler)
+            .parameter("opti_none", maybe_optimizer)
+            .parameter("opti", maybe_optimizer, lambda v: maybe_optimizer.unfold_none(v["opti_none"]))
+            .parameter("lr_sched_none", maybe_lr_scheduler)
+            .parameter("lr_sched", maybe_lr_scheduler, lambda v: maybe_lr_scheduler.unfold_none(v["lr_sched_none"]))
             .argument("model",
                       Constructor("u_model",
                                 Constructor("u_classifier",
@@ -2644,10 +2829,8 @@ or
                                               & Constructor("batch_size", Var("batch_size"))
                                               & Constructor("batch_size", Literal(None))
                                               )
-                                & Constructor("optimizer", Var("opti"))
-                                & Constructor("optimizer", Literal(None))
-                                & Constructor("lr_scheduler", Var("lr_sched"))
-                                & Constructor("lr_scheduler", Literal(None))
+                                & Constructor("optimizer", Var("opti_none"))
+                                & Constructor("lr_scheduler", Var("lr_sched_none"))
                                 )
                     ),
 
@@ -2746,7 +2929,8 @@ or
                                          f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
                                          fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps_none, preps,
                                          annotator, channels, num_w, sample_f, event_map, online_f, total_in,
-                                         target_res, replacement, num_s, sampler, batch_size, opti, lr_sched,
+                                         target_res, replacement, num_s, sampler, batch_size, opti_none, opti,
+                                         lr_sched_none, lr_sched,
                                          model, dataloader, optimizer, lr_scheduler:
                                   f"MulticlassTrainer({model}, {dataloader}, {optimizer}, {lr_scheduler})"),
 
@@ -3044,7 +3228,7 @@ if __name__ == "__main__":
                           )
 
     target6 = Constructor("trainer",
-                          target5
+                          target4
                           & Constructor("dataloader",
                                               Constructor("Sampler",
                                                           Literal("RandomSampler")
@@ -3093,11 +3277,11 @@ if __name__ == "__main__":
                                                       )
                                         & Constructor("batch_size", Literal(32))
                                         )
-                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
-                          & Constructor("lr_scheduler", Literal(None)) # TODO: None in Parameter-Tuples needs to be resolved at top level
+                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, None)))
+                          & Constructor("lr_scheduler", Literal(("LinearLR", None, 1e-2, 50, -1))) # TODO: Tuple dürfen auch None sein
                           )
 
-    target = target6
+    target = target7
 
     synthesizer = Synthesizer(repo.specification(), {})
 
@@ -3106,7 +3290,7 @@ if __name__ == "__main__":
     trees = search_space.enumerate_trees(target, 10)
 
     for t in trees:
-        #print(t)
-        print(t.interpret(repo.pretty_term_algebra()))
+        print(t)
+        #print(t.interpret(repo.pretty_term_algebra()))
 
 

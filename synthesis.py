@@ -5,6 +5,8 @@ from cosy.synthesizer import Synthesizer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from joblib.externals.loky.backend.resource_tracker import maybe_unlink
+
 
 class ChannelWiseNormalization(nn.Module):
     def __init__(self, num_channels, eps=1e-5):
@@ -527,6 +529,101 @@ or
             else:
                 return False
 
+        def from_maybe_preprocessor(self, maybe_preprocessor):
+            name = maybe_preprocessor[0]
+            result = [(name,)]
+            for i, p in enumerate(maybe_preprocessor[1:]):
+                j = i + 1
+                if p is not None:
+                    old_result = result
+                    for t in old_result:
+                        result.remove(t)
+                        result.append(t + (p,))
+                else:
+                    old_result = result
+                    result = []
+                    for t in old_result:
+                        # Skip this preprocessor
+                        if name == "ChannelSampler":
+                            if j == 1:
+                                for n in self.channel_sampler_n_choices:
+                                    result.append(t + (n,))
+                            else:
+                                raise ValueError("Unexpected index in ChannelSampler preprocessor")
+                        elif name == "Crop":
+                            if j == 1:
+                                for total_input in self.crop_total_input_choices:
+                                    result.append(t + (total_input,))
+                            elif j == 2:
+                                for sampling_rate in self.crop_sampling_rate_choices:
+                                    result.append(t + (sampling_rate,))
+                            elif j == 3:
+                                for where in ["left", "middle", "right"]:
+                                    result.append(t + (where,))
+                            else:
+                                raise ValueError("Unexpected index in Crop preprocessor")
+                        elif name == "EmpiricalClipScaler":
+                            if j == 1:
+                                for q in self.empirical_clip_scaler_q_choices:
+                                    result.append(t + (q,))
+                            elif j == 2:
+                                for scale in self.empirical_clip_scaler_scale_choices:
+                                    result.append(t + (scale,))
+                            else:
+                                raise ValueError("Unexpected index in EmpiricalClipScaler preprocessor")
+                        elif name == "FIR":
+                            if j == 1:
+                                for sampling_rate in self.fir_sampling_rate_choices:
+                                    result.append(t + (sampling_rate,))
+                            elif j == 2:
+                                for channels in self.fir_channels_choices:
+                                    result.append(t + (channels,))
+                            elif j == 3:
+                                for filter_params in self.fir_filter_params_choices:
+                                    result.append(t + (filter_params,))
+                            elif j == 4:
+                                for zero_phase in [True, False]:
+                                    result.append(t + (zero_phase,))
+                            else:
+                                raise ValueError("Unexpected index in FIR preprocessor")
+                        elif name == "RobustScaler":
+                            if j == 1:
+                                for lower_quantile in self.robust_scaler_lower_quantile_choices:
+                                    result.append(t + (lower_quantile,))
+                            elif j == 2:
+                                for upper_quantile in self.robust_scaler_upper_quantile_choices:
+                                    result.append(t + (upper_quantile,))
+                            else:
+                                raise ValueError("Unexpected index in RobustScaler preprocessor")
+                        elif name == "Spectogram":
+                            if j == 1:
+                                for n_fft in self.spectogram_n_fft_choices:
+                                    result.append(t + (n_fft,))
+                            elif j == 2:
+                                for hop_length in self.spectogram_hop_length_choices:
+                                    result.append(t + (hop_length,))
+                            elif j == 3:
+                                for win_length in self.spectogram_win_length_choices:
+                                    result.append(t + (win_length,))
+                            elif j == 4:
+                                for epoch_len_samples in self.spectogram_epoch_len_samples_choices:
+                                    result.append(t + (epoch_len_samples,))
+                            else:
+                                raise ValueError("Unexpected index in Spectogram preprocessor")
+                        elif name == "ZNormalize":
+                            if j == 1:
+                                for use_global_statistics in [True, False]:
+                                    result.append(t + (use_global_statistics,))
+                            else:
+                                raise ValueError("Unexpected index in ZNormalize preprocessor")
+
+            return result
+
+
+
+
+
+
     class Maybe_Preprocessor(Group):
             name = "Maybe_Preprocessor"
 
@@ -652,6 +749,53 @@ or
 
         def __contains__(self, value: object) -> bool:
             return (isinstance(value, tuple) and all(True if v is None else v in self.preprocessors for v in value))
+
+    class Preprocessor_Tuple(Group):
+        name = "Preprocessor_Tuple"
+
+        def __init__(self, preprocessors, max_length):
+            self.preprocessors = preprocessors
+            self.max_length = max_length
+
+        def iter_length(self, n):
+            if n == 0:
+                yield ()
+            else:
+                for pre in self.preprocessors:
+                    for rest in self.iter_length(n - 1):
+                        yield (pre,) + rest
+
+        def __iter__(self):
+            for n in range(0, self.max_length + 1):
+                yield from self.iter_length(n)
+
+        def __contains__(self, value: object) -> bool:
+            return (isinstance(value, tuple) and all(v in self.preprocessors for v in value))
+
+        def from_maybe_preprocessor_tuple(self, maybe_preprocessor_tuple):
+            result = []
+            for pre in maybe_preprocessor_tuple:
+                if pre is None:
+                    if not result:
+                        for p in self.preprocessors:
+                            result.append((p,))
+                    else:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            for p in self.preprocessors:
+                                result.append(t + (p,))
+                else:
+                    ps = self.preprocessors.from_maybe_preprocessor(pre)
+                    if not result:
+                        result = [(p,) for p in ps]
+                    else:
+                        old_result = result
+                        result = []
+                        for t in old_result:
+                            for p in ps:
+                                result.append(t + (p,))
+            return result
 
 
     class Maybe_Optimizer(Group):
@@ -880,7 +1024,8 @@ or
                                                self.preprocessor_spectogram_win_length_choices,
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
-        preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
+        maybe_preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
+        preprocessor_tuple = self.Preprocessor_Tuple(preprocessor, 10)
         n_samples = DataGroup("n_samples", self.n_samples)
         """
         abc_channels = DataGroup("Channel", 
@@ -1721,40 +1866,43 @@ or
             .parameter("total_input", DataGroup("Crop_total_input", self.preprocessor_crop_total_input_choices))
             .parameter("sampling_rate", DataGroup("Crop_sampling_rate", self.preprocessor_crop_sampling_rate_choices))
             .parameter("where", DataGroup("Crop_where", ["left", "middle", "right"]))
-            #.parameter("p", preprocessor, lambda v: [("Crop", v["total_input"], v["sampling_rate"], v["where"])])
-            .parameter("p_none", maybe_preprocessor)
-            .parameter_constraint(lambda v: v["p_none"][0] == "Crop"
-                                            and (v["p_none"][1] == v["total_input"] or v["p_none"][1] is None)
-                                            and (v["p_none"][2] == v["sampling_rate"] or v["p_none"][2] is None)
-                                            and (v["p_none"][3] == v["where"] or v["p_none"][3] is None))
+            .parameter("p", preprocessor, lambda v: [("Crop", v["total_input"], v["sampling_rate"], v["where"])])
+            #.parameter("p_none", maybe_preprocessor)
+            #.parameter_constraint(lambda v: v["p_none"][0] == "Crop"
+            #                                and (v["p_none"][1] == v["total_input"] or v["p_none"][1] is None)
+            #                                and (v["p_none"][2] == v["sampling_rate"] or v["p_none"][2] is None)
+            #                                and (v["p_none"][3] == v["where"] or v["p_none"][3] is None))
             #.suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Var("p_none"))),
-            .suffix(Constructor("preprocessor", Var("p_none"))),
+            # .suffix(Constructor("preprocessor", Var("p_none"))),
+            .suffix(Constructor("preprocessor", Var("p"))),
 
             "EmpiricalClipScaler": DSL()
             .parameter("q", DataGroup("EmpiricalClipScaler_q", self.preprocessor_empirical_clip_scaler_q_choices))
             .parameter("scale", DataGroup("EmpiricalClipScaler_scale", self.preprocessor_empirical_clip_scaler_scale_choices))
-            #.parameter("p", preprocessor, lambda v: [("EmpiricalClipScaler", v["q"], v["scale"])])
-            .parameter("p_none", maybe_preprocessor)
-            .parameter_constraint(lambda v: v["p_none"][0] == "EmpiricalClipScaler"
-                                            and (v["p_none"][1] == v["q"] or v["p_none"][1] is None)
-                                            and (v["p_none"][2] == v["scale"] or v["p_none"][2] is None))
+            .parameter("p", preprocessor, lambda v: [("EmpiricalClipScaler", v["q"], v["scale"])])
+            #.parameter("p_none", maybe_preprocessor)
+            #.parameter_constraint(lambda v: v["p_none"][0] == "EmpiricalClipScaler"
+            #                                and (v["p_none"][1] == v["q"] or v["p_none"][1] is None)
+            #                                and (v["p_none"][2] == v["scale"] or v["p_none"][2] is None))
             #.suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Var("p_none"))),
-            .suffix(Constructor("preprocessor", Var("p_none"))),
+            # .suffix(Constructor("preprocessor", Var("p_none"))),
+            .suffix(Constructor("preprocessor", Var("p"))),
 
             "FIR": DSL()
             .parameter("sampling_rate", DataGroup("FIR_sampling_rate", self.preprocessor_fir_sampling_rate_choices))
             .parameter("channels", DataGroup("FIR_channels", self.preprocessor_fir_channels_choices))
             .parameter("filter_params", DataGroup("FIR_filter_params", self.preprocessor_fir_filter_params_choices))
             .parameter("zero_phase", DataGroup("FIR_zero_phase", [True, False]))
-            #.parameter("p", preprocessor, lambda v: [("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])])
-            .parameter("p_none", maybe_preprocessor)
-            .parameter_constraint(lambda v: v["p_none"][0] == "FIR"
-                                            and (v["p_none"][1] == v["sampling_rate"] or v["p_none"][1] is None)
-                                            and (v["p_none"][2] == v["channels"] or v["p_none"][2] is None)
-                                            and (v["p_none"][3] == v["filter_params"] or v["p_none"][3] is None)
-                                            and (v["p_none"][4] == v["zero_phase"] or v["p_none"][4] is None))
+            .parameter("p", preprocessor, lambda v: [("FIR", v["sampling_rate"], v["channels"], v["filter_params"], v["zero_phase"])])
+            #.parameter("p_none", maybe_preprocessor)
+            #.parameter_constraint(lambda v: v["p_none"][0] == "FIR"
+            #                                and (v["p_none"][1] == v["sampling_rate"] or v["p_none"][1] is None)
+            #                                and (v["p_none"][2] == v["channels"] or v["p_none"][2] is None)
+            #                                and (v["p_none"][3] == v["filter_params"] or v["p_none"][3] is None)
+            #                                and (v["p_none"][4] == v["zero_phase"] or v["p_none"][4] is None))
             #.suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Var("p_none"))),
-            .suffix(Constructor("preprocessor", Var("p_none"))),
+            # .suffix(Constructor("preprocessor", Var("p_none"))),
+            .suffix(Constructor("preprocessor", Var("p"))),
 
             "Normalize": DSL()
             #.parameter("p", preprocessor, lambda v: [("Normalize",)])
@@ -1763,29 +1911,31 @@ or
             "RobustScaler": DSL()
             .parameter("lower_quantile", DataGroup("RobustScaler_lower_quantile", self.preprocessor_robust_scaler_lower_quantile_choices))
             .parameter("upper_quantile", DataGroup("RobustScaler_upper_quantile", self.preprocessor_robust_scaler_upper_quantile_choices))
-            #.parameter("p", preprocessor, lambda v: [("RobustScaler", v["lower_quantile"], v["upper_quantile"])])
-            .parameter("p_none", maybe_preprocessor)
-            .parameter_constraint(lambda v: v["p_none"][0] == "RobustScaler"
-                                            and (v["p_none"][1] == v["lower_quantile"] or v["p_none"][1] is None)
-                                            and (v["p_none"][2] == v["upper_quantile"] or v["p_none"][2] is None))
+            .parameter("p", preprocessor, lambda v: [("RobustScaler", v["lower_quantile"], v["upper_quantile"])])
+            #.parameter("p_none", maybe_preprocessor)
+            #.parameter_constraint(lambda v: v["p_none"][0] == "RobustScaler"
+            #                                and (v["p_none"][1] == v["lower_quantile"] or v["p_none"][1] is None)
+            #                                and (v["p_none"][2] == v["upper_quantile"] or v["p_none"][2] is None))
             # .suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Var("p_none"))),
-            .suffix(Constructor("preprocessor", Var("p_none"))),
+            # .suffix(Constructor("preprocessor", Var("p_none"))),
+            .suffix(Constructor("preprocessor", Var("p"))),
 
             "Spectogram": DSL()
             .parameter("n_fft", DataGroup("Spectogram_n_fft", self.preprocessor_spectogram_n_fft_choices))
             .parameter("hop_length", DataGroup("Spectogram_hop_length", self.preprocessor_spectogram_hop_length_choices))
             .parameter("win_length", DataGroup("Spectogram_win_length", self.preprocessor_spectogram_win_length_choices))
             .parameter("epoch_len_samples", DataGroup("Spectogram_epoch_len_samples", self.preprocessor_spectogram_epoch_len_samples_choices))
-            #.parameter("p", preprocessor,
-            #           lambda v: [("Spectogram", v["n_fft"], v["hop_length"], v["win_length"], v["epoch_len_samples"])])
-            .parameter("p_none", maybe_preprocessor)
-            .parameter_constraint(lambda v: v["p_none"][0] == "Spectogram"
-                                            and (v["p_none"][1] == v["n_fft"] or v["p_none"][1] is None)
-                                            and (v["p_none"][2] == v["hop_length"] or v["p_none"][2] is None)
-                                            and (v["p_none"][3] is None or torch.equal(v["p_none"][3], v["win_length"]))
-                                            and (v["p_none"][4] == v["epoch_len_samples"] or v["p_none"][4] is None))
+            .parameter("p", preprocessor,
+                       lambda v: [("Spectogram", v["n_fft"], v["hop_length"], v["win_length"], v["epoch_len_samples"])])
+            #.parameter("p_none", maybe_preprocessor)
+            #.parameter_constraint(lambda v: v["p_none"][0] == "Spectogram"
+            #                                and (v["p_none"][1] == v["n_fft"] or v["p_none"][1] is None)
+            #                                and (v["p_none"][2] == v["hop_length"] or v["p_none"][2] is None)
+            #                                and (v["p_none"][3] is None or torch.equal(v["p_none"][3], v["win_length"]))
+            #                                and (v["p_none"][4] == v["epoch_len_samples"] or v["p_none"][4] is None))
             # .suffix(Constructor("preprocessor", Var("p")) & Constructor("preprocessor", Var("p_none"))),
-            .suffix(Constructor("preprocessor", Var("p_none"))),
+            #.suffix(Constructor("preprocessor", Var("p_none"))),
+            .suffix(Constructor("preprocessor", Var("p"))),
 
             "ZNormalize": DSL()
             .parameter("use_global_statistics", DataGroup("ZNormalize_use_global_statistics", [True, False]))
@@ -1799,7 +1949,7 @@ or
             .suffix(Constructor("preprocessor_sequence", Var("ps"))),
 
             "Preprocessor_Sequence_Cons": DSL()
-            .parameter("p", maybe_preprocessor)
+            .parameter("p", preprocessor)
             .parameter("pps", preprocessor_tuple)
             .parameter_constraint(lambda v: len(v["pps"]) > 0 and (v["pps"][0] == v["p"] or v["pps"][0] is None))
             .parameter("ps", preprocessor_tuple, lambda v: [v["pps"][1:]])
@@ -2244,7 +2394,8 @@ or
             .parameter("mms", maxpool_size_list)
             .parameter_constraint(lambda v: len(v["dds"]) > 1 and (len(v["dds"]) == len(v["kks"]) == len(v["mms"])))  # since this should be always instantiated by suffix, this predicate should not be necessary
             .parameter("loss", loss)
-            .parameter("preps", preprocessor_tuple)
+            .parameter("preps_none", maybe_preprocessor_tuple)
+            .parameter("preps", preprocessor_tuple, lambda v: preprocessor_tuple.from_maybe_preprocessor_tuple(v["preps_none"]))
             .parameter("annotator", DataGroup("ABC_Dataset_Annotator", ["nsrr", "profusion"]))
             .parameter("channels", abc_channels)
             .parameter("num_workers", DataGroup("ABC_Dataset_Num_Workers", self.abc_num_workers))
@@ -2461,7 +2612,7 @@ or
                                                           )
                                             & Constructor("loss_function", Var("loss"))
                                             & Constructor("loss_function", Literal(None))
-                                            & Constructor("preprocessors", Var("preps"))
+                                            & Constructor("preprocessors", Var("preps_none"))
                                             )
                                 & Constructor("dataloader",
                                               Constructor("Sampler",
@@ -2593,7 +2744,7 @@ or
 
             "MulticlassTrainer": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm, m_s, m_p, m_d, f_d, f_af, f_c,
                                          f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
-                                         fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps,
+                                         fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps_none, preps,
                                          annotator, channels, num_w, sample_f, event_map, online_f, total_in,
                                          target_res, replacement, num_s, sampler, batch_size, opti, lr_sched,
                                          model, dataloader, optimizer, lr_scheduler:
@@ -2887,13 +3038,13 @@ if __name__ == "__main__":
                           & Constructor("loss_function", Literal("MSE"))
                           & Constructor("preprocessors", Literal((
                               ("ChannelSampler", 1),
-                              ("FIR", 64, None, None, False),
+                              ("FIR", 64, None, None, None),
                               None
                           )))
                           )
 
     target6 = Constructor("trainer",
-                          target4
+                          target5
                           & Constructor("dataloader",
                                               Constructor("Sampler",
                                                           Literal("RandomSampler")
@@ -2913,8 +3064,8 @@ if __name__ == "__main__":
                                                             )
                                               & Constructor("batch_size", Literal(32))
                                               )
-                                & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
-                                & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
+                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
+                          & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
                           )
 
     target7 = Constructor("trainer",
@@ -2946,7 +3097,7 @@ if __name__ == "__main__":
                           & Constructor("lr_scheduler", Literal(None)) # TODO: None in Parameter-Tuples needs to be resolved at top level
                           )
 
-    target = target7
+    target = target6
 
     synthesizer = Synthesizer(repo.specification(), {})
 

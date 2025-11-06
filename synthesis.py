@@ -3291,8 +3291,8 @@ if __name__ == "__main__":
                                                       )
                                         & Constructor("batch_size", Literal(32))
                                         )
-                          & Constructor("optimizer", Literal(None))
-                          & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1))) # TODO: Tuple dürfen auch None sein
+                          & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, None)))
+                          & Constructor("lr_scheduler", Literal(None))
                           )
 
     target = target7

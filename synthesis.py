@@ -752,21 +752,11 @@ or
     class Preprocessor_Tuple(Group):
         name = "Preprocessor_Tuple"
 
-        def __init__(self, preprocessors, max_length):
+        def __init__(self, preprocessors):
             self.preprocessors = preprocessors
-            self.max_length = max_length
-
-        def iter_length(self, n):
-            if n == 0:
-                yield ()
-            else:
-                for pre in self.preprocessors:
-                    for rest in self.iter_length(n - 1):
-                        yield (pre,) + rest
 
         def __iter__(self):
-            for n in range(0, self.max_length + 1):
-                yield from self.iter_length(n)
+            return super().__iter__()
 
         def __contains__(self, value: object) -> bool:
             return (isinstance(value, tuple) and all(v in self.preprocessors for v in value))
@@ -1224,7 +1214,7 @@ or
                                                self.preprocessor_spectogram_epoch_len_samples_choices
                                                )
         maybe_preprocessor_tuple = self.Maybe_Preprocessor_Tuple(maybe_preprocessor)
-        preprocessor_tuple = self.Preprocessor_Tuple(preprocessor, 10)
+        preprocessor_tuple = self.Preprocessor_Tuple(preprocessor)
         n_samples = DataGroup("n_samples", self.n_samples)
         """
         abc_channels = DataGroup("Channel", 
@@ -3295,7 +3285,7 @@ if __name__ == "__main__":
                           & Constructor("lr_scheduler", Literal(None))
                           )
 
-    target = target7
+    target = target6
 
     synthesizer = Synthesizer(repo.specification(), {})
 

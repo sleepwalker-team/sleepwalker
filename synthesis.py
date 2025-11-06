@@ -2937,13 +2937,7 @@ or
                                          lr_sched_none, lr_sched,
                                          model, dataloader, optimizer, lr_scheduler:
                                   f"MulticlassTrainer({model}, {dataloader}, {optimizer}, {lr_scheduler})"),
-
-
-
         }
-
-
-    # TODO: Refactor from here
 
     @staticmethod
     def _conv_block(activation, dropout, c1, c2, norm, x):
@@ -2978,7 +2972,7 @@ or
         return x
 
     @staticmethod
-    def _umodel_length(enc, dec, cb, x, return_intermediate=False):
+    def _ustructure(enc, dec, cb, x, return_intermediate=False):
         x, y = enc(x)
         z = cb(x)
         x = dec(z, y)
@@ -2988,7 +2982,7 @@ or
             return x
 
     @staticmethod
-    def _umodel_cons_length(enc, dec, u_model, x, return_intermediate=False):
+    def _ustructure_cons(enc, dec, u_model, x, return_intermediate=False):
         x, y = enc(x)
         if return_intermediate:
             z, u_intermediate = u_model(x, return_intermediate=return_intermediate)
@@ -3004,29 +2998,98 @@ or
             "ReLu": nn.ReLU(),
             "ELU": nn.ELU(),
             "Tanh": nn.Tanh(),
-            "BatchNorm1d": (lambda n: nn.BatchNorm1d(n)),
+            "BatchNorm1d": (lambda n, e: nn.BatchNorm1d(n, eps=e)),
             "ChannelWiseNorm": (lambda n, e: ChannelWiseNormalization(n, e)),
-            "Conv1dLayerNorm": (lambda n: Conv1dLayerNorm(n)),
+            "Conv1dLayerNorm": (lambda n, e: Conv1dLayerNorm(n, eps=e)),
             "Dropout1d": (lambda d: nn.Dropout1d(p=d)),
-            "Maxpool1d": (lambda n: nn.MaxPool1d(n)),
+            "Maxpool1d": (lambda n, s, p, d: nn.MaxPool1d(n, stride=s, padding=p, dilation=d)),
             "Upsample1d": (lambda n: nn.Upsample(scale_factor=n, mode="nearest")),
-            "Conv1d": (lambda i, o, k: nn.Conv1d(i, o, kernel_size=k, padding=k // 2)),
-            "DepthwiseSeparableConv1d": (lambda i, o, k: DepthwiseSeparableConv1d(i, o, kernel_size=k, padding=k // 2)),
-            "ConvBlock": (lambda i, o, k, d, af, c, e, activation, dropout, c1, c2, norm, x:
+            "Conv1d": (lambda i, o, k, s, p, d, b: nn.Conv1d(i, o, kernel_size=k, stride=s, padding=p, dilation=d, bias=b)),
+            "DepthwiseSeparableConv1d": (lambda i, o, k, s, p, d, b: DepthwiseSeparableConv1d(i, o, kernel_size=k, stride=s, padding=p, dilation=d, bias=b)),
+            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, n, e, activation, dropout, c1, c2, norm, x:
                           self._conv_block(activation, dropout, c1, c2, norm, x)),
-            "Encoder": (lambda i, o, k, d, af, c, e, n, m, mp, cb, x: self._encoder(cb, mp, x)),
-            "Decoder": (lambda i, o, k, d, af, c, e, n, m, mp, cb, x, y: self._decoder(cb, mp, x, y)),
-            "Linear": (lambda i, o: nn.Linear(i, o)),
-            "UModel": (lambda i, out_enc, in_dec, k1, k2, d, af, c, e, n, m, ds, ks, ms, enc, dec, cb, x:
-                       self._umodel_length(enc, dec, cb, x)),
+            "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb, x: self._encoder(cb, mp, x)),
+            "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb, x, y: self._decoder(cb, mp, x, y)),
 
-            "UModel_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, e, n, m,
-                                   dds, ds, kks, ks, mms, ms, enc, dec, u_model, x:
-                            self._umodel_cons_length(enc, dec, u_model, x)),
-            "UModel_length": (lambda i, out_enc, in_dec, k1, k2, d, af, c, e, n, m, enc, dec, cb, x:
-                              self._umodel_length(enc, dec, cb, x)),
-            "UModel_Cons_length": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, e, n, m, l, l_u, enc, dec, u_model, x:
-                                   self._umodel_cons_length(enc, dec, u_model, x)),
+            "UStructure": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+                              ds, ks, ms, enc, dec, cb, x: self._ustructure(enc, dec, cb, x)),
+
+            "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+                                            dds, ds, kks, ks, mms, ms, enc, dec, u_model, x: self._ustructure_cons(enc, dec, u_model, x)),
+            "LinearLayer": (lambda i, o, b: nn.Linear(i, o, bias=b)),
+
+            #TODO: implement from here
+            "UClassifier": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
+                              first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
+                              fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
+                              dds, ds, kks, ks, mms, ms, enc, dec, u, dc, mlp:
+                       f"U_Classifier({enc}, {dec}, {u}, {dc}, {mlp})"),
+
+            "BCEwithLogits": "BCE_with_logits()",
+
+            "CrossEntropy": "CrossEntropy()",
+
+            "MAE": "MAE()",
+
+            "MSE": "MSE()",
+
+            "ChannelSampler": lambda n, p: f"ChannelSampler({n})",
+
+            "Crop": lambda ti, sr, w, p_none: f"Crop({ti}, {sr}, {w})",
+
+            "EmpiricalClipScaler": lambda q, s, p_none: f"EmpiricalClipScaler({q}, {s})",
+
+            "FIR": lambda sr, ch, fp, zp, p_none: f"FIR({sr}, {ch}, {fp}, {zp})",
+
+            "Normalize": "Normalize()",
+
+            "RobustScaler": lambda lq, uq, p_none: f"RobustScaler({lq}, {uq})",
+
+            "Spectogram": lambda n_fft, hl, wl, els, p_none: f"Spectogram({n_fft}, {hl}, {wl}, {els})",
+
+            "ZNormalize": lambda ugs, p: f"ZNormalize({ugs})",
+
+            "Preprocessor_Sequence": lambda ps: f"[]",
+
+            "Preprocessor_Sequence_Cons": lambda p, pps, ps, x, xs: f"({x} :: {xs})",
+
+            "UModel": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm,
+                               m_s, m_p, m_d, f_d, f_af, f_c, f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p,
+                               f_m_d, fc_k, fc_c, fc_s, fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms,
+                               loss, preps, loss_f, preprocessors, u: f"UModel({loss_f}, {preprocessors}, {u})"),
+
+            "NoSampler": lambda r, n: f"NoSampler",
+
+            "RandomSampler": lambda r, n: f"RandomSampler({r}, {n})",
+
+            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr: f"ABC_Dataset({a}, {c}, {nw}, {sf}, {em}, {of}, {ti}, {tr})",
+
+            "DataLoader": lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d: f"DataLoader({s}, {d}, {bs})",
+
+            "Adagrad": lambda lr, lr_d, w_d, i_a_v, eps, p_none: f"Adagrad({lr}, {lr_d}, {w_d}, {i_a_v}, {eps})",
+
+            "Adam": lambda lr, beta, eps, w_d, amsgrad, p_none: f"Adam({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+
+            "AdamW": lambda lr, beta, eps, w_d, amsgrad, p_none: f"AdamW({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+
+            "Adamax": lambda lr, beta, eps, w_d, p_none: f"Adamax({lr}, {beta}, {eps}, {w_d})",
+
+            "SGD": lambda lr, m, d, w_d, n, p_none: f"SGD({lr}, {m}, {d}, {w_d}, {n})",
+
+            "LinearLR": lambda sf, ef, ti, le, p_none: f"LinearLR({sf}, {ef}, {ti}, {le})",
+
+            "StepLR": lambda s, g, l, p_none: f"StepLR({s}, {g}, {l})",
+
+            "ExponentialLR": lambda g, l, p_none: f"ExponentialLR({g}, {l})",
+
+            "MulticlassTrainer": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm, m_s, m_p, m_d, f_d, f_af, f_c,
+                                         f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
+                                         fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps_none, preps,
+                                         annotator, channels, num_w, sample_f, event_map, online_f, total_in,
+                                         target_res, replacement, num_s, sampler, batch_size, opti_none, opti,
+                                         lr_sched_none, lr_sched,
+                                         model, dataloader, optimizer, lr_scheduler:
+                                  f"MulticlassTrainer({model}, {dataloader}, {optimizer}, {lr_scheduler})"),
         }
 
 if __name__ == "__main__":

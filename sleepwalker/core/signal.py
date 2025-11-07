@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 import io
-from typing import Any,  Dict, List, Optional
+from typing import Any,  Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -238,7 +238,7 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
 
     return readable
 
-def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
+def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) -> Dict[str, Any]:
     """Read basic metadata about an EDF file.
 
     Attempts pyEDFlib first, then falls back to MNE if pyEDFlib fails.
@@ -252,30 +252,39 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
         signals : list[str]
         fs : dict[str, float]
     """
+    close_after = isinstance(edf, str)
+
+    f = None
     try:
-        with pyedflib.EdfReader(
-            edf_path,
-            annotations_mode=DO_NOT_READ_ANNOTATIONS,
-            check_file_size=DO_NOT_CHECK_FILE_SIZE,
-        ) as f:
-            labels = f.getSignalLabels()
-            fs = {lab: float(f.getSampleFrequency(i)) for i, lab in enumerate(labels)}
-            duration_s = float(f.getFileDuration())
-            start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
-            end = start + pd.to_timedelta(f"{duration_s}s")
-            return {
-                "start": start,
-                "end": end,
-                "duration_s": duration_s,
-                "signals": labels,
-                "fs": fs,
-                "source": "pyedflib",
-            }
+        if close_after:
+            text_trap = io.StringIO()
+            with redirect_stdout(text_trap):
+                f = pyedflib.EdfReader(
+                    edf,
+                    annotations_mode=DO_NOT_READ_ANNOTATIONS,
+                    check_file_size=DO_NOT_CHECK_FILE_SIZE,
+                )
+        else:
+            f = edf  # already open handle
+
+        labels = f.getSignalLabels()
+        fs = {lab: float(f.getSampleFrequency(i)) for i, lab in enumerate(labels)}
+        duration_s = float(f.getFileDuration())
+        start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
+        end = start + pd.to_timedelta(f"{duration_s}s")
+        return {
+            "start": start,
+            "end": end,
+            "duration_s": duration_s,
+            "signals": labels,
+            "fs": fs,
+            "source": "pyedflib",
+        }
     except Exception as e:
         if verbose:
-            logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
+            logger.warning(f"pyEDFlib failed to read {edf}: {e}")
 
-        raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
+        raw = mne.io.read_raw_edf(edf, preload=False, verbose="ERROR")
 
         labels = raw.ch_names
         fs = {lab: float(raw.info["sfreq"]) for lab in labels}
@@ -294,66 +303,112 @@ def read_edf_meta(edf_path: str, verbose: bool = False) -> Dict[str, Any]:
             "fs": fs,
             "source": "mne",
         }
+    finally:
+        if close_after:
+            try:
+                f.close()
+            except Exception:
+                pass
 
 def edf_to_df(
-    edf_path: str,
+    edf: Union[str, pyedflib.EdfReader],
     channels: List[str],
     start: Optional[pd.Timestamp],
     end: Optional[pd.Timestamp],
     frequency: float,
     how: str = "nearest",
-    verbose : bool = False
+    verbose: bool = False,
 ) -> pd.DataFrame:
-    """Read raw samples for one or more channels between [start, end).
+    """
+    Read raw samples for one or more channels between [start, end).
 
-    Attempts pyEDFlib first, then falls back to MNE if pyEDFlib fails.
+    Parameters
+    ----------
+    edf : str | pyedflib.EdfReader
+        Either the EDF file path (opened/closed internally)
+        or an already opened EdfReader handle.
+    channels : list of str
+        Channel names to extract.
+    start, end : pd.Timestamp or None
+        Time range to extract. If None, full file is used.
+    frequency : float
+        Target resampling frequency in Hz.
+    how : {'nearest', 'mean', 'max'}, default 'nearest'
+        Resampling strategy.
+    verbose : bool
+        If True, prints diagnostic information.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame indexed by timestamps, columns = channels.
+        Indexed by timestamps, columns=channels.
     """
+    close_after = isinstance(edf, str)
+
     try:
+        if close_after:
+            f = pyedflib.EdfReader(edf, annotations_mode=DO_NOT_READ_ANNOTATIONS, check_file_size=DO_NOT_CHECK_FILE_SIZE)
+        else:
+            f = edf 
+
         text_trap = io.StringIO()
-        with redirect_stdout(text_trap), pyedflib.EdfReader(
-            edf_path,
-            annotations_mode=DO_NOT_READ_ANNOTATIONS,
-            check_file_size=DO_NOT_CHECK_FILE_SIZE,
-        ) as f:
+        with redirect_stdout(text_trap):
             labels = f.getSignalLabels()
+            if not labels:
+                return pd.DataFrame()
+
             dfs = []
+            file_start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
+            duration_s = float(f.getFileDuration())
+            file_end = file_start + pd.to_timedelta(f"{duration_s}s")
+
+            start_ = start or file_start
+            end_ = end or file_end
 
             for ch in channels:
                 if ch not in labels:
                     continue
                 idx = labels.index(ch)
                 fs = float(f.getSampleFrequency(idx))
-                dt = pd.to_timedelta(f"{1.0 / fs}s")
-                file_start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
-                duration_s = float(f.getFileDuration())
-                file_end = file_start + pd.to_timedelta(f"{duration_s}s")
-                start_ = start or file_start
-                end_ = end or file_end
+                dt = pd.to_timedelta(1.0 / fs, unit="s")
 
+                # compute indices
                 i0 = max(int((start_ - file_start) / dt), 0)
                 i1 = max(int((end_ - file_start) / dt), i0 + 1)
                 x = f.readSignal(idx, start=i0, n=i1 - i0, digital=False)
 
-                df = pd.DataFrame(x, columns=[ch])
-                df.index = pd.date_range(start=start_, periods=len(x), freq=dt)
-                resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
-                if how == "mean":
-                    df = df.resample(resample_rate).mean()
-                elif how == "max":
-                    df = df.resample(resample_rate).max()
-                else:
-                    df = df.resample(resample_rate).nearest()
-                dfs.append(df)
+                # resample in numpy for speed
+                if len(x) == 0:
+                    continue
 
-            if dfs:
-                return pd.concat(dfs, axis=1, join="outer").ffill().bfill()
-            return pd.DataFrame()
+                if fs != frequency:
+                    step = fs / frequency
+                    if how == "mean":
+                        step_int = int(round(step))
+                        n_full = len(x) // step_int * step_int
+                        x = x[:n_full].reshape(-1, step_int).mean(axis=1)
+                    elif how == "max":
+                        step_int = int(round(step))
+                        n_full = len(x) // step_int * step_int
+                        x = x[:n_full].reshape(-1, step_int).max(axis=1)
+                    else:  # nearest
+                        x = x[::int(round(step))]
 
+                    dt = pd.to_timedelta(1.0 / frequency, unit="s")    
+                
+                # build DataFrame
+                idx_range = pd.date_range(start=start_, periods=len(x), freq=dt)
+                dfs.append(pd.DataFrame({ch: x}, index=idx_range))
+            
+            if not dfs:
+                return pd.DataFrame()
+            elif len(dfs) > 1:
+                # Merge channels, fill small gaps if needed
+                out = pd.concat(dfs, axis=1, join="outer").ffill().bfill()
+            else:
+                out = dfs[0]
+
+            return out
     except Exception as e:
         if verbose:
             logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
@@ -404,6 +459,121 @@ def edf_to_df(
             df = df.resample(resample_rate).nearest()
 
         return df.ffill().bfill()
+    finally:
+        if close_after:
+            try:
+                f.close()
+            except Exception:
+                pass
+# def edf_to_df(
+#     edf_path: str,
+#     channels: List[str],
+#     start: Optional[pd.Timestamp],
+#     end: Optional[pd.Timestamp],
+#     frequency: float,
+#     how: str = "nearest",
+#     verbose : bool = False
+# ) -> pd.DataFrame:
+#     """Read raw samples for one or more channels between [start, end).
+
+#     Attempts pyEDFlib first, then falls back to MNE if pyEDFlib fails.
+
+#     Returns
+#     -------
+#     pd.DataFrame
+#         DataFrame indexed by timestamps, columns = channels.
+#     """
+#     try:
+#         text_trap = io.StringIO()
+#         with redirect_stdout(text_trap), pyedflib.EdfReader(
+#             edf_path,
+#             annotations_mode=DO_NOT_READ_ANNOTATIONS,
+#             check_file_size=DO_NOT_CHECK_FILE_SIZE,
+#         ) as f:
+#             labels = f.getSignalLabels()
+#             dfs = []
+
+#             for ch in channels:
+#                 if ch not in labels:
+#                     continue
+#                 idx = labels.index(ch)
+#                 fs = float(f.getSampleFrequency(idx))
+#                 dt = pd.to_timedelta(f"{1.0 / fs}s")
+#                 file_start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
+#                 duration_s = float(f.getFileDuration())
+#                 file_end = file_start + pd.to_timedelta(f"{duration_s}s")
+#                 start_ = start or file_start
+#                 end_ = end or file_end
+
+#                 i0 = max(int((start_ - file_start) / dt), 0)
+#                 i1 = max(int((end_ - file_start) / dt), i0 + 1)
+#                 x = f.readSignal(idx, start=i0, n=i1 - i0, digital=False)
+
+#                 df = pd.DataFrame(x, columns=[ch])
+#                 df.index = pd.date_range(start=start_, periods=len(x), freq=dt)
+#                 resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
+#                 if how == "mean":
+#                     df = df.resample(resample_rate).mean()
+#                 elif how == "max":
+#                     df = df.resample(resample_rate).max()
+#                 else:
+#                     df = df.resample(resample_rate).nearest()
+#                 dfs.append(df)
+
+#             if dfs:
+#                 return pd.concat(dfs, axis=1, join="outer").ffill().bfill()
+#             return pd.DataFrame()
+
+#     except Exception as e:
+#         if verbose:
+#             logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
+
+#         raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
+
+#         # Filter channels
+#         available = [ch for ch in channels if ch in raw.ch_names]
+#         if not available:
+#             if verbose: logger.warning(f"No requested channels found in {edf_path}")
+#             return pd.DataFrame()
+
+#         sfreq = raw.info["sfreq"]
+#         meas_date = raw.info.get("meas_date", None)
+#         if isinstance(meas_date, tuple):
+#             meas_date = meas_date[0]
+#         file_start = pd.Timestamp(meas_date or pd.Timestamp.now())
+#         file_start = file_start.tz_localize(None)
+#         duration_s = (raw.n_times - 1) / sfreq
+#         file_end = file_start + pd.to_timedelta(f"{duration_s}s")
+#         start_ = start or file_start
+#         end_ = end or file_end
+        
+#         if end_ <= file_start:
+#             if verbose: logger.warning(f"Invalid crop range for {edf_path}")
+#             return pd.DataFrame()
+        
+#         tmin = max(0.0, (start_ - file_start).total_seconds())
+#         tmax = max(0.0, (end_ - file_start).total_seconds())
+#         if tmax > raw.times[-1]: tmax = raw.times[-1]
+
+#         raw.crop(tmin=tmin, tmax=tmax)
+#         data, times = raw.get_data(picks=available, return_times=True)
+        
+#         # This version should be faster than the above version, but it is not on our system as it seems (tested on 2025-10-20 on a30 node with data loaded from cephfs). In any case, performance difference was in ~20% range
+#         # data, times = raw.get_data(picks=available, tmin=tmin, tmax=tmax, return_times=True) 
+
+#         dates = pd.to_datetime(start_.value + (times * 1e9).astype(np.int64))
+#         df = pd.DataFrame(data.T, index=dates, columns=available)
+
+#         # resample
+#         resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
+#         if how == "mean":
+#             df = df.resample(resample_rate).mean()
+#         elif how == "max":
+#             df = df.resample(resample_rate).max()
+#         else:
+#             df = df.resample(resample_rate).nearest()
+
+#         return df.ffill().bfill()
 
 # def read_edf_meta(edf_path: str) -> Dict[str, Any]:
 #     """Read basic metadata about an EDF file.

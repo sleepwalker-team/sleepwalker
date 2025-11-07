@@ -1,8 +1,15 @@
 #!/bin/env python3
 
+import os
+
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
+
 from functools import partial
 import logging
-import os
 import numpy as np
 import torch
 from torch.utils.data import RandomSampler
@@ -35,19 +42,23 @@ from sleepwalker.utils import logger, MlflowSink, suppress_stdout_logging
 
 import torch.multiprocessing as mp
 
+torch.set_num_threads(2)
+torch.set_num_interop_threads(1)
+
 mp.set_sharing_strategy('file_system')
 
-batch_size = 512
+batch_size = 256
 # batch_size = 196
 epochs = 200
-total_input = "630s"
+total_input = "630s" 
 target_resolution = "30s"
-n_samples = 200_000
+n_samples = 250_000
 experiment_name = "grouped_transformer"
-num_workers_dataset = 12
-num_workers_dataloader = 12
+num_workers_dataset = 32
+num_workers_dataloader = 16
 sample_frequency = 100
-preload_windows = 30_000
+preload_windows = 0 #30_000
+folder = "/raid/"
 
 groups = [[
     "F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2",  # ABC, MNC, MROS, Ruhrland
@@ -64,14 +75,14 @@ groups = [[
 
 with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
     TRACKING_URI=f.read().strip()
-ARTIFACT_URI="/raid/mlruns"
+ARTIFACT_URI=f"/raid/mlruns"
 
 logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
 logger.start_run(run_name=experiment_name)
 
 # TRAIN / VAL
 def build_abc(edf_path):
-    edf_files = get_edf_files_in_repo(edf_path, recursive=True) #[:10] # XXX
+    edf_files = get_edf_files_in_repo(edf_path, recursive=True)
     train_patients, test_patients = random_split(edf_files, test_frac=0.1)
     
     def _create(patients):
@@ -392,7 +403,7 @@ def build_mros(edf_path):
 # TEST
 
 def build_sleepedfx(edf_path):
-    edf_files = get_edf_files_in_repo(edf_path, recursive=True)# [:10] # XXX
+    edf_files = get_edf_files_in_repo(edf_path, recursive=True)
 
     with suppress_stdout_logging(logger):
         dataset = SleepEDFx(
@@ -515,32 +526,32 @@ def build_shhs(edf_path):
 
 ds = []
 logger.context("ABC")
-ds.append(build_abc("/raid/sleepwalker/abc"))
+ds.append(build_abc(f"/{folder}/sleepwalker/abc"))
 logger.uncontext()
 
-# logger.context("Apples")
-# ds.append(build_apples("/raid/sleepwalker/apples/polysomnography"))
-# logger.uncontext()
+logger.context("Apples")
+ds.append(build_apples(f"/{folder}/sleepwalker/apples/polysomnography"))
+logger.uncontext()
 
-# logger.context("CAP")
-# ds.append(build_cap("/raid/sleepwalker/cap"))
-# logger.uncontext()
+logger.context("CAP")
+ds.append(build_cap(f"/{folder}/sleepwalker/cap"))
+logger.uncontext()
 
-# logger.context("ISRUC")
-# ds.append(build_isruc("/raid/sleepwalker/isruc"))
-# logger.uncontext()
+logger.context("ISRUC")
+ds.append(build_isruc(f"/{folder}/sleepwalker/isruc"))
+logger.uncontext()
 
-# logger.context("MNC")
-# ds.append(build_mnc("/raid/sleepwalker/mnc/cnc"))
-# logger.uncontext()
+logger.context("MNC")
+ds.append(build_mnc(f"/{folder}/sleepwalker/mnc/cnc"))
+logger.uncontext()
 
-# logger.context("NCHSDB")
-# ds.append(build_nchsdb("/raid/sleepwalker/nchsdb/sleep_data"))
-# logger.uncontext()
+logger.context("NCHSDB")
+ds.append(build_nchsdb(f"/{folder}/sleepwalker/nchsdb/sleep_data"))
+logger.uncontext()
 
-# logger.context("MROS")
-# ds.append(build_mros("/raid/sleepwalker/mros"))
-# logger.uncontext()
+logger.context("MROS")
+ds.append(build_mros(f"/{folder}/sleepwalker/mros"))
+logger.uncontext()
 
 train_ds = [d[0] for d in ds]
 val_ds = [d[1] for d in ds]
@@ -550,31 +561,31 @@ test_ds_names = []
 
 logger.context("SleepEDFx")
 logger.context("TEST")
-test_ds.append(build_sleepedfx("/raid/sleepwalker/sleep-edfx"))
+test_ds.append(build_sleepedfx(f"/{folder}/sleepwalker/sleep-edfx"))
 logger.uncontext()
 test_ds_names.append("SleepEDFx")
 logger.uncontext()
 
-# logger.context("Ruhrland")
-# logger.context("TEST")
-# test_ds.append(build_ruhrland("/raid/sleepwalker/ruhrlandklinik/raw"))
-# test_ds_names.append("Ruhrland")
-# logger.uncontext()
-# logger.uncontext()
+logger.context("Ruhrland")
+logger.context("TEST")
+test_ds.append(build_ruhrland(f"/{folder}/sleepwalker/ruhrlandklinik/raw"))
+test_ds_names.append("Ruhrland")
+logger.uncontext()
+logger.uncontext()
 
-# logger.context("SVUH-UCD")
-# logger.context("TEST")
-# test_ds.append(build_svuh_ucd("/raid/sleepwalker/svuh-ucd"))
-# test_ds_names.append("SVUH-UCD")
-# logger.uncontext()
-# logger.uncontext()
+logger.context("SVUH-UCD")
+logger.context("TEST")
+test_ds.append(build_svuh_ucd(f"/{folder}/sleepwalker/svuh-ucd"))
+test_ds_names.append("SVUH-UCD")
+logger.uncontext()
+logger.uncontext()
 
-# logger.context("SHHS")
-# logger.context("TEST")
-# test_ds.append(build_shhs("/raid/sleepwalker/shhs"))
-# test_ds_names.append("SHHS")
-# logger.uncontext()
-# logger.uncontext()
+logger.context("SHHS")
+logger.context("TEST")
+test_ds.append(build_shhs(f"/{folder}/sleepwalker/shhs"))
+test_ds_names.append("SHHS")
+logger.uncontext()
+logger.uncontext()
 
 if os.path.exists("sleepwalker.log"):
     os.remove("sleepwalker.log")

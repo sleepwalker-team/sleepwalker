@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import bisect
-from collections import Counter, defaultdict
+from collections import defaultdict
 import copy
 from dataclasses import dataclass
-from functools import partial
 import os
 import random
-import traceback
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set
 
 import numpy as np
 import pandas as pd
+import pyedflib
 import torch
 from torch.utils.data import Dataset
 
@@ -24,13 +23,14 @@ import multiprocessing
 @dataclass
 class ChannelConfig:
     name: str
-    normalizer: Optional[Normalizer] = None  # externally created (may be None)
+    normalizer: Optional[Normalizer] = None  
 
 @dataclass
 class EDFFile: 
     channels: List[str]
     path: str
     start_date: pd.Timestamp
+    handle: Optional[pyedflib.EdfReader] = None
     length: int = 0
     X: Optional[pd.DataFrame] = None
     classes: Optional[Set[str]] = None
@@ -154,7 +154,6 @@ class BaseDataset(Dataset, ABC):
         remove_unmapped_events : bool = True, 
         get_item: Optional[Callable] = None,
         transform: Optional[Any] = None,
-        preload_windows:int = 0,
         num_workers:int = 4,
         online_max_tries:int = 128
     ) -> None:
@@ -170,7 +169,6 @@ class BaseDataset(Dataset, ABC):
         self.target_resolution = pd.to_timedelta(target_resolution)
         self.get_item_callback = get_item        
         self.transform = transform
-        self.preload_windows = preload_windows
         self.all_patients = patients
         self.online_max_tries = online_max_tries
         self.initialized = False
@@ -209,19 +207,10 @@ class BaseDataset(Dataset, ABC):
         return int(self.total_input.total_seconds() / freq.total_seconds())
 
     def get_n_patients(self) -> int:
-        return len(self.file_handles)
+        return len(self.edf_files)
 
     def __len__(self):
-        if self.preload_windows:
-            return min(self.preload_windows, sum([f.length for f in self.file_handles]))
-        else:
-            return sum([f.length for f in self.file_handles])
-
-    def on_epoch_end(self):
-        if self.preload_windows:
-            patients = list(self.all_patients)
-            random.shuffle(patients)
-            self.initialize(patients, self.num_workers)
+        return sum([f.length for f in self.edf_files])
 
     def prepare_patient(self, edf_path) -> Optional[EDFFile]:
         channel_names = [c.name for c in self.channels]
@@ -245,11 +234,6 @@ class BaseDataset(Dataset, ABC):
                 if col in data_df.columns:
                     X = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
                     normalizers[col].fit(X = X) 
-
-            if self.preload_windows > 0:
-                for col in normalizers.keys():
-                    if col in data_df.columns:
-                        data_df[col] = normalizers[col].transform(data_df[col].to_numpy(dtype=float).reshape(-1, 1))
 
             if self.event_mapping is not None:
                 if self.has_extra_target():
@@ -287,7 +271,7 @@ class BaseDataset(Dataset, ABC):
             if n_items <= 0:
                 raise ValueError(f"Edf file: {edf_path} appears to be empty between {start} - {end} with a total signal length of {end-start}s")
 
-            return EDFFile(path=edf_path, X = data_df if self.preload_windows > 0 else None, channels=list(data_df.columns), length=n_items, labels=df, labels_extra=df_additional, start_date=start, classes=classes.union(extra_classes), normalizers=normalizers)
+            return EDFFile(path=edf_path, X = None, channels=list(data_df.columns), length=n_items, labels=df, labels_extra=df_additional, start_date=start, classes=classes.union(extra_classes), normalizers=normalizers)
         except Exception as e:
             logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
 
@@ -303,18 +287,13 @@ class BaseDataset(Dataset, ABC):
         all_classes = set()
         lower, n_windows = 0, 0
 
-        target_windows = self.preload_windows if self.preload_windows > 0 else None
-        
-        logger.progress_start(self.preload_windows if self.preload_windows > 0 else len(patients), desc="Preparing labels and sliding windows", leave=True)
+        logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
 
         if num_workers <= 1:
             for p in patients:
                 edf = self.prepare_patient(p)
 
                 if edf:
-                    if self.preload_windows:
-                        logger.progress_advance(edf.length)
-
                     file_handles.append(edf)
                     lower_bounds.append(lower)
                     upper_bounds.append(lower + edf.length)
@@ -323,13 +302,6 @@ class BaseDataset(Dataset, ABC):
 
                     if edf.classes is not None:
                         all_classes |= set(edf.classes)
-                
-                if not self.preload_windows:
-                    logger.progress_advance(1)
-
-                if target_windows and n_windows >= target_windows:
-                    logger.debug(f"Reached preload limit ({n_windows}/{target_windows}).")
-                    break
         else:
             with multiprocessing.Pool(num_workers) as pool:
                 idx = 0
@@ -340,8 +312,6 @@ class BaseDataset(Dataset, ABC):
 
                     for edf in results:
                         if edf:
-                            if self.preload_windows:
-                                logger.progress_advance(edf.length)
                             file_handles.append(edf)
                             lower_bounds.append(lower)
                             upper_bounds.append(lower + edf.length)
@@ -350,23 +320,10 @@ class BaseDataset(Dataset, ABC):
 
                             if edf.classes is not None:
                                 all_classes |= set(edf.classes)
-                        
-                        if not self.preload_windows:
-                            logger.progress_advance(1)
-
-                        if target_windows and n_windows >= target_windows:
-                            logger.debug(f"Reached preload limit ({n_windows}/{target_windows}).")
-                            pool.close()
-                            pool.join()
-                            idx = len(patients)  # force exit
-                            break
-
-                    if target_windows and n_windows >= target_windows:
-                        break
 
         logger.progress_close()
 
-        self.file_handles = file_handles
+        self.edf_files = file_handles
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
 
@@ -374,84 +331,10 @@ class BaseDataset(Dataset, ABC):
             self.classes = sorted(list(all_classes))
 
         logger.info(
-            f"Dataset initialized with {len(self.file_handles)}/{total_n_patients} patients. "
+            f"Dataset initialized with {len(self.edf_files)}/{total_n_patients} patients. "
             f"Total windows: {len(self)}. Classes: {len(self.classes)}"
         )
         self.initialized = True
-
-    # def initialize(self, patients: Sequence[str|os.PathLike], num_workers: int=4) -> None:
-    #     file_handles = []
-    #     upper_bounds = []
-    #     lower_bounds = []
-    #     all_classes = set()
-    #     total_n_patients = len(patients)
-
-    #     if self.preload_windows > 0:
-    #         n_windows = 0
-    #         idx = 0
-    #         lower = 0
-    #         # TODO Load in parallel 
-    #         # TODO Make num_workers = {0, 1} case nicer
-    #         # TODO Logging
-
-    #         while n_windows < self.preload_windows and idx < len(patients):
-    #             p = patients[idx]
-
-    #             edf = self.prepare_patient(p)
-    #             if edf:
-    #                 file_handles.append(edf)
-
-    #                 lower_bounds.append(lower)
-    #                 upper_bounds.append(lower + edf.length)
-    #                 lower += edf.length
-
-    #                 if edf.classes is not None:
-    #                     all_classes = all_classes.union(edf.classes)
-
-    #                 n_windows += edf.length
-    #             idx += 1
-    #     else:
-    #         if num_workers > 1:
-    #             pool = multiprocessing.Pool(num_workers)
-    #             iter_objects = pool.imap_unordered(partial(self.prepare_patient), patients)
-    #         else:
-    #             iter_objects = patients
-
-    #         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
-
-    #         lower = 0
-    #         for ret_value in iter_objects: 
-    #             if num_workers > 1:
-    #                 edf = cast(EDFFile, ret_value)
-    #             else:
-    #                 edf = self.prepare_patient(ret_value)
-                
-    #             if edf:
-    #                 file_handles.append(edf)
-
-    #                 lower_bounds.append(lower)
-    #                 upper_bounds.append(lower + edf.length)
-    #                 lower += edf.length
-
-    #                 if edf.classes is not None:
-    #                     all_classes = all_classes.union(edf.classes)
-    #             logger.progress_advance(1)
-            
-    #         logger.progress_close()
-
-    #         if num_workers > 1:
-    #             pool.close() 
-    #             pool.join() 
-
-    #     self.upper_bounds = upper_bounds
-    #     self.file_handles = file_handles
-    #     self.lower_bounds= lower_bounds
-
-    #     if not self.event_mapping: # len(self.event_mapping) == 0
-    #         self.classes = sorted(list(all_classes))
-
-    #     logger.info(f"Dataset initialized with {len(self.file_handles)}/{total_n_patients} patients. There are {len(self)} windows available.")
-    #     self.initialized = True
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
         # start_date:pd.Timestamp, end_date, channels, sample_frequency, resample_type)
@@ -501,8 +384,8 @@ class BaseDataset(Dataset, ABC):
 
         while True:
             pidx = bisect.bisect_right(self.upper_bounds, idx)
-            file = self.file_handles[pidx]
-            
+            file = self.edf_files[pidx]
+
             new_idx = idx - self.lower_bounds[pidx] 
             cur_date = file.start_date + self.target_resolution * new_idx 
             
@@ -518,6 +401,6 @@ class BaseDataset(Dataset, ABC):
                 idx = np.random.choice(range(len(self)))
         
         if cnt > self.online_max_tries or item is None:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.fpath}")
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}")
         else:
             return item

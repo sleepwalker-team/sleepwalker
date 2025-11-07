@@ -356,9 +356,7 @@ class MulticlassTrainer(ABC):
                         "best_model":imin,
                         "checkpoint":self.best_checkpoint
                     }
-                val_loader.dataset.on_epoch_end()
             
             self.epoch_step += 1
-            train_loader.dataset.on_epoch_end()
 
         return { "losses":losses, "cms":cms }

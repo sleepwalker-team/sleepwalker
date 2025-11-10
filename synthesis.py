@@ -3067,6 +3067,8 @@ or
         return loader, data
 
     def _train_multiclass(self, u_model, dataloader, optimizer, lr_scheduler):
+        # TODO: make this right for ABC-dataset
+
         # Parameters for this run
         edf_folder = "/raid/data/ruhrlandklinik/raw/train-test-2023"
         mode = "xval"
@@ -3156,6 +3158,8 @@ or
                               fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
                               dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp, x:
                             self._uclassifier(enc, dec, u, fc, mlp, x)),
+
+            # TODO: check type of loss functions and make it compatible with MultiClassTrainer
 
             "BCEwithLogits": self._bce_with_logits,
 

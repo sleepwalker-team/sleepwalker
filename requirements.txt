@@ -12,5 +12,6 @@ dotenv
 rarfile
 openpyxl
 xmltodict
+mne
 # additional
 combinatory-synthesizer @ git+https://github.com/tudo-seal/cosy-draft.git

@@ -1,6 +1,6 @@
 import torch
 
-from sleepwalker.event.preprocessing.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 from sleepwalker.utils import logger
 
 class EmpiricalClipScaler(Preprocessor):

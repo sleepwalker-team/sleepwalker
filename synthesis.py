@@ -1,6 +1,6 @@
 import os
 
-from cosy.dsl import DSL
+from cosy.specification_builder import SpecificationBuilder
 from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
 from cosy.synthesizer import Synthesizer
 
@@ -18,6 +18,7 @@ from sleepwalker.models.preprocessors.Spectogram import Spectogram
 from sleepwalker.models.preprocessors.ZNormalize import ZNormalize
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.datasets.ABC import ABC
+from sleepwalker.datasets.Basedataset import ChannelConfig
 
 from torchinfo import summary
 from sleepwalker.core.signal import read_edf_meta
@@ -29,6 +30,8 @@ from sleepwalker.datasets import Ruhrlandklinik
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.utils import append_to_jsonl
 from sleepwalker.utils import logger, MlflowSink
+
+DSL = SpecificationBuilder # because Andrej and Conny need to rename everything every few weeks and make implementing against CoSy really annoying -.-
 
 
 class ChannelWiseNormalization(nn.Module):
@@ -3062,7 +3065,7 @@ or
         data = dataset(patients)
         sample = sampler(data)
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=sample is None, sampler=sample,
-                                             num_workers=num_workers, pin_memory=True, collate_fn=batch_collate,
+                                             num_workers=num_workers, pin_memory=False, collate_fn=batch_collate,
                                              drop_last=False, persistent_workers=True)
         return loader, data
 
@@ -3070,41 +3073,43 @@ or
         # TODO: make this right for ABC-dataset
 
         # Parameters for this run
-        edf_folder = "???"
+        edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
         epochs = 100
-        experiment_name = "abc-utime"
 
         all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
+        train_patients, test_patients = random_split(all_patients, test_frac=0.1)
 
-        for i, (train_patients, test_patients) in enumerate(random_split(all_patients, test_frac=0.1)):
-            logger.start_run(run_name=f"XVAL {i}")  # Set the run_name for this experiment
+        train_loader, dataset = dataloader(train_patients)
 
-            train_loader, dataset = dataloader(train_patients)
+        model, loss = u_model(dataset.get_classes(), len(dataset.channels))  # n_channel = 1?
 
-            model, loss = u_model(dataset.get_classes(), 1) # n_channel = 1?
+        print(model)
 
-            trainer = MulticlassTrainer(
+        print(list(model.parameters()))
+
+        trainer = MulticlassTrainer(
                 epochs=epochs,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 classes=dataset.get_classes(),
                 save_every=10,
                 loss_function=loss,
-            )
+        )
 
-            losses, cms = trainer.fit(model, train_loader)
+        losses, cms = trainer.fit(model, train_loader)
 
-            test_loader, _ = dataloader(test_patients)
-            test_loss, test_cm = trainer.test(model, test_loader)
+        test_loader, _ = dataloader(test_patients)
+        test_loss, test_cm = trainer.test(model, test_loader)
 
-            record = {
-                "xval": i,
+        record = {
                 "test_loss": test_loss,
                 "test_cm": test_cm,
                 "train_loss": losses,
                 "train_cm": cms,
                 "classes": dataset.get_classes(),
-            }
+        }
+
+        print(record)
 
 
 
@@ -3141,7 +3146,7 @@ or
                               dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp, x:
                             self._uclassifier(enc, dec, u, fc, mlp, x)),
 
-            # TODO: check type of loss functions and make it compatible with MultiClassTrainer
+            # TODO: check type of loss functions and make it compatible with MultiClassTrainer   --  should be ok?!
 
             "BCEwithLogits": self._bce_with_logits,
 
@@ -3157,7 +3162,7 @@ or
 
             "EmpiricalClipScaler": lambda q, s, p_none: EmpiricalClipScaler(q, s),
 
-            "FIR": lambda sr, ch, fp, zp, p_none: FIR(sr, ch, fp, zp),
+            "FIR": lambda sr, ch, fp, zp, p_none: FIR(sr, ch, {k: v for (k, v) in fp}, zp),
 
             "Normalize": Normalize(),
 
@@ -3183,9 +3188,10 @@ or
 
             "RandomSampler": lambda r, n, d: torch.utils.data.RandomSampler(d, replacement=r, num_samples=n),
 
-            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr, patients: ABC(annotator=a, channels=c,
+            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr, patients: ABC(annotator=a,
+                                                                              channels=[ChannelConfig(name=s) for s in c],
                                                                               patients=patients, num_workers=nw,
-                                                                              sample_frequency=sf, event_mapping=em,
+                                                                              sample_frequency=sf, event_mapping={k:v for (k,v) in em},
                                                                               online_filtering=of, total_input=ti,
                                                                               target_resolution=tr),
 
@@ -3251,7 +3257,7 @@ if __name__ == "__main__":
                            n_samples=[10000],
                            abc_channel_choices=[("Sp02", "ECG1", "ECG2", "Thor")],
                            abc_event_mapping=[(("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)],
-                           abc_num_workers=[32], abc_sample_frequency=[10, 100],
+                           abc_num_workers=[8], abc_sample_frequency=[10, 100],
                            abc_total_input=["30s"], abc_target_resolution=["1s"],
                            batch_size=[32], optimizer_learning_rate=[1e-3], optimizer_learning_rate_decay=[0], optimizer_weight_decay=[0, 1e-4],
                            optimizer_eps=[1e-10], optimizer_beta=[(0.9, 0.999)], optimizer_initial_accumulator_value=[0], optimizer_momentum=[0],
@@ -3422,7 +3428,7 @@ if __name__ == "__main__":
                           & Constructor("loss_function", Literal("MSE"))
                           & Constructor("preprocessors", Literal((
                                             ("ChannelSampler", 1),
-                                            ("FIR", 64, "channel", (("channel", "filter_param"),), False),
+                                            #("FIR", 64, "channel", (("channel", "filter_param"),), False),
                                             )))
                           )
 
@@ -3448,7 +3454,7 @@ if __name__ == "__main__":
                                                             Literal("ABC_Dataset")
                                                             & Constructor("annotator", Literal("nsrr"))
                                                             & Constructor("channels", Literal(("Sp02", "ECG1", "ECG2", "Thor")))
-                                                            & Constructor("num_workers", Literal(32))
+                                                            & Constructor("num_workers", Literal(8))
                                                             & Constructor("sample_frequency", Literal(100))
                                                             & Constructor("event_mapping", Literal((("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)))
                                                             & Constructor("online_filtering", Literal(True))
@@ -3474,7 +3480,7 @@ if __name__ == "__main__":
                                                       & Constructor("annotator", Literal("nsrr"))
                                                       & Constructor("channels",
                                                                     Literal(("Sp02", "ECG1", "ECG2", "Thor")))
-                                                      & Constructor("num_workers", Literal(32))
+                                                      & Constructor("num_workers", Literal(8))
                                                       & Constructor("sample_frequency", Literal(100))
                                                       & Constructor("event_mapping", Literal(
                                                           (("hypopnea|hypopnea", "hypopnea"),
@@ -3500,6 +3506,7 @@ if __name__ == "__main__":
 
     for t in trees:
         #print(t)
-        print(t.interpret(repo.pretty_term_algebra()))
+        #print(t.interpret(repo.pretty_term_algebra()))
+        t.interpret(repo.torch_algebra())
 
 

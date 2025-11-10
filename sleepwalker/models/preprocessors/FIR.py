@@ -6,11 +6,11 @@ import scipy
 import torch
 import torch.nn.functional as F
 
-from sleepwalker.event.preprocessing.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class FIR(Preprocessor):
     def __init__(self, sampling_rate, channels, filter_params, zero_phase=False, **kwargs):
-        fs = 1.0/sampling_rate.total_seconds()
+        fs = 1.0/sampling_rate#.total_seconds()
 
         self.zero_phase = zero_phase
         self.groups = channels

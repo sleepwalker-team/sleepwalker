@@ -139,7 +139,7 @@ class ABC(BaseDataset):
         return True
 
     def get_extra_event_df(self, fpath, start_date):
-        if self.annotator == "profusion":
+        if self.annotator == "nsrr":
             df = read_xml(fpath, "nsrr", self.trim_wake, start_date)
         else:
             df = read_xml(fpath, "profusion", self.trim_wake, start_date)

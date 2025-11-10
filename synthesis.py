@@ -1,3 +1,5 @@
+import os
+
 from cosy.dsl import DSL
 from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
 from cosy.synthesizer import Synthesizer
@@ -5,7 +7,28 @@ from cosy.synthesizer import Synthesizer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from joblib.externals.loky.backend.resource_tracker import maybe_unlink
+
+from sleepwalker.models.preprocessors.ChannelSampler import ChannelSampler
+from sleepwalker.models.preprocessors.Crop import Crop
+from sleepwalker.models.preprocessors.EmpiricalClipScaler import EmpiricalClipScaler
+from sleepwalker.models.preprocessors.FIR import FIR
+from sleepwalker.models.preprocessors.Normalize import Normalize
+from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
+from sleepwalker.models.preprocessors.Spectogram import Spectogram
+from sleepwalker.models.preprocessors.ZNormalize import ZNormalize
+from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.datasets.ABC import ABC
+
+from torchinfo import summary
+from sleepwalker.core.signal import read_edf_meta
+from sleepwalker.datasets import ChannelConfig
+from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.utils import get_edf_files_in_repo, kfold_split, random_split
+from sleepwalker.datasets import Ruhrlandklinik
+
+from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
+from sleepwalker.trainer.utils import append_to_jsonl
+from sleepwalker.utils import logger, MlflowSink
 
 
 class ChannelWiseNormalization(nn.Module):
@@ -66,6 +89,18 @@ class DepthwiseSeparableConv1d(nn.Module):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
+
+class UTime(BaseModel):
+    def __init__(self, forward_function, classes, n_channels, preprocessors=None):
+        super().__init__(preprocessors=preprocessors)
+        self.forward_function = forward_function
+        self.classes = list(classes)
+        self.nchannel = n_channels
+        self.nclass = len(classes)
+
+    def _forward(self, x):
+        return self.forward_function(x)
+
 
 
 class UtimeRepository:
@@ -2993,6 +3028,103 @@ or
             x = dec(z, y)
             return x
 
+    def _uclassifier(self, enc, dec, u_model, fc, mlp, x, return_intermediate=False):
+        x = x.swapaxes(1, 2)
+        T = x.shape[-1]
+        if return_intermediate:
+            x, u_intermediate = self._ustructure_cons(enc, dec, u_model, x, return_intermediate=return_intermediate)
+            x = fc(x)
+            x = x.mean(dim=2)
+            feature_embeddings = x
+            x = mlp(x)
+            return x, (u_intermediate, feature_embeddings.flatten(start_dim=1))
+        else:
+            x = self._ustructure_cons(enc, dec, u_model, x, return_intermediate=return_intermediate)
+            x = fc(x)
+            x = x.mean(dim=2)
+            x = mlp(x)
+            return x
+
+    def _bce_with_logits(self, pred, target, additional=None):
+        (batch_size, _, _) = pred.shape
+        return torch.nn.functional.binary_cross_entropy_with_logits(pred.reshape(batch_size, -1),
+                                                                    target.reshape(batch_size, -1))
+
+    def _mae(self, pred, target, additional=None):
+        pred = pred.reshape(target.shape)
+        return torch.nn.functional.l1_loss(pred, target)
+
+    def _mse(self, pred, target, additional=None):
+        pred = pred.reshape(target.shape)
+        return torch.nn.functional.mse_loss(pred, target)
+
+    def _dataloader(self, num_workers, batch_size, sampler, dataset, patients):
+        data = dataset(patients)
+        sample = sampler(data)
+        loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=sample is None, sampler=sample,
+                                             num_workers=num_workers, pin_memory=True, collate_fn=batch_collate,
+                                             drop_last=False, persistent_workers=True)
+        return loader, data
+
+    def _train_multiclass(self, u_model, dataloader, optimizer, lr_scheduler):
+        # Parameters for this run
+        edf_folder = "/raid/data/ruhrlandklinik/raw/train-test-2023"
+        mode = "xval"
+        n_splits = 5
+        epochs = 100
+        n_samples = None  # 10_000
+        tracking_uri = "file:./mlruns"
+        experiment_name = "ruhrland_sleeptransformer"
+
+        all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
+
+        # Logging is now vastly simplified:
+        #   We have a global singleton logger (from sleepwalker.utils import logger) that can be used for {metric,artifacts,text,...} logging
+        #   We can add sinks for logging to different backends (file, mlflow, etc). Per default we log to file and TQDM/Console
+        if os.path.exists("sleepwalker.log"):
+            # Reset log file, per default we always append to the current file
+            os.remove("sleepwalker.log")
+
+        # Add an mlflow sink with the appropriate experiment name and backend URI
+        logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite",
+                                   experiment="MyExperiment"))  # can also be file:... as backend
+
+        for i, (train_patients, test_patients) in enumerate(random_split(all_patients, test_frac=0.1)):
+            logger.start_run(run_name=f"XVAL {i}")  # Set the run_name for this experiment
+
+            train_loader, dataset = dataloader(train_patients)
+
+            model, loss = u_model(dataset.get_classes(), 1) # n_channel = 1?
+            model_stats = summary(model, input_size=(1, dataset.get_timeseries_len(), 1), depth=5,
+                                  row_settings=["hide_recursive_layers"])
+
+            trainer = MulticlassTrainer(
+                epochs=epochs,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                classes=dataset.get_classes(),
+                save_every=10,
+                loss_function=loss,
+            )
+
+            losses, cms = trainer.fit(model, train_loader)
+
+            test_loader, _ = dataloader(test_patients)
+            test_loss, test_cm = trainer.test(model, test_loader)
+
+            record = {
+                "xval": i,
+                "test_loss": test_loss,
+                "test_cm": test_cm,
+                "train_loss": losses,
+                "train_cm": cms,
+                "classes": dataset.get_classes(),
+            }
+            append_to_jsonl(experiment_name, record)
+
+
+
+
     def torch_algebra(self):
         return {
             "ReLu": nn.ReLU(),
@@ -3016,71 +3148,96 @@ or
 
             "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
                                             dds, ds, kks, ks, mms, ms, enc, dec, u_model, x: self._ustructure_cons(enc, dec, u_model, x)),
+
             "LinearLayer": (lambda i, o, b: nn.Linear(i, o, bias=b)),
 
-            #TODO: implement from here
             "UClassifier": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
                               first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
                               fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
-                              dds, ds, kks, ks, mms, ms, enc, dec, u, dc, mlp:
-                       f"U_Classifier({enc}, {dec}, {u}, {dc}, {mlp})"),
+                              dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp, x:
+                            self._uclassifier(enc, dec, u, fc, mlp, x)),
 
-            "BCEwithLogits": "BCE_with_logits()",
+            "BCEwithLogits": self._bce_with_logits,
 
-            "CrossEntropy": "CrossEntropy()",
+            "CrossEntropy": lambda pred, target, additional=None: torch.nn.functional.cross_entropy(pred, target.argmax(1)),
 
-            "MAE": "MAE()",
+            "MAE": self._mae,
 
-            "MSE": "MSE()",
+            "MSE": self._mse,
 
-            "ChannelSampler": lambda n, p: f"ChannelSampler({n})",
+            "ChannelSampler": lambda n, p: ChannelSampler(n),
 
-            "Crop": lambda ti, sr, w, p_none: f"Crop({ti}, {sr}, {w})",
+            "Crop": lambda ti, sr, w, p_none: Crop(ti, sr, w),
 
-            "EmpiricalClipScaler": lambda q, s, p_none: f"EmpiricalClipScaler({q}, {s})",
+            "EmpiricalClipScaler": lambda q, s, p_none: EmpiricalClipScaler(q, s),
 
-            "FIR": lambda sr, ch, fp, zp, p_none: f"FIR({sr}, {ch}, {fp}, {zp})",
+            "FIR": lambda sr, ch, fp, zp, p_none: FIR(sr, ch, fp, zp),
 
-            "Normalize": "Normalize()",
+            "Normalize": Normalize(),
 
-            "RobustScaler": lambda lq, uq, p_none: f"RobustScaler({lq}, {uq})",
+            "RobustScaler": lambda lq, uq, p_none: RobustScaler(lq, uq),
 
-            "Spectogram": lambda n_fft, hl, wl, els, p_none: f"Spectogram({n_fft}, {hl}, {wl}, {els})",
+            "Spectogram": lambda n_fft, hl, wl, els, p_none: Spectogram(n_fft, hl, wl, els),
 
-            "ZNormalize": lambda ugs, p: f"ZNormalize({ugs})",
+            "ZNormalize": lambda ugs, p: ZNormalize(ugs),
 
-            "Preprocessor_Sequence": lambda ps: f"[]",
+            "Preprocessor_Sequence": lambda ps: (),
 
-            "Preprocessor_Sequence_Cons": lambda p, pps, ps, x, xs: f"({x} :: {xs})",
+            "Preprocessor_Sequence_Cons": lambda p, pps, ps, x, xs: (x,) + xs,
 
             "UModel": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm,
                                m_s, m_p, m_d, f_d, f_af, f_c, f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p,
                                f_m_d, fc_k, fc_c, fc_s, fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms,
-                               loss, preps, loss_f, preprocessors, u: f"UModel({loss_f}, {preprocessors}, {u})"),
+                               loss, preps, loss_f, preprocessors, u, classes, n_channels: (UTime(u, classes,
+                                                                                                  n_channels,
+                                                                                                  preprocessors=preprocessors),
+                                                                                            loss_f)),
 
-            "NoSampler": lambda r, n: f"NoSampler",
+            "NoSampler": lambda r, n, d: None,
 
-            "RandomSampler": lambda r, n: f"RandomSampler({r}, {n})",
+            "RandomSampler": lambda r, n, d: torch.utils.data.RandomSampler(d, replacement=r, num_samples=n),
 
-            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr: f"ABC_Dataset({a}, {c}, {nw}, {sf}, {em}, {of}, {ti}, {tr})",
+            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr, patients: ABC(annotator=a, channels=c,
+                                                                              patients=patients, num_workers=nw,
+                                                                              sample_frequency=sf, event_mapping=em,
+                                                                              online_filtering=of, total_input=ti,
+                                                                              target_resolution=tr),
 
-            "DataLoader": lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d: f"DataLoader({s}, {d}, {bs})",
+            "DataLoader": (lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d, patients:
+                           self._dataloader(nw, bs, s, d, patients)),
 
-            "Adagrad": lambda lr, lr_d, w_d, i_a_v, eps, p_none: f"Adagrad({lr}, {lr_d}, {w_d}, {i_a_v}, {eps})",
+            "Adagrad": lambda lr, lr_d, w_d, i_a_v, eps, p_none, model: torch.optim.Adagrad(params=model.parameters(),
+                                                                                             lr=lr,
+                                                                                             lr_decay=lr_d,
+                                                                                             weight_decay=w_d,
+                                                                                             initial_accumulator_value=i_a_v,
+                                                                                             eps=eps),
 
-            "Adam": lambda lr, beta, eps, w_d, amsgrad, p_none: f"Adam({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+            "Adam": lambda lr, beta, eps, w_d, amsgrad, p_none, model: torch.optim.Adam(params=model.parameters(), lr=lr,
+                                                                                         betas=beta, eps=eps,
+                                                                                         weight_decay=w_d,
+                                                                                         amsgrad=amsgrad),
 
-            "AdamW": lambda lr, beta, eps, w_d, amsgrad, p_none: f"AdamW({lr}, {beta}, {eps}, {w_d}, {amsgrad})",
+            "AdamW": lambda lr, beta, eps, w_d, amsgrad, p_none, model: torch.optim.AdamW(params=model.parameters(), lr=lr,
+                                                                                           betas=beta, eps=eps,
+                                                                                           weight_decay=w_d,
+                                                                                           amsgrad=amsgrad),
 
-            "Adamax": lambda lr, beta, eps, w_d, p_none: f"Adamax({lr}, {beta}, {eps}, {w_d})",
+            "Adamax": lambda lr, beta, eps, w_d, p_none, model: torch.optim.Adamax(params=model.parameters(), lr=lr, betas=beta,
+                                                                                    eps=eps, weight_decay=w_d),
 
-            "SGD": lambda lr, m, d, w_d, n, p_none: f"SGD({lr}, {m}, {d}, {w_d}, {n})",
+            "SGD": lambda lr, m, d, w_d, n, p_none, model: torch.optim.SGD(params=model.parameters(), lr=lr, momentum=m,
+                                                                            dampening=d, weight_decay=w_d, nesterov=n),
 
-            "LinearLR": lambda sf, ef, ti, le, p_none: f"LinearLR({sf}, {ef}, {ti}, {le})",
+            "LinearLR": lambda sf, ef, ti, le, p_none, opti: torch.optim.lr_scheduler.LinearLR(optimizer=opti,
+                                                                                               start_factor=sf,
+                                                                                               end_factor=ef,
+                                                                                               total_iters=ti,
+                                                                                               last_epoch=le),
 
-            "StepLR": lambda s, g, l, p_none: f"StepLR({s}, {g}, {l})",
+            "StepLR": lambda s, g, l, p_none, opti: torch.optim.lr_scheduler.StepLR(optimizer=opti, step_size=s, gamma=g, last_epoch=l),
 
-            "ExponentialLR": lambda g, l, p_none: f"ExponentialLR({g}, {l})",
+            "ExponentialLR": lambda g, l, p_none, opti: torch.optim.lr_scheduler.ExponentialLR(optimizer=opti, gamma=g, last_epoch=l),
 
             "MulticlassTrainer": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm, m_s, m_p, m_d, f_d, f_af, f_c,
                                          f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
@@ -3088,8 +3245,7 @@ or
                                          annotator, channels, num_w, sample_f, event_map, online_f, total_in,
                                          target_res, replacement, num_s, sampler, batch_size, opti_none, opti,
                                          lr_sched_none, lr_sched,
-                                         model, dataloader, optimizer, lr_scheduler:
-                                  f"MulticlassTrainer({model}, {dataloader}, {optimizer}, {lr_scheduler})"),
+                                         model, dataloader, optimizer, lr_scheduler: self._train_multiclass(model, dataloader, optimizer, lr_scheduler)),
         }
 
 if __name__ == "__main__":

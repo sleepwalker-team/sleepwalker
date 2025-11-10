@@ -3070,26 +3070,11 @@ or
         # TODO: make this right for ABC-dataset
 
         # Parameters for this run
-        edf_folder = "/raid/data/ruhrlandklinik/raw/train-test-2023"
-        mode = "xval"
-        n_splits = 5
+        edf_folder = "???"
         epochs = 100
-        n_samples = None  # 10_000
-        tracking_uri = "file:./mlruns"
-        experiment_name = "ruhrland_sleeptransformer"
+        experiment_name = "abc-utime"
 
         all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
-
-        # Logging is now vastly simplified:
-        #   We have a global singleton logger (from sleepwalker.utils import logger) that can be used for {metric,artifacts,text,...} logging
-        #   We can add sinks for logging to different backends (file, mlflow, etc). Per default we log to file and TQDM/Console
-        if os.path.exists("sleepwalker.log"):
-            # Reset log file, per default we always append to the current file
-            os.remove("sleepwalker.log")
-
-        # Add an mlflow sink with the appropriate experiment name and backend URI
-        logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite",
-                                   experiment="MyExperiment"))  # can also be file:... as backend
 
         for i, (train_patients, test_patients) in enumerate(random_split(all_patients, test_frac=0.1)):
             logger.start_run(run_name=f"XVAL {i}")  # Set the run_name for this experiment
@@ -3097,8 +3082,6 @@ or
             train_loader, dataset = dataloader(train_patients)
 
             model, loss = u_model(dataset.get_classes(), 1) # n_channel = 1?
-            model_stats = summary(model, input_size=(1, dataset.get_timeseries_len(), 1), depth=5,
-                                  row_settings=["hide_recursive_layers"])
 
             trainer = MulticlassTrainer(
                 epochs=epochs,
@@ -3122,7 +3105,6 @@ or
                 "train_cm": cms,
                 "classes": dataset.get_classes(),
             }
-            append_to_jsonl(experiment_name, record)
 
 
 

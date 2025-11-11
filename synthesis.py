@@ -94,12 +94,15 @@ class DepthwiseSeparableConv1d(nn.Module):
         return x
 
 class UTime(BaseModel):
-    def __init__(self, forward_function, classes, n_channels, preprocessors=None):
-        super().__init__(preprocessors=preprocessors)
+    def __init__(self, forward_function, classes, n_channels, modules, preprocessors=None):
+        super(UTime, self).__init__(preprocessors=preprocessors)
         self.forward_function = forward_function
         self.classes = list(classes)
         self.nchannel = n_channels
         self.nclass = len(classes)
+        name = "module"
+        for i, m in enumerate(modules):
+            self.add_module(name + str(i), m)
 
     def _forward(self, x):
         return self.forward_function(x)
@@ -3081,11 +3084,7 @@ or
 
         train_loader, dataset = dataloader(train_patients)
 
-        model, loss = u_model(dataset.get_classes(), len(dataset.channels))  # n_channel = 1?
-
-        print(model)
-
-        print(list(model.parameters()))
+        model, loss = u_model(dataset.get_classes(), len(dataset.channels))  # n_channel = len(dataset.channels)?
 
         trainer = MulticlassTrainer(
                 epochs=epochs,
@@ -3094,6 +3093,7 @@ or
                 classes=dataset.get_classes(),
                 save_every=10,
                 loss_function=loss,
+                device="cpu"
         )
 
         losses, cms = trainer.fit(model, train_loader)
@@ -3127,24 +3127,24 @@ or
             "Upsample1d": (lambda n: nn.Upsample(scale_factor=n, mode="nearest")),
             "Conv1d": (lambda i, o, k, s, p, d, b: nn.Conv1d(i, o, kernel_size=k, stride=s, padding=p, dilation=d, bias=b)),
             "DepthwiseSeparableConv1d": (lambda i, o, k, s, p, d, b: DepthwiseSeparableConv1d(i, o, kernel_size=k, stride=s, padding=p, dilation=d, bias=b)),
-            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, n, e, activation, dropout, c1, c2, norm, x:
-                          self._conv_block(activation, dropout, c1, c2, norm, x)),
-            "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb, x: self._encoder(cb, mp, x)),
-            "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb, x, y: self._decoder(cb, mp, x, y)),
+            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, n, e, activation, dropout, c1, c2, norm:
+                          (lambda x: self._conv_block(activation, dropout, c1, c2, norm, x), [activation, dropout, c1, c2, norm])),
+            "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb: (lambda x: self._encoder(cb[0], mp, x), [mp] + cb[1])),
+            "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb: (lambda x, y: self._decoder(cb[0], mp, x, y), [mp] + cb[1])),
 
             "UStructure": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
-                              ds, ks, ms, enc, dec, cb, x: self._ustructure(enc, dec, cb, x)),
+                              ds, ks, ms, enc, dec, cb: (lambda x: self._ustructure(enc[0], dec[0], cb[0], x), enc[1] + dec[1] + cb[1])),
 
             "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
-                                            dds, ds, kks, ks, mms, ms, enc, dec, u_model, x: self._ustructure_cons(enc, dec, u_model, x)),
+                                            dds, ds, kks, ks, mms, ms, enc, dec, u_model: (lambda x: self._ustructure_cons(enc[0], dec[0], u_model[0], x), enc[1] + dec[1] + u_model[1])),
 
             "LinearLayer": (lambda i, o, b: nn.Linear(i, o, bias=b)),
 
             "UClassifier": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
                               first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
                               fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
-                              dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp, x:
-                            self._uclassifier(enc, dec, u, fc, mlp, x)),
+                              dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp:
+                            (lambda x: self._uclassifier(enc[0], dec[0], u[0], fc, mlp, x), [fc, mlp] + enc[1] + dec[1] + u[1])),
 
             # TODO: check type of loss functions and make it compatible with MultiClassTrainer   --  should be ok?!
 
@@ -3179,8 +3179,9 @@ or
             "UModel": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm,
                                m_s, m_p, m_d, f_d, f_af, f_c, f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p,
                                f_m_d, fc_k, fc_c, fc_s, fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms,
-                               loss, preps, loss_f, preprocessors, u, classes, n_channels: (UTime(u, classes,
+                               loss, preps, loss_f, preprocessors, u, classes, n_channels: (UTime(u[0], classes,
                                                                                                   n_channels,
+                                                                                                  u[1],
                                                                                                   preprocessors=preprocessors),
                                                                                             loss_f)),
 

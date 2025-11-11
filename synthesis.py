@@ -1,4 +1,5 @@
 import os
+from functools import partial
 
 from cosy.specification_builder import SpecificationBuilder
 from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
@@ -3082,6 +3083,8 @@ or
 
         train_loader, dataset = dataloader(train_patients)
 
+        print(len(dataset.get_classes()))
+
         model, loss = u_model(dataset.get_classes(), len(dataset.channels))  # n_channel = len(dataset.channels)?
 
         trainer = MulticlassTrainer(
@@ -3190,7 +3193,8 @@ or
                                                                               patients=patients, num_workers=nw,
                                                                               sample_frequency=sf, event_mapping={k:v for (k,v) in em},
                                                                               online_filtering=of, total_input=ti,
-                                                                              target_resolution=tr),
+                                                                              target_resolution=tr,
+                                                                              get_item=partial(MulticlassTrainer.get_item),),
 
             "DataLoader": (lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d, patients:
                            self._dataloader(nw, bs, s, d, patients)),
@@ -3238,7 +3242,7 @@ or
         }
 
 if __name__ == "__main__":
-    repo = UtimeRepository(dimension_choices=[64, 128, 256], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
+    repo = UtimeRepository(dimension_choices=[1,2,4,8, 256], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
                            convolution_kernel_size_choices=[5, 3, 2], convolution_stride_choices=[1, ],
                            convolution_padding_choices=[0, ], convolution_dilations_choices=[1, ],
                            maxpool_size_choices=[3, 5], maxpool_stride_choices=[1,], maxpool_padding_choices=[0, ],
@@ -3315,7 +3319,7 @@ if __name__ == "__main__":
     )
 
     target2 = (Constructor("u_classifier",
-                                Constructor("dimensions", Literal((256, 128, 128)))
+                                Constructor("dimensions", Literal((1, 1, 1)))
                                 & Constructor("kernel_sizes", Literal((2, 3, 5)))
                                 & Constructor("maxpool_sizes", Literal((5, 5, 3)))
                                 )
@@ -3333,7 +3337,7 @@ if __name__ == "__main__":
                           & Constructor("maxpool_dilation", Literal(1))
                              )
                & Constructor("bottleneck",
-                          Constructor("in_and_out", Literal(64))
+                          Constructor("in_and_out", Literal(1))
                           & Constructor("kernel_size", Literal(1))
                           )
                & Constructor("homogeneous",
@@ -3361,7 +3365,7 @@ if __name__ == "__main__":
                & Constructor("u_linear_classifier",
                                   Constructor("linear_layer",
                                               Constructor("input", Literal(256))
-                                              & Constructor("output", Literal(64))
+                                              & Constructor("output", Literal(2))
                                               & Constructor("bias", Literal(False))
                                               )
                                   )

@@ -3014,43 +3014,27 @@ or
         return x
 
     @staticmethod
-    def _ustructure(enc, dec, cb, x, return_intermediate=False):
+    def _ustructure(enc, dec, cb, x):
         x, y = enc(x)
         z = cb(x)
         x = dec(z, y)
-        if return_intermediate:
-            return x, z.flatten(start_dim=1)
-        else:
-            return x
+        return x
 
     @staticmethod
-    def _ustructure_cons(enc, dec, u_model, x, return_intermediate=False):
+    def _ustructure_cons(enc, dec, u_model, x):
         x, y = enc(x)
-        if return_intermediate:
-            z, u_intermediate = u_model(x, return_intermediate=return_intermediate)
-            x = dec(z, y)
-            return x, u_intermediate
-        else:
-            z = u_model(x, return_intermediate=return_intermediate)
-            x = dec(z, y)
-            return x
+        z = u_model(x)
+        x = dec(z, y)
+        return x
 
-    def _uclassifier(self, enc, dec, u_model, fc, mlp, x, return_intermediate=False):
+    def _uclassifier(self, enc, dec, u_model, fc, mlp, x):
         x = x.swapaxes(1, 2)
         T = x.shape[-1]
-        if return_intermediate:
-            x, u_intermediate = self._ustructure_cons(enc, dec, u_model, x, return_intermediate=return_intermediate)
-            x = fc(x)
-            x = x.mean(dim=2)
-            feature_embeddings = x
-            x = mlp(x)
-            return x, (u_intermediate, feature_embeddings.flatten(start_dim=1))
-        else:
-            x = self._ustructure_cons(enc, dec, u_model, x, return_intermediate=return_intermediate)
-            x = fc(x)
-            x = x.mean(dim=2)
-            x = mlp(x)
-            return x
+        x = self._ustructure_cons(enc, dec, u_model, x)
+        x = fc(x)
+        x = x.mean(dim=2)
+        x = mlp(x)
+        return x
 
     def _bce_with_logits(self, pred, target, additional=None):
         (batch_size, _, _) = pred.shape

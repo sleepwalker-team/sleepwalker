@@ -3073,8 +3073,6 @@ or
         return loader, data
 
     def _train_multiclass(self, u_model, dataloader, optimizer, lr_scheduler):
-        # TODO: make this right for ABC-dataset
-
         # Parameters for this run
         edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
         epochs = 100
@@ -3145,8 +3143,6 @@ or
                               fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
                               dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp:
                             (lambda x: self._uclassifier(enc[0], dec[0], u[0], fc, mlp, x), [fc, mlp] + enc[1] + dec[1] + u[1])),
-
-            # TODO: check type of loss functions and make it compatible with MultiClassTrainer   --  should be ok?!
 
             "BCEwithLogits": self._bce_with_logits,
 
@@ -3255,7 +3251,7 @@ if __name__ == "__main__":
                            preprocessor_robust_scaler_lower_quantile_choices=[0.25], preprocessor_robust_scaler_upper_quantile_choices=[0.75],
                            preprocessor_spectogram_n_fft_choices=[256], preprocessor_spectogram_hop_length_choices=[64],
                            preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1],
-                           n_samples=[10000],
+                           n_samples=[100],
                            abc_channel_choices=[("Sp02", "ECG1", "ECG2", "Thor")],
                            abc_event_mapping=[(("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)],
                            abc_num_workers=[8], abc_sample_frequency=[10, 100],
@@ -3449,7 +3445,7 @@ if __name__ == "__main__":
                                               Constructor("Sampler",
                                                           Literal("RandomSampler")
                                                           & Constructor("replacement", Literal(True))
-                                                          & Constructor("num_samples", Literal(10000))
+                                                          & Constructor("num_samples", Literal(100))
                                                           )
                                               & Constructor("Dataset",
                                                             Literal("ABC_Dataset")

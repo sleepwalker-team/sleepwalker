@@ -3053,7 +3053,7 @@ or
         data = dataset(patients)
         sample = sampler(data)
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=sample is None, sampler=sample,
-                                             num_workers=num_workers, pin_memory=True, collate_fn=batch_collate,
+                                             num_workers=num_workers, pin_memory=False, collate_fn=batch_collate,
                                              drop_last=False, persistent_workers=True)
         return loader, data
 
@@ -3444,7 +3444,7 @@ if __name__ == "__main__":
                                                             & Constructor("total_input", Literal("30s"))
                                                             & Constructor("target_resolution", Literal("1s"))
                                                             )
-                                              & Constructor("batch_size", Literal(32))
+                                              & Constructor("batch_size", Literal(32))  # no variance needed, can be handled like epochs
                                               )
                           & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
                           & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
@@ -3491,5 +3491,6 @@ if __name__ == "__main__":
         #print(t)
         #print(t.interpret(repo.pretty_term_algebra()))
         t.interpret(repo.torch_algebra())
+        # TODO: algebra for code-generation targeted at debugging, not pretty python code || python semantic for debugging
 
 

@@ -1454,7 +1454,7 @@ or
                       & Constructor("bias", Var("b"))
                       )
             .argument("c2", Constructor("1d_conv_layer",
-                                        Constructor("input", Var("in"))
+                                        Constructor("input", Var("out"))
                                         & Constructor("output", Var("out"))
                                         & Constructor("kernel_size", Var("k"))
                                         )
@@ -3053,21 +3053,19 @@ or
         data = dataset(patients)
         sample = sampler(data)
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=sample is None, sampler=sample,
-                                             num_workers=num_workers, pin_memory=False, collate_fn=batch_collate,
+                                             num_workers=num_workers, pin_memory=True, collate_fn=batch_collate,
                                              drop_last=False, persistent_workers=True)
         return loader, data
 
     def _train_multiclass(self, u_model, dataloader, optimizer, lr_scheduler):
         # Parameters for this run
         edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
-        epochs = 100
+        epochs = 5
 
         all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
         train_patients, test_patients = random_split(all_patients, test_frac=0.1)
 
         train_loader, dataset = dataloader(train_patients)
-
-        print(len(dataset.get_classes()))
 
         model, loss = u_model(dataset.get_classes(), len(dataset.channels))  # n_channel = len(dataset.channels)?
 
@@ -3133,7 +3131,7 @@ or
 
             "BCEwithLogits": self._bce_with_logits,
 
-            "CrossEntropy": lambda pred, target, additional=None: torch.nn.functional.cross_entropy(pred, target.argmax(1)),
+            "CrossEntropy": torch.nn.functional.cross_entropy,
 
             "MAE": self._mae,
 
@@ -3226,7 +3224,7 @@ or
         }
 
 if __name__ == "__main__":
-    repo = UtimeRepository(dimension_choices=[1,2,4,8, 256], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
+    repo = UtimeRepository(dimension_choices=[1, 2, 4, 8, 64, 128, 256, 512], normalization_eps_choices=[1e-3], dropout_p_choices=[0.1],
                            convolution_kernel_size_choices=[5, 3, 2], convolution_stride_choices=[1, ],
                            convolution_padding_choices=[0, ], convolution_dilations_choices=[1, ],
                            maxpool_size_choices=[3, 5], maxpool_stride_choices=[1,], maxpool_padding_choices=[0, ],
@@ -3303,7 +3301,7 @@ if __name__ == "__main__":
     )
 
     target2 = (Constructor("u_classifier",
-                                Constructor("dimensions", Literal((1, 1, 1)))
+                                Constructor("dimensions", Literal((1, 512, 256)))
                                 & Constructor("kernel_sizes", Literal((2, 3, 5)))
                                 & Constructor("maxpool_sizes", Literal((5, 5, 3)))
                                 )
@@ -3321,7 +3319,7 @@ if __name__ == "__main__":
                           & Constructor("maxpool_dilation", Literal(1))
                              )
                & Constructor("bottleneck",
-                          Constructor("in_and_out", Literal(1))
+                          Constructor("in_and_out", Literal(64))
                           & Constructor("kernel_size", Literal(1))
                           )
                & Constructor("homogeneous",
@@ -3348,7 +3346,7 @@ if __name__ == "__main__":
                              )
                & Constructor("u_linear_classifier",
                                   Constructor("linear_layer",
-                                              Constructor("input", Literal(256))
+                                              Constructor("input", Literal(512))
                                               & Constructor("output", Literal(2))
                                               & Constructor("bias", Literal(False))
                                               )
@@ -3410,7 +3408,7 @@ if __name__ == "__main__":
 
     target4 = Constructor("u_model",
                           target2
-                          & Constructor("loss_function", Literal("MSE"))
+                          & Constructor("loss_function", Literal("CrossEntropy"))
                           & Constructor("preprocessors", Literal((
                                             ("ChannelSampler", 1),
                                             #("FIR", 64, "channel", (("channel", "filter_param"),), False),

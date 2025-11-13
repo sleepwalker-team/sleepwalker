@@ -1,8 +1,7 @@
-import os
 from functools import partial
 
 from cosy.specification_builder import SpecificationBuilder
-from cosy.types import Constructor, Group, DataGroup, Literal, Type, Var
+from cosy.types import Constructor, Group, DataGroup, Literal, Var
 from cosy.synthesizer import Synthesizer
 
 import torch
@@ -19,18 +18,12 @@ from sleepwalker.models.preprocessors.Spectogram import Spectogram
 from sleepwalker.models.preprocessors.ZNormalize import ZNormalize
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.datasets.ABC import ABC
-from sleepwalker.datasets.Basedataset import ChannelConfig
-
-from torchinfo import summary
-from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.utils import get_edf_files_in_repo, kfold_split, random_split
-from sleepwalker.datasets import Ruhrlandklinik
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.utils import append_to_jsonl
-from sleepwalker.utils import logger, MlflowSink
+
 
 DSL = SpecificationBuilder # because Andrej and Conny need to rename everything every few weeks and make implementing against CoSy really annoying -.-
 
@@ -3176,7 +3169,7 @@ or
                                                                               sample_frequency=sf, event_mapping={k:v for (k,v) in em},
                                                                               online_filtering=of, total_input=ti,
                                                                               target_resolution=tr,
-                                                                              get_item=partial(MulticlassTrainer.get_item),),
+                                                                              get_item=partial(MulticlassTrainer.get_item)),
 
             "DataLoader": (lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d, patients:
                            self._dataloader(nw, bs, s, d, patients)),
@@ -3221,6 +3214,342 @@ or
                                          target_res, replacement, num_s, sampler, batch_size, opti_none, opti,
                                          lr_sched_none, lr_sched,
                                          model, dataloader, optimizer, lr_scheduler: self._train_multiclass(model, dataloader, optimizer, lr_scheduler)),
+        }
+
+
+    def python_code_algebra(self):
+        separator = ", \n        "
+        return {
+            "ReLu": "nn.ReLU()",
+            "ELU": "nn.ELU()",
+            "Tanh": "nn.Tanh()",
+            "BatchNorm1d": (lambda n, e: f"nn.BatchNorm1d({n}, eps={e})"),
+            "ChannelWiseNorm": (lambda n, e: f"ChannelWiseNormalization({n}, {e})"),
+            "Conv1dLayerNorm": (lambda n, e: f"Conv1dLayerNorm({n}, eps={e})"),
+            "Dropout1d": (lambda d: f"nn.Dropout1d(p={d})"),
+            "Maxpool1d": (lambda n, s, p, d: f"nn.MaxPool1d({n}, stride={s}, padding={p}, dilation={d})"),
+            "Upsample1d": (lambda n: f"nn.Upsample(scale_factor={n}, mode=\"nearest\")"),
+            "Conv1d": (lambda i, o, k, s, p, d, b: f"nn.Conv1d({i}, {o}, kernel_size={k}, stride={s}, padding={p}, dilation={d}, bias={b})"),
+            "DepthwiseSeparableConv1d": (lambda i, o, k, s, p, d, b: f"DepthwiseSeparableConv1d({i}, {o}, kernel_size={k}, stride={s}, padding={p}, dilation={d}, bias={b})"),
+            "ConvBlock": (lambda i, o, k, d, af, c, s, p, di, b, n, e, activation, dropout, c1, c2, norm:
+                          (f"""
+        c1 = {c1}
+        x = c1(x)
+        norm = {norm}
+        x = norm(x)
+        activation = {activation}
+        x = activation(x)
+        c2 = {c2}
+        x = c2(x)
+        x = norm(x)
+        x = activation(x)
+        dropout = {dropout}
+        x = dropout(x)
+""", [activation, dropout, c1, c2, norm])),
+            "Encoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, ms, mpa, md, mp, cb, id: (f"""
+{cb[0]}
+        y{id} = x
+        mp = {mp}
+        x = mp(y{id})
+        if x.shape[-1] < 1:
+            raise ValueError("Encoder output is empty after pooling. Reduce the pooling size or number of layers.")
+""", [mp] + cb[1])),
+            "Decoder": (lambda i, o, k, d, af, c, s, p, di, b, e, n, m, mp, cb, id: (f"""
+        up = {mp}
+        x = up(x)
+        output_size = y{id}.size(2)
+
+        if x.size(2) != output_size:
+            diff = output_size - x.size(2)
+            x = F.pad(x, (0, diff))  # Apply zero padding to the end of the dimension
+
+        x = torch.cat([x, y{id}], dim=1)
+{cb[0]}
+""", [mp] + cb[1])),
+
+            "UStructure": (lambda i, out_enc, in_dec, k1, k2, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+                              ds, ks, ms, enc, dec, cb, id: (f"""
+{enc(id)[0]}
+# bottleneck
+{cb[0]}
+# decoding
+{dec(id)[0]}
+""", enc(id)[1] + dec(id)[1] + cb[1])),
+
+            "UStructure_Cons": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, c, s, p, di, b, e, n, m, mst, mpa, md,
+                                            dds, ds, kks, ks, mms, ms, enc, dec, u_model, id: (f"""
+{enc(id)[0]}
+{u_model(id+1)[0]}
+{dec(id)[0]}
+""", enc(id)[1] + dec(id)[1] + u_model(id+1)[1])),
+
+            "LinearLayer": (lambda i, o, b: f"nn.Linear({i}, {o}, bias={b})"),
+
+            "UClassifier": (lambda in_u, in_enc, in_dec, bd, k, bk, d, af, conv, c_stride, c_padding, c_dilation, b, e, norm, m, m_stride, m_padding, m_dilation,
+                              first_d, first_af, first_conv, first_c_stride, first_c_padding, first_c_dilation, first_b, first_e, first_norm, first_m_stride, first_m_padding, first_m_dilation,
+                              fc_k, fc_conv, fc_stride, fc_padding, fc_dilation, fc_b, mlp_in, mlp_out, mlp_b,
+                              dds, ds, kks, ks, mms, ms, enc, dec, u, fc, mlp:
+                            (f"""
+        x = x.swapaxes(1, 2)
+        T = x.shape[-1]
+        
+#encoding
+{enc(0)[0]}
+{u(1)[0]}
+{dec(0)[0]}
+        final_conv = {fc}
+        x = final_conv(x)
+        x = x.mean(dim=2)
+        mlp = {mlp}
+        x = mlp(x)
+        return x
+""", [fc, mlp] + enc(0)[1] + dec(0)[1] + u(1)[1])),
+
+            "BCEwithLogits": ("""
+    def bce_with_logits(self, pred, target, additional=None):
+        (batch_size, _, _) = pred.shape
+        return torch.nn.functional.binary_cross_entropy_with_logits(pred.reshape(batch_size, -1),
+                                                                    target.reshape(batch_size, -1))
+""", "bce_with_logits"),
+
+            "CrossEntropy": ("", "torch.nn.functional.cross_entropy"),
+
+            "MAE": ("""
+    def mae(self, pred, target, additional=None):
+        pred = pred.reshape(target.shape)
+        return torch.nn.functional.l1_loss(pred, target)
+""", "mae"),
+
+            "MSE": ("""
+    def mse(self, pred, target, additional=None):
+        pred = pred.reshape(target.shape)
+        return torch.nn.functional.mse_loss(pred, target)
+""", "mse"),
+
+            "ChannelSampler": lambda n, p: f"ChannelSampler({n})",
+
+            "Crop": lambda ti, sr, w, p_none: f"Crop({ti}, {sr}, {w})",
+
+            "EmpiricalClipScaler": lambda q, s, p_none: f"EmpiricalClipScaler({q}, {s})",
+
+            "FIR": lambda sr, ch, fp, zp, p_none: f"FIR({sr}, {ch}, {dict(fp)}, {zp})",
+
+            "Normalize": "Normalize()",
+
+            "RobustScaler": lambda lq, uq, p_none: f"RobustScaler({lq}, {uq})",
+
+            "Spectogram": lambda n_fft, hl, wl, els, p_none: f"Spectogram({n_fft}, {hl}, {wl}, {els})",
+
+            "ZNormalize": lambda ugs, p: f"ZNormalize({ugs})",
+
+            "Preprocessor_Sequence": lambda ps: ")",
+
+            "Preprocessor_Sequence_Cons": lambda p, pps, ps, x, xs: f"{x}, " + xs,
+
+            "UModel": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm,
+                               m_s, m_p, m_d, f_d, f_af, f_c, f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p,
+                               f_m_d, fc_k, fc_c, fc_s, fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms,
+                               loss, preps, loss_f, preprocessors, u, classes, n_channels: f"""
+{loss_f[0]}
+
+    loss = {loss_f[1]}
+    
+    def forward(x): 
+{u[0]}
+    
+    modules = [
+        {separator.join(u[1])}
+        ]
+    
+    model = UTime(forward, {classes}, {n_channels}, modules, preprocessors=({preprocessors})  # n_channel = len(dataset.channels)?
+"""),
+
+            "NoSampler": lambda r, n, d: "None",
+
+            "RandomSampler": lambda r, n, d: "torch.utils.data.RandomSampler(" + d + f", replacement={r}, num_samples={n})",
+
+            "ABC_Dataset": lambda a, c, nw, sf, em, of, ti, tr, patients: f"""ABC(annotator=\"{a}\",
+            channels={[ChannelConfig(name=s) for s in c]},
+            patients={patients}, num_workers={nw},
+            sample_frequency={sf}, event_mapping={dict(em)},
+            online_filtering={of}, total_input=\"{ti}\",
+            target_resolution=\"{tr}\",
+            get_item=partial(MulticlassTrainer.get_item))""",
+
+            "DataLoader": (lambda a, ch, nw, sf, em, of, ti, tr, r, ns, sam, bs, s, d: f"""
+    def build_loader(patients):
+        data = {d("patients")}
+        sample = {s("data")}
+        loader = torch.utils.data.DataLoader(data, batch_size={bs}, shuffle=sample is None, sampler=sample,
+                                             num_workers={nw}, pin_memory=False, collate_fn=batch_collate,
+                                             drop_last=False, persistent_workers=True)
+        return loader, data
+"""),
+
+            "Adagrad": lambda lr, lr_d, w_d, i_a_v, eps, p_none: f"lambda m: torch.optim.Adagrad(params=m.parameters(), lr={lr}, lr_decay={lr_d}, weight_decay={w_d}, initial_accumulator_value={i_a_v}, eps={eps})",
+
+            "Adam": lambda lr, beta, eps, w_d, amsgrad, p_none: f"lambda m: torch.optim.Adam(params=m.parameters(), lr={lr}, betas={beta}, eps={eps}, weight_decay={w_d}, amsgrad={amsgrad})",
+
+            "AdamW": lambda lr, beta, eps, w_d, amsgrad, p_none: f"lambda m: torch.optim.AdamW(params=m.parameters(), lr=lr, betas=beta, eps=eps, weight_decay=w_d, amsgrad=amsgrad)",
+
+            "Adamax": lambda lr, beta, eps, w_d, p_none: f"lambda m: torch.optim.Adamax(params=m.parameters(), lr={lr}, betas={beta}, eps={eps}, weight_decay={w_d})",
+
+            "SGD": lambda lr, m, d, w_d, n, p_none: f"lambda m: torch.optim.SGD(params=m.parameters(), lr={lr}, momentum={m}, dampening={d}, weight_decay={w_d}, nesterov={n})",
+
+            "LinearLR": lambda sf, ef, ti, le, p_none: f"lambda opti: torch.optim.lr_scheduler.LinearLR(optimizer=opti, start_factor={sf}, end_factor={ef}, total_iters={ti}, last_epoch={le})",
+
+            "StepLR": lambda s, g, l, p_none: f"lambda opti: torch.optim.lr_scheduler.StepLR(optimizer=opti, step_size={s}, gamma={g}, last_epoch={l})",
+
+            "ExponentialLR": lambda g, l, p_none: f"lambda opti: torch.optim.lr_scheduler.ExponentialLR(optimizer=opti, gamma={g}, last_epoch={l})",
+
+            "MulticlassTrainer": (lambda bd, bk, d, af, conv, c_s, c_p, c_d, b, e, norm, m_s, m_p, m_d, f_d, f_af, f_c,
+                                         f_c_s, f_c_p, f_c_d, f_b, f_e, f_norm, f_m_s, f_m_p, f_m_d, fc_k, fc_c, fc_s,
+                                         fc_p, fc_d, fc_b, mlp_in, mlp_out, mlp_b, dds, kks, mms, loss, preps_none, preps,
+                                         annotator, channels, num_w, sample_f, event_map, online_f, total_in,
+                                         target_res, replacement, num_s, sampler, batch_size, opti_none, opti,
+                                         lr_sched_none, lr_sched,
+                                         model, dataloader, optimizer, lr_scheduler: f"""
+from functools import partial
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from sleepwalker.models.preprocessors.ChannelSampler import ChannelSampler
+from sleepwalker.models.preprocessors.Crop import Crop
+from sleepwalker.models.preprocessors.EmpiricalClipScaler import EmpiricalClipScaler
+from sleepwalker.models.preprocessors.FIR import FIR
+from sleepwalker.models.preprocessors.Normalize import Normalize
+from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
+from sleepwalker.models.preprocessors.Spectogram import Spectogram
+from sleepwalker.models.preprocessors.ZNormalize import ZNormalize
+from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.datasets.ABC import ABC
+from sleepwalker.datasets import ChannelConfig
+from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
+
+from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer      
+
+# The following classes are from old sleepwalker Utime
+
+class ChannelWiseNormalization(nn.Module):
+    def __init__(self, num_channels, eps=1e-5):
+        super(ChannelWiseNormalization, self).__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.ones(num_channels))
+        self.beta = nn.Parameter(torch.zeros(num_channels))
+
+    def forward(self, x):
+        # x has shape (batch_size, num_channels, time_steps)
+        mean = x.mean(dim=2, keepdim=True)
+        var = x.var(dim=2, keepdim=True, unbiased=False)
+        x_normalized = (x - mean) / torch.sqrt(var + self.eps)
+        x_scaled = self.gamma.view(1, -1, 1) * x_normalized + self.beta.view(1, -1, 1)
+        return x_scaled
+
+
+class Conv1dLayerNorm(nn.Module):
+    def __init__(self, num_channels, eps=1e-5):
+        super(Conv1dLayerNorm, self).__init__()
+        self.layer_norm = nn.LayerNorm(num_channels, eps=eps)
+
+    def forward(self, x):
+        # Permute to [batch_size, length, channels] for LayerNorm
+        x = x.permute(0, 2, 1)
+        x = self.layer_norm(x)
+        # Permute back to [batch_size, channels, length]
+        x = x.permute(0, 2, 1)
+        return x
+
+
+class DepthwiseSeparableConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
+        super().__init__()
+
+        # Depthwise convolution: one filter per input channel
+        self.depthwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=in_channels,
+            bias=bias
+        )
+
+        # Pointwise (1x1) convolution: mixes channels
+        self.pointwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            bias=bias
+        )
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+        
+# UTime model definition abstract in forward function and modules used in forward function
+
+class UTime(BaseModel):
+    def __init__(self, forward_function, classes, n_channels, modules, preprocessors=None):
+        super(UTime, self).__init__(preprocessors=preprocessors)
+        self.forward_function = forward_function
+        self.classes = list(classes)
+        self.nchannel = n_channels
+        self.nclass = len(classes)
+        name = "module"
+        for i, m in enumerate(modules):
+            self.add_module(name + str(i), m)
+
+    def _forward(self, x):
+        return self.forward_function(x)     
+        
+        
+# Here the interesting part begins: training a UTime model for ABC dataset
+        
+# Parameters for this run
+edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
+epochs = 5
+
+if __name__ == "__main__":
+    all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
+    train_patients, test_patients = random_split(all_patients, test_frac=0.1)       
+
+{dataloader}       
+
+    train_loader, dataset = build_loader(train_patients)
+
+{model("dataset.get_classes()", "len(dataset.channels)")}                
+
+    trainer = MulticlassTrainer(
+                epochs=epochs,
+                optimizer={optimizer},
+                lr_scheduler={lr_scheduler},
+                classes=dataset.get_classes(),
+                save_every=10,
+                loss_function=loss,
+                device="cpu"
+            )
+
+    losses, cms = trainer.fit(model, train_loader)
+
+    test_loader, _ = build_loader(test_patients)
+    test_loss, test_cm = trainer.test(model, test_loader)
+
+    record = {"{"}
+                "test_loss": test_loss,
+                "test_cm": test_cm,
+                "train_loss": losses,
+                "train_cm": cms,
+                "classes": dataset.get_classes(),
+             {"}"}
+
+    print(record)
+"""),
         }
 
 if __name__ == "__main__":
@@ -3487,10 +3816,13 @@ if __name__ == "__main__":
 
     trees = search_space.enumerate_trees(target, 10)
 
-    for t in trees:
+    for i, t in enumerate(trees):
         #print(t)
         #print(t.interpret(repo.pretty_term_algebra()))
-        t.interpret(repo.torch_algebra())
+        #t.interpret(repo.torch_algebra())
+        #print(t.interpret(repo.python_code_algebra()))
+        with open(f"./synthesis_output/train_utime_{i}.py", "w") as f:
+            f.write(t.interpret(repo.python_code_algebra()))
         # TODO: algebra for code-generation targeted at debugging, not pretty python code || python semantic for debugging
 
 

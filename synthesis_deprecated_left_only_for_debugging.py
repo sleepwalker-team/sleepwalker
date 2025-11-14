@@ -3052,7 +3052,7 @@ or
 
     def _train_multiclass(self, u_model, dataloader, optimizer, lr_scheduler):
         # Parameters for this run
-        edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
+        edf_folder = "/Users/felixlaarmann/Desktop/Projekte/abc/polysomnography/edfs/baseline"
         epochs = 5
 
         all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
@@ -3512,7 +3512,7 @@ class UTime(BaseModel):
 # Here the interesting part begins: training a UTime model for ABC dataset
         
 # Parameters for this run
-edf_folder = "/Users/felixlaarmann/Downloads/abc/polysomnography"
+edf_folder = "/Users/felixlaarmann/Desktop/Projekte/abc/polysomnography/edfs/baseline"
 epochs = 5
 
 if __name__ == "__main__":
@@ -3566,12 +3566,12 @@ if __name__ == "__main__":
                            preprocessor_robust_scaler_lower_quantile_choices=[0.25], preprocessor_robust_scaler_upper_quantile_choices=[0.75],
                            preprocessor_spectogram_n_fft_choices=[256], preprocessor_spectogram_hop_length_choices=[64],
                            preprocessor_spectogram_win_length_choices=[torch.hamming_window(256)], preprocessor_spectogram_epoch_len_samples_choices=[1],
-                           n_samples=[100],
+                           n_samples=[10],
                            abc_channel_choices=[("Sp02", "ECG1", "ECG2", "Thor")],
                            abc_event_mapping=[(("hypopnea|hypopnea", "hypopnea"), ("central apnea|central apnea", "apnea"), ("obstructive apnea|obstructive apnea", "apnea"),)],
                            abc_num_workers=[8], abc_sample_frequency=[10, 100],
                            abc_total_input=["30s"], abc_target_resolution=["1s"],
-                           batch_size=[32], optimizer_learning_rate=[1e-3], optimizer_learning_rate_decay=[0], optimizer_weight_decay=[0, 1e-4],
+                           batch_size=[8], optimizer_learning_rate=[1e-3], optimizer_learning_rate_decay=[0], optimizer_weight_decay=[0, 1e-4],
                            optimizer_eps=[1e-10], optimizer_beta=[(0.9, 0.999)], optimizer_initial_accumulator_value=[0], optimizer_momentum=[0],
                            optimizer_dampening=[0], lr_scheduler_start_factor_choices=[1], lr_scheduler_end_factor_choices=[1e-2],
                            lr_scheduler_total_iters_choices=[50], lr_scheduler_step_size_choices=[30], lr_scheduler_gamma_choices=[0.1, 0.95],
@@ -3760,7 +3760,7 @@ if __name__ == "__main__":
                                               Constructor("Sampler",
                                                           Literal("RandomSampler")
                                                           & Constructor("replacement", Literal(True))
-                                                          & Constructor("num_samples", Literal(100))
+                                                          & Constructor("num_samples", Literal(10))
                                                           )
                                               & Constructor("Dataset",
                                                             Literal("ABC_Dataset")
@@ -3773,7 +3773,7 @@ if __name__ == "__main__":
                                                             & Constructor("total_input", Literal("30s"))
                                                             & Constructor("target_resolution", Literal("1s"))
                                                             )
-                                              & Constructor("batch_size", Literal(32))  # no variance needed, can be handled like epochs
+                                              & Constructor("batch_size", Literal(8))  # no variance needed, can be handled like epochs
                                               )
                           & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, True)))
                           & Constructor("lr_scheduler", Literal(("LinearLR", 1, 1e-2, 50, -1)))
@@ -3785,7 +3785,7 @@ if __name__ == "__main__":
                                         Constructor("Sampler",
                                                     Literal("RandomSampler")
                                                     & Constructor("replacement", Literal(True))
-                                                    & Constructor("num_samples", Literal(10000))
+                                                    & Constructor("num_samples", Literal(10))
                                                     )
                                         & Constructor("Dataset",
                                                       Literal("ABC_Dataset")
@@ -3802,7 +3802,7 @@ if __name__ == "__main__":
                                                       & Constructor("total_input", Literal("30s"))
                                                       & Constructor("target_resolution", Literal("1s"))
                                                       )
-                                        & Constructor("batch_size", Literal(32))
+                                        & Constructor("batch_size", Literal(8))
                                         )
                           & Constructor("optimizer", Literal(("Adam", 1e-3, (0.9, 0.999), 1e-10, 0, None)))
                           & Constructor("lr_scheduler", Literal(None))
@@ -3823,6 +3823,5 @@ if __name__ == "__main__":
         #print(t.interpret(repo.python_code_algebra()))
         with open(f"./synthesis_output/train_utime_{i}.py", "w") as f:
             f.write(t.interpret(repo.python_code_algebra()))
-        # TODO: algebra for code-generation targeted at debugging, not pretty python code || python semantic for debugging
 
 

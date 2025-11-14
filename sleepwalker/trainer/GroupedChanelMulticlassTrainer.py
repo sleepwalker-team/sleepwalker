@@ -1,3 +1,5 @@
+import random
+from typing import List, Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
@@ -18,8 +20,7 @@ class ChannelTensor:
     columns: list[str]          # original column names
     groups: list[list[str]]     # same structure you used before, optional
     
-    def sample(self, n_repeat, rng, groups=None):
-        """Fast channel sampling."""
+    def sample(self, rng, groups=None):
         if groups is None:
             groups = self.groups
 
@@ -28,13 +29,17 @@ class ChannelTensor:
         if any(len(idx) == 0 for idx in group_indices):
             raise ValueError("Empty group for sample()")
 
-        out = []
-        for _ in range(n_repeat):
-            chosen = [rng.choice(idx) for idx in group_indices]
-            out.append(self.data[:, chosen])  # (T, G)
-
-        # -> (n_repeat, T, G)
-        return torch.stack(out, dim=0)
+        chosen = [rng.choice(idx) for idx in group_indices]
+        return self.data[:, chosen]  # (T, G)
+        # else:
+        #     # fallback: vectorized multi-sample
+        #     chosen = np.stack(
+        #         [rng.choice(idx, size=n_repeat, replace=True) for idx in group_indices],
+        #         axis=1,
+        #     )
+        #     chosen_t = torch.as_tensor(chosen, device=self.data.device)
+        #     out = self.data[:, chosen_t].permute(2, 0, 1).contiguous()
+        #     return out
 
 # def sample_channels(data, n_repeat, groups, rng):
 #     new_data = []
@@ -65,11 +70,19 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
         self.rng = np.random.default_rng()
 
     @staticmethod
-    def get_item(groups:list[list[str]], patient, time, data, target, target_extra = None, percentage:float = 0.5):
+    def get_item(groups:list[list[str]], patient, time, data, target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
         try:
             freq = pd.to_timedelta(target.index.freq).total_seconds()
             targets = torch.tensor(target.sum().to_numpy())
             target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
+            if class_cnts and len(class_cnts) == len(target):
+                # rejection sampling 
+                probas = class_cnts / np.sum(class_cnts)
+                m = min(probas)
+                if random.random() <= m / probas[target.argmax()]:
+                    pass #accept
+                else:
+                    return None
 
             x_tensor = torch.from_numpy(data.values.astype(np.float32))
             item = {"patient":patient, "time":time, "target":target, "data": ChannelTensor(x_tensor, columns = list(data.columns), groups=groups)}
@@ -119,14 +132,14 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
 
             if model.preprocessors[idx].requires_warmup():
                 for batch in data_loader:
-                    new_x = []
-                    for x in batch["data"]:
-                        new_x.append(x.sample(self.n_repeat_train, self.rng))
-
-                    x = torch.vstack(new_x).to(device)
-                    x = model.apply_preprocessors(x, idx) 
-                    model.preprocessors[idx].update(x)
-                    logger.progress_advance(batch_size)
+                    for _ in range(self.n_repeat_train):
+                        tmp_x = torch.stack([
+                            x.sample(self.rng, self.groups).to(self.device)
+                            for x in batch["data"]
+                        ])  # (B, T, C)
+                        x = model.apply_preprocessors(tmp_x, idx) 
+                        model.preprocessors[idx].update(x)
+                        logger.progress_advance(batch_size)
             else:
                 # No warmup required -> Set tqdm bar to final value directly                
                 logger.progress_advance(prog_size)
@@ -150,18 +163,21 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
 
         for batch in loader:
             y = batch["target"].to(self.device)
-            
             if opt is not None: opt.zero_grad(set_to_none=True)
 
-            all_logits = []
-            for x in batch["data"]:
-                tmp_x = x.sample(n_repeat, self.rng, self.groups).to(self.device)
-                logits = model(tmp_x).mean(dim=0)
-                all_logits.append(logits)
+            logits_sum = 0
 
-            logits = torch.vstack(all_logits)
-            loss = self._loss(logits, y)
-            
+            for i in range(n_repeat):
+                # collect the i-th repeat only
+                tmp_x = torch.stack([
+                    x.sample(self.rng, self.groups).to(self.device)
+                    for x in batch["data"]
+                ])  # (B, T, C)
+                logits_sum += model(tmp_x)
+
+            logits = logits_sum / n_repeat
+            loss = self.loss_function(logits, y)
+
             target_np = y.argmax(axis=1).cpu().numpy()
             pred_np = logits.argmax(axis=1).cpu().numpy()
 

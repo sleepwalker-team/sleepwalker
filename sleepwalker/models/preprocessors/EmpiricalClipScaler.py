@@ -1,6 +1,6 @@
 import torch
 
-from sleepwalker.event.preprocessing.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 from sleepwalker.utils import logger
 
 class EmpiricalClipScaler(Preprocessor):
@@ -15,7 +15,8 @@ class EmpiricalClipScaler(Preprocessor):
     def requires_warmup(self) -> bool:
         return True
 
-    def update(self, x:torch.Tensor):
+    def update(self, data: torch.Tensor):
+        x = data
         (_, _, n_features) = x.shape
         _x = x.reshape(-1, n_features)
 

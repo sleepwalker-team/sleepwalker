@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from functools import partial
 import os
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 import xmltodict as xtd
 from torch.utils.data import DataLoader
+from torch.utils.data import RandomSampler
 
 from sklearn.model_selection import KFold
 
@@ -277,7 +280,7 @@ def read_nsrr(xml_path):
 
         return xml_df
 
-def get_edf_files_in_repo(root: str, recursive: bool = True, ending: str = ".edf") -> List[str]:
+def get_edf_files_in_repo(root: str|os.PathLike, recursive: bool = True, ending: str = ".edf") -> List[str]:
     """List EDF files in a folder (optionally including subfolders).
 
     - root: base directory containing EDF files
@@ -346,3 +349,22 @@ def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str
 # def publish_split(all_patients: Sequence[str], include_patterns: Optional[Sequence[str]] = None) -> Tuple[List[List[str]], List[List[str]]]:
 #     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
 #     return [pats], [[]]
+
+def estimate_class_cnts(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
+    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
+    
+    total_batches = len(loader)
+    class_cnts = torch.zeros(len(dataset.get_classes())) 
+    logger.progress_start(total_batches*batch_size, desc=f"Estimating class counts", leave=True)
+    for batch in loader:
+        y = batch["target"]
+        target = y.argmax(dim=1)
+        idx, cnt = torch.unique(target, return_counts=True)
+        class_cnts[idx] += cnt
+        logger.progress_advance(batch_size)
+    logger.progress_close()
+
+    return {
+        cname:c.item() for cname,c in zip(dataset.get_classes(), class_cnts)
+    }

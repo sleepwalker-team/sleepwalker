@@ -16,7 +16,7 @@ import os
 import numpy as np
 from typing import List, Tuple, Optional
 from pyedflib import EdfReader
-
+from scipy.signal import resample_poly
 
 def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = False) -> Tuple[bool, List[str]]:
     """
@@ -369,6 +369,7 @@ def edf_to_df(
                 if ch not in labels:
                     continue
                 idx = labels.index(ch)
+                
                 fs = float(f.getSampleFrequency(idx))
                 dt = pd.to_timedelta(1.0 / fs, unit="s")
 
@@ -381,24 +382,35 @@ def edf_to_df(
                 if len(x) == 0:
                     continue
 
-                if fs != frequency:
-                    step = fs / frequency
-                    if how == "mean":
-                        step_int = int(round(step))
-                        n_full = len(x) // step_int * step_int
-                        x = x[:n_full].reshape(-1, step_int).mean(axis=1)
-                    elif how == "max":
-                        step_int = int(round(step))
-                        n_full = len(x) // step_int * step_int
-                        x = x[:n_full].reshape(-1, step_int).max(axis=1)
-                    else:  # nearest
-                        x = x[::int(round(step))]
+                df = pd.DataFrame(x, columns=[ch], index=pd.date_range(start=start_, periods=len(x), freq=dt))
+                # df.index = pd.date_range(start=start_, periods=len(x), freq=dt)
+                resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
+                if how == "mean":
+                    df = df.resample(resample_rate).mean()
+                elif how == "max":
+                    df = df.resample(resample_rate).max()
+                else:
+                    df = df.resample(resample_rate).nearest()
+                dfs.append(df)
 
-                    dt = pd.to_timedelta(1.0 / frequency, unit="s")    
+                # if fs != frequency:
+                #     step = fs / frequency
+                #     if how == "mean":
+                #         step_int = int(round(step))
+                #         n_full = len(x) // step_int * step_int
+                #         x = x[:n_full].reshape(-1, step_int).mean(axis=1)
+                #     elif how == "max":
+                #         step_int = int(round(step))
+                #         n_full = len(x) // step_int * step_int
+                #         x = x[:n_full].reshape(-1, step_int).max(axis=1)
+                #     else:  # nearest
+                #         x = x[::int(round(step))]
+
+                #     dt = pd.to_timedelta(1.0 / frequency, unit="s")    
                 
                 # build DataFrame
-                idx_range = pd.date_range(start=start_, periods=len(x), freq=dt)
-                dfs.append(pd.DataFrame({ch: x}, index=idx_range))
+                #idx_range = pd.date_range(start=start_, periods=len(x), freq=dt)
+                #dfs.append(pd.DataFrame({ch: x}, index=idx_range))
             
             if not dfs:
                 return pd.DataFrame()
@@ -410,8 +422,13 @@ def edf_to_df(
 
             return out
     except Exception as e:
+        if isinstance(edf, str):
+            edf_path = edf
+        else:
+            return pd.DataFrame()
+            
         if verbose:
-            logger.warning(f"pyEDFlib failed to read {edf_path}: {e}")
+            logger.warning(f"pyEDFlib failed to read {edf_path}: {e} - falling back to mne backend")
 
         raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
 
@@ -459,12 +476,13 @@ def edf_to_df(
             df = df.resample(resample_rate).nearest()
 
         return df.ffill().bfill()
-    finally:
-        if close_after:
-            try:
-                f.close()
-            except Exception:
-                pass
+    # finally:
+    #     if close_after:
+    #         try:
+    #             f.close()
+    #         except Exception:
+    #             pass
+            
 # def edf_to_df(
 #     edf_path: str,
 #     channels: List[str],

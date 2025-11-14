@@ -8,7 +8,6 @@ from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.Spectrogram import Spectrogram
 
-
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, dim, max_len=5000):
         super().__init__()
@@ -78,6 +77,22 @@ class TransformerBlock(nn.Module):
             return x
 
 class SleepTransformer(BaseModel):
+    """
+    Paper: SleepTransformer: Automatic Sleep Staging With Interpretability and Uncertainty Quantification by Phan et al. in IEEE TRANSACTIONS ON BIOMEDICAL ENGINEERING, 2022
+    Code: https://github.com/pquochuy/SleepTransformer
+
+    Model size: 3.7 Mio (paper) vs. 3.8 Mio parameters (this config)
+
+    Expected performance (sleep-edf-78) in the paper:
+    - Accuracy:     84.9
+    - Macro F1:     0.788
+    - Cohens Kappa: 0.789
+
+    Notes on the paper: 
+      - No lr_scheduler used
+      - Early stopping in the paper validates every 100 training steps (batches maybe?) and not after each epoch.
+      - The coderepository (https://github.com/pquochuy/SleepTransformer/blob/26167f26ddd8bb59ce787e56655c6e99ba446d2d/shhs/process_and_save_1file.m#L28) indicates that the rawdata has been filtered by fir1 and filtfilt (Matlab) filters. The paper does not mention this filtering. 
+    """
     def __init__(
         self,
         *,

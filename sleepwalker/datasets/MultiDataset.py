@@ -63,10 +63,6 @@ class MultiDataset(Dataset):
     def n_patients(self):
         return sum([d.get_n_patients() for d in self.datasets])
 
-    def on_epoch_end(self):
-        for d in self.datasets:
-            d.on_epoch_end()
-
     def __len__(self):
         return self.len
     

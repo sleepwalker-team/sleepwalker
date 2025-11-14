@@ -2,7 +2,7 @@ from typing import Literal
 import pandas as pd
 import torch
 
-from sleepwalker.event.preprocessing.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Crop(Preprocessor):
     def __init__(self, total_input, sampling_rate, where: Literal["left", "middle", "right"] = "middle", **kwargs):

@@ -1,8 +1,11 @@
+from functools import partial
+import functools
 import inspect
 import os
+import random
 import shutil
 import tempfile
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
@@ -11,30 +14,11 @@ from torch.utils.data import DataLoader
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
+from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
 
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
-
-def ensure_loss_signature(func: Callable, check_weight:bool = False) -> None:
-    sig = inspect.signature(func)
-    params = sig.parameters
-    
-    # 1) At least two parameters
-    if len(params) < 2:
-        raise TypeError(
-            f"{func.__name__} must accept at least 2 parameters, "
-            f"but only has {len(params)}"
-        )
-    
-    if check_weight:
-        # 2) Optional 'weight' argument
-        weight_param = params.get("weight")
-        if weight_param is None:
-            raise TypeError(f"{func.__name__} must accept a 'weight' parameter")
-        
-        if weight_param.default is inspect._empty:
-            raise TypeError(f"'weight' in {func.__name__} must be optional (have a default value)")
 
 class MulticlassTrainer(ABC):
     def __init__(
@@ -43,8 +27,6 @@ class MulticlassTrainer(ABC):
         optimizer: Callable[[torch.nn.Module], torch.optim.Optimizer],
         classes: list[str],
         loss_function: Callable,
-        class_weights: Optional[dict[str, float]] = None,
-        loss_mode: str = "regular",  # fixed (type: str, not Optional[str])
         device: str = "cuda:0",
         warmup_device: str = "cpu",
         save_every: int = 1,
@@ -59,38 +41,11 @@ class MulticlassTrainer(ABC):
         
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
-        self.loss_mode = loss_mode
 
         # Normalize class names once or keep original; here we keep original
         self.classes = classes
         self.num_classes = len(classes)  
-
-        if self.loss_mode in ("inverse", "inverse-log"):  
-            self.estimate_class_cnts = True
-            self.class_cnts = torch.zeros(self.num_classes)  
-        else:
-            self.estimate_class_cnts = False
-
-        if class_weights is not None:
-            class_weights = {k: v for k, v in class_weights.items()}
-            weight_list = []
-            for c in classes:
-                if c not in class_weights:
-                    logger.warning(f"Did not find class weights for class {c}, assuming weight 1")
-                    weight_list.append(1.0)
-                else:
-                    weight_list.append(class_weights[c])
-            self.user_class_weights = torch.tensor(weight_list)
-            self.class_weights = torch.tensor(weight_list)
-        else:
-            if self.loss_mode in ["inverse", "inverse-log"]:
-                self.user_class_weights = torch.ones(self.num_classes)
-                self.class_weights = torch.ones(self.num_classes)
-            else:
-                self.user_class_weights = None
-                self.class_weights = None
-
-        ensure_loss_signature(loss_function, self.class_weights is not None)
+        
         self.loss_function = loss_function
 
     @staticmethod
@@ -121,13 +76,22 @@ class MulticlassTrainer(ABC):
         return out
 
     @staticmethod
-    def get_item(patient, time, data, target, target_extra = None, percentage:float = 0.5):
+    def get_item(patient, time, data, target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
         try:
             freq = pd.to_timedelta(target.index.freq).total_seconds()
             targets = torch.tensor(target.sum().to_numpy())
             target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
 
             item = {"patient":patient, "time":time, "target":target}
+
+            if class_cnts and len(class_cnts) == len(target):
+                # rejection sampling 
+                probas = class_cnts / np.sum(class_cnts)
+                m = min(probas)
+                if random.random() <= m / probas[target.argmax()]:
+                    pass #accept
+                else:
+                    return None
 
             if target_extra is not None:
                 freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
@@ -140,17 +104,6 @@ class MulticlassTrainer(ABC):
         except Exception as e:
             pass
         return None
-
-    def _loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Unified loss handling w/ optional class weights."""  
-        target = y.argmax(dim=1)  
-        if self.class_weights is None:
-            return self.loss_function(logits, target)  
-        
-        w = self.class_weights.to(logits.device)  
-        if torch.unique(w).numel() <= 1:  
-            return self.loss_function(logits, target)  
-        return self.loss_function(logits, target, weight=w)  
 
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
@@ -191,44 +144,6 @@ class MulticlassTrainer(ABC):
 
         return model
 
-    def _warmup(self, model, data_loader, device = "cuda"):
-        logger.context("Warmup preprocessors")
-        self.warmup_preprocessors(model, data_loader, device) 
-        logger.uncontext()
-
-        if self.estimate_class_cnts:
-            logger.progress_start(len(data_loader)*data_loader.batch_size, desc="Warmup weights", leave=True)
-
-            for batch in data_loader:
-                y = batch["target"].to(device)
-                target = y.argmax(dim=1)
-                idx, cnt = torch.unique(target, return_counts=True)
-                
-                self.class_cnts = self.class_cnts.to(y.device)
-                self.class_weights = self.class_weights.to(y.device) # type: ignore
-                self.user_class_weights = self.user_class_weights.to(y.device) # type: ignore
-
-                self.class_cnts[idx] += cnt
-                if self.loss_mode == "inverse":
-                    # Weight classes by their (inverse) occurrence. This can lead to relatively small losses,
-                    # hence we will also weight normalize it. This is technically not necessary.
-                    self.class_weights = self.user_class_weights * torch.clamp(1.0 / self.class_cnts, min = 1e-4)
-                    self.class_weights /= self.class_weights.sum() 
-                else:
-                    """
-                    See 
-                        - MRASleepNet: a multi-resolution attention network for sleep stage classification using single-channel EEG by Rui Yu, Zhuhuang Zhou, Shuicai Wu, Xiaorong Gao and Guangyu Bin in Journal of Neural Engineering 2022, https://github.com/YuRui8879/MRASleepNet/blob/781aee2d2ff1422c598b099081a4c1d7d4bd05d7/DataAdapter/DataAdapter.py#L110
-                        - An Attention-Based Deep Learning Approach for Sleep Stage Classification With Single-Channel EEG by Eldele et al. in IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING 2021, https://github.com/emadeldeen24/AttnSleep/blob/6b4d2665884628c8a7bb09f36589a8ec0992f8e2/utils/util.py#L62
-                    """
-                    total = self.class_cnts.sum()
-                    factor = 1.0 / self.class_cnts.shape[0]
-                    mu = factor * self.user_class_weights
-                    self.class_weights = mu * torch.clamp(torch.log( (total * mu) / self.class_cnts), min=1.0)
-                logger.progress_advance(data_loader.batch_size)
-            logger.progress_close()
-
-        return model
-
     def run_epoch(self, loader, opt, model, prefix=""):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
@@ -247,7 +162,7 @@ class MulticlassTrainer(ABC):
                 opt.zero_grad(set_to_none=True)
             
             logits = model(x)
-            loss = self._loss(logits, y)
+            loss = self.loss_function(logits, y)
             
             target_np = y.argmax(axis=1).cpu().numpy()
             pred_np = logits.argmax(axis=1).cpu().numpy()
@@ -302,7 +217,10 @@ class MulticlassTrainer(ABC):
             logger.warning(f"early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
-        model = self._warmup(model, train_loader, self.warmup_device)
+        logger.context("Warmup preprocessors")
+        self.warmup_preprocessors(model, train_loader, self.warmup_device) 
+        logger.uncontext()
+
         model = model.to(self.device)
         val_losses: list[float] = []
         losses = []

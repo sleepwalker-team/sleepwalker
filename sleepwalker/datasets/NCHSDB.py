@@ -211,22 +211,13 @@ class NCHSDB(BaseDataset):
         start_times = []
         end_times = []
 
-        # current_date = start_datetime.normalize()
-        prev_time = start_datetime.normalize()
-
         for onset, dur in zip(df["onset"], df["duration"]):
             start_ts = start_datetime + pd.to_timedelta(onset, unit="s")
             end_ts = start_ts + pd.to_timedelta(dur, unit="s")
 
-            # Rollover handling: if we cross midnight
-            if start_ts.time() < prev_time.time() and (start_ts - prev_time) < pd.Timedelta("12h"):
-                start_ts += pd.Timedelta(days=1)
-                end_ts += pd.Timedelta(days=1)
-            prev_time = start_ts
-
             start_times.append(start_ts)
             end_times.append(end_ts)
-
+        
         df["Label"] = df["description"].astype(str).str.strip()
         df["Starttime"] = start_times
         df["Endtime"] = end_times
@@ -236,4 +227,4 @@ class NCHSDB(BaseDataset):
             df.loc[~df["Label"].str.contains(self.label_should_contain, na=False), :] = None
             df = df.dropna()
 
-        return df[["Label", "Starttime", "Endtime", "Duration"]]
+        return df[["Label", "Starttime", "Endtime", "Duration"]] 

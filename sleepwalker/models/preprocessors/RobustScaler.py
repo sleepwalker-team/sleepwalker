@@ -1,9 +1,10 @@
 import torch
 
-from sleepwalker.event.preprocessing.Preprocesser import Preprocessor
+from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class RobustScaler(Preprocessor):
     def __init__(self, lower_quantile: float = 0.25, upper_quantile: float = 0.75, **kwargs):
+        super().__init__()
         self.is_initialized = False
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile

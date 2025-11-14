@@ -299,7 +299,7 @@ class ISRUC(BaseDataset):
     """
     def __init__(self, 
             annotator = ["1", "2"],
-            merge = False, 
+            merge = True, 
             **kwargs
         ): 
         

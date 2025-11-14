@@ -5,9 +5,10 @@ import bisect
 from collections import defaultdict
 import copy
 from dataclasses import dataclass
+from functools import partial
 import os
 import random
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, cast
 
 import numpy as np
 import pandas as pd
@@ -153,9 +154,10 @@ class BaseDataset(Dataset, ABC):
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
         get_item: Optional[Callable] = None,
-        transform: Optional[Any] = None,
+        transform: Optional[list[Callable]] = None,
         num_workers:int = 4,
-        online_max_tries:int = 128
+        online_max_tries:int = 128,
+        force_one_day: bool = True
     ) -> None:
         super().__init__()
         
@@ -173,8 +175,9 @@ class BaseDataset(Dataset, ABC):
         self.online_max_tries = online_max_tries
         self.initialized = False
         self.num_workers = num_workers
+        self.force_one_day = force_one_day
 
-        # # Events/classes
+        # Events/classes
         if event_mapping is not None:
             self.event_mapping = {k: v for k, v in event_mapping.items()}
             self.classes = sorted(list(set(self.event_mapping.values())))
@@ -256,6 +259,10 @@ class BaseDataset(Dataset, ABC):
                 else:
                     df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                 df = df.dropna() 
+
+                if self.force_one_day and (len(df["Starttime"].dt.date.unique()) > 2 or len(df["Endtime"].dt.date.unique()) > 2):
+                    raise ValueError(f"Edf file: {edf_path} appears to be longer than one entire day. Is this a loading error? If not, set force_one_day = False")
+
                 classes = set(df["Label"].unique())
 
                 start = max(start, df["Starttime"].min())
@@ -289,37 +296,29 @@ class BaseDataset(Dataset, ABC):
 
         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
 
-        if num_workers <= 1:
-            for p in patients:
-                edf = self.prepare_patient(p)
-
-                if edf:
-                    file_handles.append(edf)
-                    lower_bounds.append(lower)
-                    upper_bounds.append(lower + edf.length)
-                    lower += edf.length
-                    n_windows += edf.length
-
-                    if edf.classes is not None:
-                        all_classes |= set(edf.classes)
+        if num_workers > 1:
+            pool = multiprocessing.Pool(num_workers)
+            iter_objects = pool.imap_unordered(partial(self.prepare_patient), patients)
         else:
-            with multiprocessing.Pool(num_workers) as pool:
-                idx = 0
-                while idx < len(patients):
-                    batch = patients[idx : idx + num_workers]
-                    results = pool.map(self.prepare_patient, batch)
-                    idx += len(batch)
+            iter_objects = patients
 
-                    for edf in results:
-                        if edf:
-                            file_handles.append(edf)
-                            lower_bounds.append(lower)
-                            upper_bounds.append(lower + edf.length)
-                            lower += edf.length
-                            n_windows += edf.length
+        lower = 0
+        for edf in iter_objects: 
+            if num_workers <= 1:
+                edf = self.prepare_patient(edf)
 
-                            if edf.classes is not None:
-                                all_classes |= set(edf.classes)
+            if edf:
+                edf = cast(EDFFile, edf)
+                file_handles.append(edf)
+                lower_bounds.append(lower)
+                upper_bounds.append(lower + edf.length)
+                lower += edf.length
+                n_windows += edf.length
+
+                if edf.classes is not None:
+                    all_classes |= set(edf.classes)
+            
+            logger.progress_advance(1)
 
         logger.progress_close()
 
@@ -340,7 +339,7 @@ class BaseDataset(Dataset, ABC):
         # start_date:pd.Timestamp, end_date, channels, sample_frequency, resample_type)
         end_date = start_date + self.total_input
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
-
+        
         # Target time at center for window/sequence modes
         t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
         item: Dict[str, Any] = {"patient": file.path, "time": t_center}
@@ -369,19 +368,21 @@ class BaseDataset(Dataset, ABC):
         elif len(x_df) > self.get_timeseries_len():
             x_df = x_df.head(n = self.get_timeseries_len())
 
+        if self.transform is not None:
+            for t in self.transform:
+                x_df = t(x_df)
+            
         if self.get_item_callback is not None:
             item = self.get_item_callback(data=x_df, **item)
         else:
             item["data"] = torch.from_numpy(x_df.values).float()
 
-        if self.transform is not None:
-            item["data"] = self.transform(item["data"])
         return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         cnt = 0
         item = None
-
+        last_exception = None
         while True:
             pidx = bisect.bisect_right(self.upper_bounds, idx)
             file = self.edf_files[pidx]
@@ -392,15 +393,15 @@ class BaseDataset(Dataset, ABC):
             try:
                 item = self.get_item(file, cur_date)
             except Exception as e:
-                pass
+                last_exception = e
             finally:
                 if cnt > self.online_max_tries or item is not None:
                     break
-
+                
                 cnt += 1
                 idx = np.random.choice(range(len(self)))
         
         if cnt > self.online_max_tries or item is None:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}")
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}")
         else:
             return item

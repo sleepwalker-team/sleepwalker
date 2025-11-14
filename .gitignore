@@ -31,3 +31,4 @@ copy_data.sh
 *.sqlite
 *.sqlite-journal
 .env
+/pytorch/

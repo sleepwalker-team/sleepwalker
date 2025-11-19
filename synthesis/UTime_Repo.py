@@ -1972,6 +1972,7 @@ class UtimeRepository:
                                     & Constructor("convolution_dilation", Var("c_dilation"))
                                     & Constructor("bias", Var("b"))
                                     & Constructor("activation", Var("af"))
+                                    & Constructor("dropout_p", Var("d"))
                                     & Constructor("normalization", Var("norm"))
                                     & Constructor("normalization_epsilon", Var("e"))
                                     & Constructor("maxpool_stride", Var("m_stride"))

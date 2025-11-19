@@ -340,7 +340,7 @@ You may choose between:
                         generate python code files and is interpreted directly at runtime.                            
 """
 number_of_synthesis_results = 10
-interpretation = "python_code_algebra"
+interpretation = "pretty_term_algebra"
 
 """
 Everythings set up now, so simply run this script to start the synthesis process!
@@ -348,9 +348,6 @@ Everythings set up now, so simply run this script to start the synthesis process
 Some remarks:
 If you used no None for variance and everything else is provided correctly, you should have described exactly one
 system and therefore get exactly one synthesis result.
-
-TODO: When tidying up and restructuring the branch, I introduced a bug that leads to multiple synthesis results even if 
-      no variance is introduced. I will fix this soon.
 
 If you used None for some parameters, the synthesis process will explore the substitution space and return
 all valid combinations of parameters that lead to a valid system within the provided substitution spaces.

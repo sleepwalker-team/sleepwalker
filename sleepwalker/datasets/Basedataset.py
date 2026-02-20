@@ -346,11 +346,12 @@ class BaseDataset(Dataset, ABC):
         
         #if self.event_mapping is not None and len(self.classes) > 0:
         if file.labels:
-            end_date_label = start_date + self.target_resolution
+            start_date_label = t_center
+            end_date_label = start_date_label + self.target_resolution
 
-            item["target"] = file.get_y(start_date, end_date_label, self.sample_frequency, self.classes) 
+            item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.classes) 
             if file.labels_extra:
-                item["target_extra"] = file.get_y_extra(start_date, end_date_label, self.sample_frequency, self.classes) 
+                item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.classes) 
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for

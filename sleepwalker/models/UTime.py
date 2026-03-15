@@ -192,7 +192,6 @@ class Decoder(nn.Module):
 
 class UTime(BaseModel):
     def __init__(self, 
-        *
         ts_len, 
         n_channels, 
         classes, 

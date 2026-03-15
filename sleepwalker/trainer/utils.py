@@ -3,9 +3,40 @@ import os
 import tempfile
 from typing import Optional
 import numpy as np
+import pandas as pd
 import torch
 
 from sleepwalker.models.Basemodel import BaseModel 
+
+def read_jsonl(filename: str) -> pd.DataFrame:
+    """
+    Reads a JSON Lines (.jsonl) file and returns its contents as a pandas DataFrame.
+
+    Each line in a .jsonl file is expected to be a valid JSON object.
+    This function parses each line into a dictionary and constructs a DataFrame
+    from the collection of dictionaries.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the JSON Lines file.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the parsed contents of the file, with one row per line.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    json.JSONDecodeError
+        If any line in the file is not valid JSON.
+    """
+    with open(filename, 'r', encoding='utf-8') as f:
+        data = [json.loads(line) for line in f if line.strip()]
+    return pd.DataFrame(data)
+    
 
 def append_to_jsonl(filename: str, record: dict):
     """
@@ -29,9 +60,14 @@ def append_to_jsonl(filename: str, record: dict):
 
     class NumpyEncoder(json.JSONEncoder):
         def default(self, o):
-            if isinstance(o, np.ndarray):
+            if isinstance(o, np.integer):
+                return int(o)
+            elif isinstance(o, np.floating):
+                return float(o)
+            elif isinstance(o, np.ndarray):
                 return o.tolist()
-            return super().default(o)
+            else:
+                return super(NumpyEncoder, self).default(o)
 
     with open(f"{filename}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, cls=NumpyEncoder) + "\n")

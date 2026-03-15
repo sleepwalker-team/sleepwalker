@@ -4,11 +4,15 @@ import argparse
 import inspect
 import os
 
-# os.environ["OMP_NUM_THREADS"] = "2"
-# os.environ["MKL_NUM_THREADS"] = "2"
-# os.environ["OPENBLAS_NUM_THREADS"] = "2"
-# os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
-# os.environ["NUMEXPR_NUM_THREADS"] = "2"
+import mlflow
+
+from sleepwalker.trainer.NegativeGroupedChanelMulticlassTrainer import GradReverseTrainer
+
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 from functools import partial
 from typing import Optional
@@ -50,8 +54,8 @@ from sleepwalker.utils import logger, MlflowSink, suppress_stdout_logging
 
 from lamarr_energy_tracker import EnergyTracker
 
-# torch.set_num_threads(2)
-# torch.set_num_interop_threads(1)
+torch.set_num_threads(2)
+torch.set_num_interop_threads(1)
 
 mp.set_sharing_strategy('file_system')
 
@@ -229,7 +233,7 @@ dataset_cfg = {
             "stage 4 sleep|4": "n3",
             "rem sleep|5": "rem"
         },
-        "channels": ["C3", "C4"]
+        "channels": ["C4"]
     },
     "ruhrland": { 
         "clazz": Ruhrlandklinik, 
@@ -335,7 +339,7 @@ def create_model(cls, **kwargs):
     params = {k: v for k, v in kwargs.items() if k in sig.parameters}
     return cls(**params)
 
-def run(model_name, train_datasets, test_datasets, dry_run):
+def run(model_name, train_datasets, test_datasets, gradient_reversal, dry_run):
     if model_name not in model_cfg:
         logger.warning(f"Did not find {model_name} in model_cfg -- Ignoring this model")
         return
@@ -361,9 +365,6 @@ def run(model_name, train_datasets, test_datasets, dry_run):
     transform = model_cfg[model_name].get("transform", None)
     balance_batches = model_cfg[model_name].get("balance_batches", False)
 
-    all_channels = set([c for ds in train_datasets for c in dataset_cfg[ds]["channels"]])
-    all_channels = all_channels.union(set([c for ds in test_datasets for c in dataset_cfg[ds]["channels"]]))
-
     if dry_run:
         logger.info("Performing dry run to test pipeline! Each dataset loads at most 2 patients")
         experiment_name += "-dev"
@@ -371,11 +372,12 @@ def run(model_name, train_datasets, test_datasets, dry_run):
         tracker = EnergyTracker(project_name=experiment_name)
         tracker.start()
     
-    with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
-        TRACKING_URI=f.read().strip()
-    ARTIFACT_URI=f"/raid/mlruns"
+    # with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
+    #     TRACKING_URI=f.read().strip()
+    # ARTIFACT_URI=f"/raid/mlruns"
 
-    logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
+    # mlflow_sink = MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI)
+    # logger.add_sink(mlflow_sink)
     logger.start_run(run_name=experiment_name,tags={"model":model_name})
 
     train_ds = []
@@ -424,13 +426,13 @@ def run(model_name, train_datasets, test_datasets, dry_run):
         os.remove("sleepwalker.log")
 
     train_multi_ds = MultiDataset(train_ds)
-    logger.info(f"Loaded {train_multi_ds.n_patients()} for training")
+    logger.info(f"Loaded {train_multi_ds.get_n_patients()} for training")
 
     val_multi_ds = MultiDataset(val_ds)
-    logger.info(f"Loaded {val_multi_ds.n_patients()} for validation")
+    logger.info(f"Loaded {val_multi_ds.get_n_patients()} for validation")
 
     test_multi_ds = MultiDataset(test_ds)
-    logger.info(f"Loaded {test_multi_ds.n_patients()} for testing")
+    logger.info(f"Loaded {test_multi_ds.get_n_patients()} for testing")
 
     if "total_input_model" in model_cfg[model_name]:
         # TinySleepNet uses augmentation that changes the model input size. Hence its actual input size is different from total_input 
@@ -463,45 +465,61 @@ def run(model_name, train_datasets, test_datasets, dry_run):
     else:
         weights_torch = None
 
-    trainer = MulticlassTrainer(
-        epochs=epochs, 
-        optimizer = optimizer,
-        lr_scheduler = lr_scheduler,
-        classes = train_multi_ds.get_classes(), 
-        save_every = 1,
-        loss_function=partial(loss_function, weight=weights_torch), 
-        early_stopping = 10
-    )
+    if gradient_reversal:
+        trainer = GradReverseTrainer(
+            feature_dim = 512,
+            n_domains = train_multi_ds.get_n_datasets(),
+            epochs=epochs, 
+            optimizer = optimizer,
+            lr_scheduler = lr_scheduler,
+            classes = train_multi_ds.get_classes(), 
+            save_every = 1,
+            loss_function=partial(loss_function, weight=weights_torch), 
+            early_stopping = 10
+        )
+    else:
+        trainer = MulticlassTrainer(
+            epochs=epochs, 
+            optimizer = optimizer,
+            lr_scheduler = lr_scheduler,
+            classes = train_multi_ds.get_classes(), 
+            save_every = 1,
+            loss_function=partial(loss_function, weight=weights_torch), 
+            early_stopping = 10
+        )
     train_sampler = RandomSampler(train_multi_ds, num_samples = n_samples) if n_samples is not None else None
-    train_loader = DataLoader(train_multi_ds, batch_size=batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) ### prefetch_factor=12
+    train_loader = DataLoader(train_multi_ds, batch_size=batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "dataset"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) ### prefetch_factor=12
 
     val_sampler = RandomSampler(val_multi_ds, num_samples = n_samples) if n_samples is not None else None
-    val_loader = DataLoader(val_multi_ds, batch_size=batch_size, shuffle=val_sampler is None, sampler=val_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
+    val_loader = DataLoader(val_multi_ds, batch_size=batch_size, shuffle=val_sampler is None, sampler=val_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "dataset"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
 
     train_dict = trainer.fit(model, train_loader, val_loader)
     losses, cms = train_dict["losses"], train_dict["cms"]
     if "checkpoint" in train_dict:
-        state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
-        model.load_state_dict(state_dict)
-
+        with torch.inference_mode():
+            state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
+            model.load_state_dict(state_dict)
+    
     for t_ds, name in zip(test_ds, test_datasets):
-        test_loader = DataLoader(t_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
+        test_loader = DataLoader(t_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "dataset"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
 
         logger.context(f"{name}")
         test_loss, test_cm = trainer.test(model, test_loader)
 
         record = {
+            "model": f"{model_name}{'_GradReversal' if gradient_reversal else ''}",
             "test_loss":test_loss,
             "test_cm":test_cm,
             "train_loss":losses,
             "train_cm":cms,
             "dataset":name,
             "classes":train_multi_ds.get_classes(),
+            "artifact_root": train_dict["checkpoint"] if "checkpoint" in train_dict else "",
         }
         if "best_model" in train_dict:
             record["best_model"] = train_dict["best_model"]
 
-        append_to_jsonl(experiment_name, record)
+        append_to_jsonl(f"{experiment_name}_{model_name}", record)
         logger.uncontext()
 
     if not dry_run: tracker.stop()
@@ -512,6 +530,7 @@ if __name__ == '__main__':
     parser.add_argument("--model", help='The model to be trained. Appropriate training parameters are choosen automatically', required=False, default="sleeptransformer", type=str)
     parser.add_argument("--train", help='Datasets to train the model on', required=False, default=["abc", "cap", "isruc", "mnc", "nchsdb", "svuhucd", "shhs"], type=str, nargs="+")
     parser.add_argument("--test", help='Datasets to test the model on', required=False, default=["apples", "mros", "ruhrland", "sleepedfx"], type=str, nargs="+")
+    parser.add_argument("--gradrev", help='Dataset to train the model on', action="store_true")
     parser.add_argument("--dry", help='If set, performs a quick test run without actually training the model', action="store_true")
     args = parser.parse_args()
-    run(args.model, args.train, args.test, args.dry)
+    run(args.model, args.train, args.test, args.gradrev, args.dry)

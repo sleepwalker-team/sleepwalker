@@ -230,6 +230,7 @@ class MulticlassTrainer(ABC):
         self.best_checkpoint = None
         self.steps = {"train":0, "val":0, "test":0}
         self.epoch_step = 0
+        self.last_folder = None
 
         for epoch in range(self.epochs):
             model.train()
@@ -240,11 +241,11 @@ class MulticlassTrainer(ABC):
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
-                folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
-                logger.artifact(path=os.path.join(folder, "model.pt"), dest=f"{epoch}")
-                logger.artifact(path=os.path.join(folder, "optimizer.pt"), dest=f"{epoch}")
+                self.last_folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
+                logger.artifact(path=os.path.join(self.last_folder, "model.pt"), dest=f"{epoch}")
+                logger.artifact(path=os.path.join(self.last_folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:
-                    logger.artifact(path=os.path.join(folder, "scheduler.pt"), dest=f"{epoch}")
+                    logger.artifact(path=os.path.join(self.last_folder, "scheduler.pt"), dest=f"{epoch}")
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -277,4 +278,7 @@ class MulticlassTrainer(ABC):
             
             self.epoch_step += 1
 
-        return { "losses":losses, "cms":cms }
+        if self.last_folder is not None:
+            return { "losses":losses, "cms":cms, "checkpoint":self.last_folder}
+        else:
+            return { "losses":losses, "cms":cms}

@@ -183,7 +183,7 @@ class CAP(BaseDataset):
 
         for d in self.disorders:
             if d not in ["n", "ins", "narco", "nfle", "rbd", "sdb", "brux", "plm"]:
-                logger.warining(f"Unknown disorder found in CAP configuration. The original CAP dataset does not contain a disorder `{d}`. Typically, only {{n, ins, narco, nfle, rbd, sdb, brux, plm}} are available. If you do not want to filter for specific disorders or filenames have changed on disk, you can ignore this warning.")
+                logger.warning(f"Unknown disorder found in CAP configuration. The original CAP dataset does not contain a disorder `{d}`. Typically, only {{n, ins, narco, nfle, rbd, sdb, brux, plm}} are available. If you do not want to filter for specific disorders or filenames have changed on disk, you can ignore this warning.")
 
         super().__init__(**kwargs)
         

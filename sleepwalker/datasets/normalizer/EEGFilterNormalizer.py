@@ -1,6 +1,6 @@
 import numpy as np
 
-from scipy.signal import butter, filtfilt, iirnotch
+from scipy.signal import butter, filtfilt, iirnotch, sosfiltfilt
 
 from sleepwalker.datasets.normalizer import Normalizer
 
@@ -13,11 +13,15 @@ class EEGFilterNormalizer(Normalizer):
         self.notch_q = notch_q
         self.fs = fs
         self.nyq = 0.5 * fs
-        self.b_band, self.a_band = butter(self.band_order,[self.lowcut / self.nyq, self.highcut / self.nyq], btype='band') 
-        self.b_notch, self.a_notch = iirnotch(self.notch_freq / self.nyq, self.notch_q)
+        self.sos_band = butter(self.band_order, [self.lowcut / self.nyq, self.highcut / self.nyq],
+                       btype="band", output="sos")
+        # self.b_band, self.a_band = butter(self.band_order,[self.lowcut / self.nyq, self.highcut / self.nyq], btype='band') 
+        if self.notch_freq:
+            self.b_notch, self.a_notch = iirnotch(self.notch_freq / self.nyq, self.notch_q)
 
     def _filter(self, signal):
-        filtered = filtfilt(self.b_band, self.a_band, signal)
+        # filtered = filtfilt(self.b_band, self.a_band, signal)
+        filtered = sosfiltfilt(self.sos_band, signal)
 
         if self.notch_freq:
             filtered = filtfilt(self.b_notch, self.a_notch, filtered)

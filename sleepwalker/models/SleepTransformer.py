@@ -170,7 +170,7 @@ class SleepTransformer(BaseModel):
             nn.Linear(fc_hidden_size, len(classes)),
         )
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def features(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         spec = x.permute(0, 2, 1, 3).reshape(B, x.shape[2], -1)
         total_frames = spec.shape[1] // self.frame_seq_len
@@ -195,8 +195,16 @@ class SleepTransformer(BaseModel):
             x_out = x_seq.reshape(B * self.epoch_seq_len, -1)
         else:
             raise ValueError("Unknown output_strategy")
+        return x_out
 
-        yhat = self.fc(x_out)
+    def classifier(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+        yhat = self.fc(x)
         if self.output_strategy == "sequence":
             yhat = yhat.reshape(B, self.epoch_seq_len, -1)
         return yhat
+    
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_out = self.features(x)
+        return self.classifier(x_out)
+        

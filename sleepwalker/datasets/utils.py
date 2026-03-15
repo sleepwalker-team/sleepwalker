@@ -368,3 +368,34 @@ def estimate_class_cnts(dataset, n_samples:Optional[int] = None, num_workers:int
     return {
         cname:c.item() for cname,c in zip(dataset.get_classes(), class_cnts)
     }
+
+def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
+    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
+    
+    X = []
+    Y = []
+    Y_extra = []
+    timestamps = []
+    patients = []
+
+    total_batches = len(loader)
+    logger.progress_start(total_batches*batch_size, desc=f"Converting dataset to numpy", leave=True)
+    for batch in loader:
+        X.append(batch["data"].cpu().numpy())
+        if batch["data"].shape[0] < batch_size:
+            logger.warning("Incomplete batch found")
+
+        if "target" in batch: Y.append(batch["target"].cpu().numpy())
+        if "target_extra" in batch: Y_extra.append(batch["target_extra"].cpu().numpy())
+        timestamps.extend(batch["time"])
+        patients.extend(batch["patient"])
+
+        logger.progress_advance(batch_size)
+    logger.progress_close()
+
+    X = np.vstack(X)
+    if Y: Y = np.vstack(Y)
+    if Y_extra: Y_extra = np.vstack(Y_extra)
+
+    return X, Y, Y_extra, timestamps, patients

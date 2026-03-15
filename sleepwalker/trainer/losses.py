@@ -1,4 +1,5 @@
 from typing import Literal, Optional
+import numpy as np
 import torch
 
 
@@ -26,7 +27,7 @@ def dice_loss(pred, target, weight = None, epsilon=1e-3):
 
     return 1 - dice.mean()
 
-def class_weights_for_loss(user_weights: dict, class_distribution: dict, mode:Literal['inverse', 'inverse-log'] = "inverse"):
+def class_weights_for_loss(user_weights: dict[str, float], class_distribution: dict[str, float], mode:Literal['inverse', 'inverse-log'] = "inverse") -> dict[str, float]:
     new_weights = {}
 
     if mode == "inverse":
@@ -34,7 +35,7 @@ def class_weights_for_loss(user_weights: dict, class_distribution: dict, mode:Li
         # hence we will also weight normalize it. This is technically not necessary.
         total_sum = 0
         for c in class_distribution.keys():
-            new_weights[c] = user_weights.get(c, 1.0) * torch.clamp(1.0 / class_distribution[c], min = 1e-4)
+            new_weights[c] = user_weights.get(c, 1.0) * np.clip(1.0 / class_distribution[c], min = 1e-4)
             total_sum += new_weights[c]
         
         new_weights = {k:v/total_sum for k,v in new_weights.items()}
@@ -49,6 +50,6 @@ def class_weights_for_loss(user_weights: dict, class_distribution: dict, mode:Li
         factor = 1.0 / len(class_distribution)
         for c in class_distribution.keys():
             mu = factor * user_weights.get(c,1.0)
-            new_weights[c] = mu * torch.clamp(torch.log( (total * mu) / class_distribution[c]), min=1.0)
+            new_weights[c] = mu * np.clip(np.log( (total * mu) / class_distribution[c]), min=1.0)
         
     return new_weights

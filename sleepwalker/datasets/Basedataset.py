@@ -42,7 +42,7 @@ class EDFFile:
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
         if self.X is None:
             x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type)
-            
+            # TODO allow normalization after augmentation?  
             if self.normalizers:
                 for col, norm in self.normalizers.items():
                     if col in x_df.columns:
@@ -71,8 +71,9 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
     final_dict = defaultdict(list)
 
     for b in batch:
-        for k, v in b.items():
-            final_dict[k].append(v)
+        if b:
+            for k, v in b.items():
+                final_dict[k].append(v)
     
     return {k: torch.stack(v) if k not in ignore_list else v for k, v in final_dict.items()}
 
@@ -157,7 +158,8 @@ class BaseDataset(Dataset, ABC):
         transform: Optional[list[Callable]] = None,
         num_workers:int = 4,
         online_max_tries:int = 128,
-        force_one_day: bool = True
+        force_one_day: bool = True,
+        rereference: Optional[List[List[str]]] = None # [ ["C3-A1", "C4-A2"] ]
     ) -> None:
         super().__init__()
         
@@ -176,6 +178,7 @@ class BaseDataset(Dataset, ABC):
         self.initialized = False
         self.num_workers = num_workers
         self.force_one_day = force_one_day
+        self.rereference = rereference
 
         # Events/classes
         if event_mapping is not None:
@@ -190,7 +193,7 @@ class BaseDataset(Dataset, ABC):
 
         # Prepared state
         self.ids = []
-        self.initialize(self.all_patients, self.num_workers)
+        self.initialize(self.all_patients, self.num_workers) 
 
     @abstractmethod
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
@@ -340,6 +343,12 @@ class BaseDataset(Dataset, ABC):
         end_date = start_date + self.total_input
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
         
+        if self.rereference:
+            for refchannels in self.rereference:
+                ref_cols = [r for r in refchannels if r in x_df.columns]
+                if ref_cols:
+                    x_df[ref_cols] = x_df[ref_cols].values - x_df[ref_cols].values.mean(axis=1)[:,None]
+
         # Target time at center for window/sequence modes
         t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
         item: Dict[str, Any] = {"patient": file.path, "time": t_center}
@@ -402,7 +411,7 @@ class BaseDataset(Dataset, ABC):
                 cnt += 1
                 idx = np.random.choice(range(len(self)))
         
-        if cnt > self.online_max_tries or item is None:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}")
-        else:
+        if self.online_max_tries == 0 or cnt <= self.online_max_tries:
             return item
+        else:
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}")

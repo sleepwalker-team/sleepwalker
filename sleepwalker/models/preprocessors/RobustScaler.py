@@ -5,9 +5,19 @@ from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 class RobustScaler(Preprocessor):
     def __init__(self, lower_quantile: float = 0.25, upper_quantile: float = 0.75, **kwargs):
         super().__init__()
-        self.is_initialized = False
+
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile
+
+        self.is_initialized = False
+        self.num_features = None
+        self.cnt = 0
+
+        self.register_buffer("n", torch.zeros(0))                       # (F,)
+        self.register_buffer("marker_heights", torch.zeros(0, 5))       # (F,5)
+        self.register_buffer("marker_positions", torch.zeros(0, 5))     # (F,5)
+        self.register_buffer("desired_positions", torch.zeros(0, 5))    # (F,5)
+        self.register_buffer("initialized", torch.zeros(0, dtype=torch.bool))  # (F,)
 
     def requires_warmup(self) -> bool:
         return True
@@ -18,6 +28,7 @@ class RobustScaler(Preprocessor):
         Assumes new_data has shape (batch_size, num_samples, num_features).
         """
         # Flatten the first two dimensions (batch_size * num_samples, num_features)
+        
         batch_size, num_samples, num_features = new_data.shape
         device = new_data.device
 

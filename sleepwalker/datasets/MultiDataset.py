@@ -49,6 +49,9 @@ class MultiDataset(Dataset):
         self.len = sum([len(d) for d in datasets])
         self.extra_target = all([d.has_extra_target() for d in datasets])
 
+    def get_n_datasets(self):
+        return len(self.datasets)
+    
     def get_classes(self):
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_classes()
@@ -60,7 +63,7 @@ class MultiDataset(Dataset):
     def has_extra_target(self):
         return self.extra_target 
 
-    def n_patients(self):
+    def get_n_patients(self):
         return sum([d.get_n_patients() for d in self.datasets])
 
     def __len__(self):
@@ -70,4 +73,4 @@ class MultiDataset(Dataset):
         d_idx = bisect.bisect_right(self.upper_bound, idx)
         new_idx = idx - self.lower_bound[d_idx]
 
-        return self.datasets[d_idx].__getitem__(new_idx)
+        return {"dataset":d_idx, **self.datasets[d_idx].__getitem__(new_idx)}

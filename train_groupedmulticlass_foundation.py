@@ -4,14 +4,19 @@ import argparse
 import inspect
 import os
 
-# os.environ["OMP_NUM_THREADS"] = "2"
-# os.environ["MKL_NUM_THREADS"] = "2"
-# os.environ["OPENBLAS_NUM_THREADS"] = "2"
-# os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
-# os.environ["NUMEXPR_NUM_THREADS"] = "2"
+import mlflow
+
+from sleepwalker.datasets.augmentation.RandomPolarityFlip import RandomPolarityFlip
+from sleepwalker.datasets.augmentation.RandomResampleJitter import RandomResampleJitter
+
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 from functools import partial
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 import torch
@@ -44,22 +49,20 @@ from sleepwalker.models.SeqSleepNet import SeqSleepNet
 from sleepwalker.models.TinySleepNet import TinySleepNet
 from sleepwalker.models.USleep import USleep
 from sleepwalker.models.preprocessors.Crop import Crop
-from sleepwalker.trainer.GroupedChanelMulticlassTrainer import GroupedChanelMulticlassTrainer
+from sleepwalker.trainer.GroupedChannelMulticlassTrainer import GroupedChannelMulticlassTrainer
 from sleepwalker.trainer.losses import class_weights_for_loss, dice_loss
 from sleepwalker.trainer.utils import append_to_jsonl
 from sleepwalker.utils import logger, MlflowSink, suppress_stdout_logging
 
 from lamarr_energy_tracker import EnergyTracker
 
-# torch.set_num_threads(2)
-# torch.set_num_interop_threads(1)
+torch.set_num_threads(2)
+torch.set_num_interop_threads(1)
 
 mp.set_sharing_strategy('file_system')
 
-
-
-def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_item_fn, test_frac: Optional[float] = 0.1, transform = None, dry_run:bool = False):
-    channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs)) for c in channels] 
+def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_item_fn, test_frac: Optional[float] = 0.1, transform = None, dry_run:bool = False, rereference:Optional[List[List[str]]] = None):
+    channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs, lowcut=0.5, notch_freq=None)) for c in channels] 
     
     edf_files = get_edf_files_in_repo(edf_path, recursive=True)
     if dry_run:
@@ -77,7 +80,8 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 get_item = get_item_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
-                transform = transform
+                transform = transform,
+                rereference = rereference
             )
         test_ds = None
         logger.info(f"Loaded {train_ds.get_n_patients()} / {len(edf_files)} patients.")
@@ -94,7 +98,8 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 get_item = get_item_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
-                transform = transform
+                transform = transform,
+                rereference = rereference
             )
             logger.uncontext()
             logger.context("TEST")
@@ -107,7 +112,8 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                     get_item = get_item_fn,
                     total_input = total_input, 
                     target_resolution = target_resolution,
-                    transform = transform
+                    transform = transform,
+                    rereference = rereference
                 )
             logger.uncontext()
     
@@ -126,7 +132,8 @@ dataset_cfg = {
             "stage 3 sleep|3": "n3",
             "rem sleep|5": "rem"
         },
-        "channels": ["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]
+        "channels": ["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"],
+        "rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
     "cap": { 
         "clazz": CAP, 
@@ -139,7 +146,8 @@ dataset_cfg = {
             "R":"rem",
             "W":"wake"
         },
-        "channels": ["F4-C4", "P4-O2", "C4-P4", "C4-A1"]
+        "channels": ["F4-C4", "P4-O2", "C4-P4", "C4-A1"],
+        "rereference": [["F4-C4", "P4-O2", "C4-P4", "C4-A1"]]
     },
     "isruc": { 
         "clazz": ISRUC, 
@@ -153,7 +161,8 @@ dataset_cfg = {
             "W":"wake",
             "w":"wake"
         },
-        "channels": ["F3-M2", "C3-M2", "O1-M2", "F4-M1", "C4-M1", "O2-M1"]
+        "channels": ["F3-M2", "C3-M2", "O1-M2", "F4-M1", "C4-M1", "O2-M1"],
+        "rereference": [["F3-M2", "C3-M2", "O1-M2", "F4-M1", "C4-M1", "O2-M1"]],
     },
     "mnc": { 
         "clazz": MNC, 
@@ -165,7 +174,8 @@ dataset_cfg = {
             "rem":"rem",
             "wake":"wake",
         },
-        "channels": ["F3", "F4", "C4", "C3"]
+        "channels": ["F3", "F4", "C4", "C3"],
+        "rereference": [["F3", "F4", "C4", "C3"]]
     },
     "nchsdb": { 
         "clazz": NCHSDB, 
@@ -180,7 +190,8 @@ dataset_cfg = {
             "Sleep stage N2": "n2",
             "Sleep stage N3": "n3"
         },
-        "channels": ["EEG C3-M2", "EEG O2-M1", "EEG O1-M2", "EEG F3-M2", "EEG C4-M1", "EEG F4-M1"]
+        "channels": ["EEG C3-M2", "EEG O2-M1", "EEG O1-M2", "EEG F3-M2", "EEG C4-M1", "EEG F4-M1"],
+        "rereference": [["EEG C3-M2", "EEG O2-M1", "EEG O1-M2", "EEG F3-M2", "EEG C4-M1", "EEG F4-M1"]]
     }, 
     "svuhucd": { 
         "clazz": SVUH_UCD, 
@@ -193,7 +204,8 @@ dataset_cfg = {
             "4": "n3",
             "5": "n3"
         },
-        "channels": ["C3A2", "C4A1"]
+        "channels": ["C3A2", "C4A1"],
+        "rereference": [["C3A2", "C4A1"]]
     },
     "shhs": { 
         "clazz": SHHS, 
@@ -219,7 +231,8 @@ dataset_cfg = {
             "R":"rem",
             "W":"wake"
         },
-        "channels": ["C3_M2", "C4_M1", "O2_M1", "O1_M2"]
+        "channels": ["C3_M2", "C4_M1", "O2_M1", "O1_M2"],
+        "rereference": [["C3_M2", "C4_M1", "O2_M1", "O1_M2"]]
     }, 
     "mros": {
         "clazz": MROS, 
@@ -232,7 +245,8 @@ dataset_cfg = {
             "stage 4 sleep|4": "n3",
             "rem sleep|5": "rem"
         },
-        "channels": ["C3", "C4"]
+        "channels": ["C3", "C4"],
+        "rereference": [["C3", "C4"]]
     },
     "ruhrland": { 
         "clazz": Ruhrlandklinik, 
@@ -244,7 +258,8 @@ dataset_cfg = {
             "n3": "n3",
             "rem": "rem"
         },
-        "channels": ["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]
+        "channels": ["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"],
+        "rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]]
     },
     "sleepedfx": {
         "clazz": SleepEDFx, 
@@ -257,7 +272,8 @@ dataset_cfg = {
             "sleep stage 4": "n3",
             "sleep stage r": "rem"
         },
-        "channels": ["EEG Fpz-Cz", "EEG Pz-Oz"]
+        "channels": ["EEG Fpz-Cz", "EEG Pz-Oz"],
+        "rereference": [["EEG Fpz-Cz", "EEG Pz-Oz"]]
     },
 }
 
@@ -268,6 +284,17 @@ model_cfg = {
         "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
         "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         "loss_function":torch.nn.functional.cross_entropy
+    },
+    "sleeptransformer-aug":{
+        "clazz": SleepTransformer,
+        "total_input": "630s",
+        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
+        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
+        "loss_function":torch.nn.functional.cross_entropy,
+        "transform": [
+            RandomPolarityFlip(p=0.3, flip_p=0.1),
+            RandomResampleJitter(p=0.5, scale=0.05),
+        ]
     },
     "attnsleep":{
         "clazz": AttnSleep,
@@ -348,7 +375,7 @@ def run(model_name, train_datasets, test_datasets, dry_run):
     epochs = 100 if not dry_run else 1
     target_resolution = "30s"
     n_samples = 250_000 if not dry_run else 1_000 
-    experiment_name = "grouped-multiclass-foundation"
+    experiment_name = "grouped-multiclass-foundation-rereferenced"
     num_workers_dataset = 16
     num_workers_dataloader = 16
     sample_frequency = 100
@@ -375,13 +402,14 @@ def run(model_name, train_datasets, test_datasets, dry_run):
         tracker = EnergyTracker(project_name=experiment_name)
         tracker.start()
     
-    with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
-        TRACKING_URI=f.read().strip()
-    ARTIFACT_URI=f"/raid/mlruns"
+    # with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
+    #     TRACKING_URI=f.read().strip()
+    # ARTIFACT_URI=f"/raid/mlruns"
 
-    logger.add_sink(MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI))
+    # mlflow_sink = MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI)
+    # logger.add_sink(mlflow_sink)
     logger.start_run(run_name=experiment_name,tags={"model":model_name})
-
+    
     train_ds = []
     val_ds = []
 
@@ -395,9 +423,9 @@ def run(model_name, train_datasets, test_datasets, dry_run):
             fs = sample_frequency, 
             total_input = total_input, 
             target_resolution = target_resolution, 
-            get_item_fn=partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
+            get_item_fn=partial(GroupedChannelMulticlassTrainer.get_item, groups=groups),
             num_workers_dataset = num_workers_dataset,
-            test_frac=0.1,
+            test_frac=0.3,
             transform=transform, 
             dry_run=dry_run
         )
@@ -416,7 +444,7 @@ def run(model_name, train_datasets, test_datasets, dry_run):
             # TinySleepNet uses augmentation that changes the model input size. For testing we have to be consistent
             total_input = model_cfg[model_name]["total_input_model"] if "total_input_model" in model_cfg[model_name] else total_input, 
             target_resolution = target_resolution, 
-            get_item_fn=partial(GroupedChanelMulticlassTrainer.get_item, groups=groups),
+            get_item_fn=partial(GroupedChannelMulticlassTrainer.get_item, groups=groups),
             num_workers_dataset = num_workers_dataset,
             test_frac=0, 
             dry_run=dry_run
@@ -428,13 +456,13 @@ def run(model_name, train_datasets, test_datasets, dry_run):
         os.remove("sleepwalker.log")
 
     train_multi_ds = MultiDataset(train_ds)
-    logger.info(f"Loaded {train_multi_ds.n_patients()} for training")
+    logger.info(f"Loaded {train_multi_ds.get_n_patients()} for training")
 
     val_multi_ds = MultiDataset(val_ds)
-    logger.info(f"Loaded {val_multi_ds.n_patients()} for validation")
+    logger.info(f"Loaded {val_multi_ds.get_n_patients()} for validation")
 
     test_multi_ds = MultiDataset(test_ds)
-    logger.info(f"Loaded {test_multi_ds.n_patients()} for testing")
+    logger.info(f"Loaded {test_multi_ds.get_n_patients()} for testing")
 
     if "total_input_model" in model_cfg[model_name]:
         # TinySleepNet uses augmentation that changes the model input size. Hence its actual input size is different from total_input 
@@ -453,7 +481,7 @@ def run(model_name, train_datasets, test_datasets, dry_run):
         class_cnts = estimate_class_cnts(train_multi_ds, n_samples, num_workers_dataloader, batch_size)
         class_cnts_list = [class_cnts.get(c, 1) for c in train_multi_ds.get_classes()]
         for i in range(len(train_datasets)):
-            train_multi_ds.datasets[i].get_item_callback = partial(GroupedChanelMulticlassTrainer.get_item, groups=groups, class_cnts=class_cnts_list)
+            train_multi_ds.datasets[i].get_item_callback = partial(GroupedChannelMulticlassTrainer.get_item, groups=groups, class_cnts=class_cnts_list)
     else:
         class_cnts = None
 
@@ -467,7 +495,7 @@ def run(model_name, train_datasets, test_datasets, dry_run):
     else:
         weights_torch = None
 
-    trainer = GroupedChanelMulticlassTrainer(
+    trainer = GroupedChannelMulticlassTrainer(
         groups=groups,
         epochs=epochs, 
         optimizer = optimizer,
@@ -487,8 +515,9 @@ def run(model_name, train_datasets, test_datasets, dry_run):
     train_dict = trainer.fit(model, train_loader, val_loader)
     losses, cms = train_dict["losses"], train_dict["cms"]
     if "checkpoint" in train_dict:
-        state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
-        model.load_state_dict(state_dict)
+        with torch.inference_mode():
+            state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
+            model.load_state_dict(state_dict)
 
     for t_ds, name in zip(test_ds, test_datasets):
         test_loader = DataLoader(t_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
@@ -509,11 +538,12 @@ def run(model_name, train_datasets, test_datasets, dry_run):
                 "train_cm":cms,
                 "dataset":name,
                 "classes":train_multi_ds.get_classes(),
+                "artifact_root": train_dict["checkpoint"] if "checkpoint" in train_dict else "",
             }
             if "best_model" in train_dict:
                 record["best_model"] = train_dict["best_model"]
 
-            append_to_jsonl(experiment_name, record)
+            append_to_jsonl(f"{experiment_name}_{model_name}", record)
             logger.uncontext()
         logger.uncontext()
 

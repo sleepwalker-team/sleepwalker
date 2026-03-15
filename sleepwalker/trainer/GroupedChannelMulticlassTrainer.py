@@ -55,10 +55,10 @@ class ChannelTensor:
 #         new_data.append(torch.from_numpy(data[selected].values).float())
 #     return new_data
     
-class GroupedChanelMulticlassTrainer(MulticlassTrainer):
+class GroupedChannelMulticlassTrainer(MulticlassTrainer):
     def __init__(
         self,
-        groups:list[list[str]],
+        groups:Optional[list[list[str]]] = None,
         n_repeat_train:int = 1,
         n_repeat_test:int = 1,
         **kwargs
@@ -119,6 +119,8 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
     #     return None
 
     def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
+        if not self.groups:
+            return super().warmup_preprocessors(model, data_loader, device)
         model.to(device)
         total_batches = len(data_loader)
         batch_size = data_loader.batch_size  
@@ -148,6 +150,9 @@ class GroupedChanelMulticlassTrainer(MulticlassTrainer):
         return model
 
     def run_epoch(self, loader, opt, model, prefix=""):
+        if not self.groups:
+            return super().run_epoch(loader, opt, model, prefix)
+        
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
         

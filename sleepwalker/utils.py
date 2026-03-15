@@ -214,6 +214,8 @@ class MlflowSink:
         self.artifact_uri = artifact_uri
         self.experiment = experiment
         self._run_active = False
+        self._run_id = None
+        self._experiment_id = None
 
     def start(self, run_name: Optional[str],
               params: Optional[Dict[str, Any]], tags: Optional[Dict[str, Any]]):
@@ -231,12 +233,25 @@ class MlflowSink:
                 run_name=run_name,
                 tags=tags or {}
             )
+        #     self._run_id = run.info.run_id
+        #     self._experiment_id = run.info.experiment_id
+        # else:
+        #     self._run_id = active.info.run_id
+        #     self._experiment_id = active.info.experiment_id
         if params:
             try:
                 self.mlflow.log_params(params)
             except Exception:
                 pass
         self._run_active = True
+
+    # @property
+    # def run_id(self):
+    #     return self._run_id
+
+    # @property
+    # def experiment_id(self):
+    #     return self._experiment_id            
 
     def end(self, status: str = "FINISHED"):
         if self._run_active:

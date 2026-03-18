@@ -18,10 +18,10 @@ from sleepwalker.trainer.utils import append_to_jsonl
 from sleepwalker.utils import MlflowSink, logger
 
 # TODO METAMODEL
-#   ALLOW DIFFERENT INPUT SIZES/SAMPLE RATES
 #   ADD A POST-EMBEDDING MODEL (NOT FC)
+#   ALLOW MULTIPLE INPUT RESOLUTIONS?!?!
 
-edf_folder = "/home/sleepwalker/data/ruhrlandklinik/raw/train-test-2023/"
+edf_folder = "/raid/sleepwalker/ruhrlandklinik/raw"
 n_splits = 3
 batch_size = 128
 epochs = 100
@@ -67,30 +67,31 @@ event_mapping = {
 
 task_config = {
     "breathing": {
-        "labels": ["apnea", "hypopnea", "regular breathing"],
-        "default": "regular breathing",
+        "labels": ["apnea", "hypopnea", "regular"],
+        "default": "regular",
         "percentage": 0.5,
+        "target_resolution": "10s",
     },
     "arousal": {
         "labels": ["arousal", "no arousal"],
         "default": "no arousal",
         "percentage": 0.5,
+        "target_resolution": "1s",
     },
-    "desaturation": {
+    "desat": {
         "labels": ["desaturation", "no desaturation"],
         "default": "no desaturation",
         "percentage": 0.5,
+        "target_resolution": "10s",
     },
-    "sleep staging": {
+    "sleep": {
         "labels": ["n1", "n2", "n3", "rem", "wake"],
         "default": None,
         "percentage": 0.5,
+        "target_resolution": "30s",
     },
 }
-
-resp_embedding_size = 32
-sleep_embedding_size = 32
-
+normalized_task_config = MultiLabelTrainer.normalize_task_config(task_config)
 
 def filter_patient(edf_path):
     meta = read_edf_meta(edf_path)
@@ -104,7 +105,7 @@ def build_loader(patients):
         num_workers=8,
         sample_frequency=sample_frequency,
         event_mapping=event_mapping,
-        get_item=partial(MultiLabelTrainer.get_item, task_config=task_config),
+        get_item=partial(MultiLabelTrainer.get_item, task_config=normalized_task_config),
         total_input=total_input,
         target_resolution=target_resolution,
     )
@@ -123,11 +124,11 @@ def build_loader(patients):
     )
     return loader, dataset
 
-def build_model(ts_len, classes):
+def build_model(ts_len):
     respiratory_model = UTime(
         ts_len=ts_len,
         n_channels=4,
-        classes=[f"resp_{i}" for i in range(resp_embedding_size)],
+        classes=None,
         sampling_frequency="0.01s",
         channel=[16, 32, 64, 128],
         maxpool=[10, 8, 6, 4],
@@ -136,23 +137,21 @@ def build_model(ts_len, classes):
         mlp_size=64,
     )
     sleep_model = SleepTransformer(
-        classes=[f"sleep_{i}" for i in range(sleep_embedding_size)],
+        classes=None,
         n_channels=1,
     )
 
     model = MetaModel(
-        classes=classes,
+        task_config=normalized_task_config,
         input_channels=all_input_channels,
         models=[
-            MetaModelEntry("respiratory", respiratory_model, ["Chest", "Abdomen", "Saturation", "Pulse Waveform"]),
-            MetaModelEntry("sleep staging", sleep_model, ["C4-M1"]),
+            MetaModelEntry(respiratory_model, ["Chest", "Abdomen", "Saturation", "Pulse Waveform"]),
+            MetaModelEntry(sleep_model, ["C4-M1"]),
         ],
-        sample_frequency=sample_frequency,
-        ts_len=ts_len
     )
     return model
 
-all_patients = get_edf_files_in_repo(edf_folder, recursive=False)
+all_patients = get_edf_files_in_repo(edf_folder, recursive=True)
 all_patients  = [p for p in all_patients if filter_patient(p)]
 all_patients = all_patients[:10]
 
@@ -167,9 +166,10 @@ trainer = MultiLabelTrainer(
     lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1, end_factor=1e-2, total_iters=50
     ),
-    task_config=task_config,
+    task_config=normalized_task_config,
     save_every=10,
     loss_function=torch.nn.functional.cross_entropy,
+    log_batches=True
 )
 
 for i, (train_patients, test_patients) in enumerate(kfold_split(all_patients, n_splits=n_splits)):
@@ -180,7 +180,7 @@ for i, (train_patients, test_patients) in enumerate(kfold_split(all_patients, n_
     if len(missing) > 0:
         raise ValueError(f"Task config is missing dataset classes: {missing}")
 
-    model = build_model(dataset.get_timeseries_len(), trainer.classes)
+    model = build_model(dataset.get_timeseries_len())
     summary(model, input_size=(1, dataset.get_timeseries_len(), len(all_input_channels)), depth=6, row_settings=["hide_recursive_layers"])
 
     train_dict = trainer.fit(model, train_loader)
@@ -198,7 +198,7 @@ for i, (train_patients, test_patients) in enumerate(kfold_split(all_patients, n_
         "train_loss": train_dict["losses"],
         "train_cm": train_dict["cms"],
         "classes": trainer.classes,
-        "task_config": task_config,
+        "task_config": normalized_task_config,
         "input_channels": all_input_channels,
     }
     if "best_model" in train_dict:

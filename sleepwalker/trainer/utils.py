@@ -64,8 +64,14 @@ def append_to_jsonl(filename: str, record: dict):
                 return int(o)
             elif isinstance(o, np.floating):
                 return float(o)
+            elif isinstance(o, np.bool_):
+                return bool(o)
             elif isinstance(o, np.ndarray):
                 return o.tolist()
+            elif isinstance(o, pd.Timedelta):
+                return str(o)
+            elif isinstance(o, pd.Timestamp):
+                return o.isoformat()
             else:
                 return super(NumpyEncoder, self).default(o)
 

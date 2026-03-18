@@ -96,7 +96,7 @@ class SleepTransformer(BaseModel):
     def __init__(
         self,
         *,
-        classes,              # class names (C)
+        classes=None,         # class names (C)
         n_channels,           # input channels (from dataset)
         ndim=128,             # spectral bins (F)
         frame_seq_len=29,     # T (frames per epoch)
@@ -117,11 +117,11 @@ class SleepTransformer(BaseModel):
     ):
         spec = [Spectrogram(n_fft=2 * (ndim - 1), hop_length=hop_length), Normalize()] 
         super().__init__(preprocessors=spec)
-        self.classes = list(classes)
+        self.classes = list(classes) if classes is not None else None
 
         self.ndim = ndim
         self.nchannel = n_channels
-        self.nclass = len(classes)
+        self.nclass = len(self.classes) if self.classes is not None else 0
         self.frame_seq_len = frame_seq_len
         self.epoch_seq_len = epoch_seq_len
         self.output_strategy = output_strategy
@@ -160,17 +160,21 @@ class SleepTransformer(BaseModel):
         )
 
         classifier_input_dim = self.frm_input_dim * epoch_seq_len if output_strategy == "flatten" else self.frm_input_dim
-        self.fc = nn.Sequential(
-            nn.Linear(classifier_input_dim, fc_hidden_size),
-            nn.ReLU(),
-            nn.Dropout(fc_dropout),
-            nn.Linear(fc_hidden_size, fc_hidden_size),
-            nn.ReLU(),
-            nn.Dropout(fc_dropout),
-            nn.Linear(fc_hidden_size, len(classes)),
-        )
+        self._feature_dim = classifier_input_dim
+        if self.classes is not None:
+            self.fc = nn.Sequential(
+                nn.Linear(classifier_input_dim, fc_hidden_size),
+                nn.ReLU(),
+                nn.Dropout(fc_dropout),
+                nn.Linear(fc_hidden_size, fc_hidden_size),
+                nn.ReLU(),
+                nn.Dropout(fc_dropout),
+                nn.Linear(fc_hidden_size, len(self.classes)),
+            )
+        else:
+            self.fc = None
 
-    def features(self, x: torch.Tensor) -> torch.Tensor:
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         spec = x.permute(0, 2, 1, 3).reshape(B, x.shape[2], -1)
         total_frames = spec.shape[1] // self.frame_seq_len
@@ -197,14 +201,15 @@ class SleepTransformer(BaseModel):
             raise ValueError("Unknown output_strategy")
         return x_out
 
-    def classifier(self, x: torch.Tensor) -> torch.Tensor:
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fc is None or self.classes is None:
+            raise ValueError("SleepTransformer.classifier() requires classes to be set.")
         B = x.shape[0]
         yhat = self.fc(x)
         if self.output_strategy == "sequence":
             yhat = yhat.reshape(B, self.epoch_seq_len, -1)
         return yhat
-    
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_out = self.features(x)
-        return self.classifier(x_out)
         

@@ -127,11 +127,13 @@ class MRASleepNet(BaseModel):
     - Macro F1:     0.789 / 0.754
     - Cohens Kappa: 0.786 / 0.743
     """
-    def __init__(self, *, ts_len, n_channels, classes):
+    def __init__(self, *, ts_len, n_channels=None, n_features=None, classes=None):
         super().__init__(preprocessors=[NormalizeAlongDim(1)])
-        self.n_channels = n_channels
+        self.n_channels = n_channels if n_channels is not None else n_features
+        if self.n_channels is None:
+            raise ValueError("MRASleepNet requires n_channels or n_features.")
         self.ts_len = ts_len
-        self.classes = classes
+        self.classes = list(classes) if classes is not None else None
 
         self.fe = FE(self.n_channels)
         self.mra = MRA()
@@ -146,16 +148,20 @@ class MRASleepNet(BaseModel):
             seq_len = x.shape[2]
 
         self.gmlp1 = gMLPBlock(128,256,seq_len)
-        
-        self.fc = nn.Sequential(
-            nn.Linear(192,128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128,len(self.classes)),
-            nn.Softmax(-1)
-        )
+        self._feature_dim = 192
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.classes is not None:
+            self.fc = nn.Sequential(
+                nn.Linear(192,128),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(128,len(self.classes)),
+                nn.Softmax(-1)
+            )
+        else:
+            self.fc = None
+
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, T, D = x.shape 
         x = x.swapaxes(1,2) # (B, D, T)
         xt = self.bnt(self.convt(x)).view(batch_size,-1)
@@ -165,5 +171,12 @@ class MRASleepNet(BaseModel):
         x = self.gmlp1(x)
         x = x.swapaxes(1,2)
         x = self.gp(x).view(batch_size,-1)
-        x = torch.cat((x,xt),1)
+        return torch.cat((x,xt),1)
+
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fc is None or self.classes is None:
+            raise ValueError("MRASleepNet.classifier() requires classes to be set.")
         return self.fc(x)

@@ -194,8 +194,8 @@ class UTime(BaseModel):
     def __init__(self, 
         ts_len, 
         n_channels, 
-        classes, 
         sampling_frequency, 
+        classes=None, 
         activation = "relu", 
         norm = "channel", 
         channel = 32, 
@@ -209,10 +209,11 @@ class UTime(BaseModel):
         ):
         super(UTime, self).__init__()
 
-        self.classes = classes
+        self.classes = list(classes) if classes is not None else None
         self.ts_len = ts_len
         self.n_channels = n_channels
         self.fs = pd.to_timedelta(sampling_frequency)
+        self.mlp_size = mlp_size
 
         if isinstance(maxpool, int):
             maxpool = [maxpool for _ in range(n_layers)]
@@ -243,12 +244,24 @@ class UTime(BaseModel):
         self.decoder = Decoder(channel, maxpool, activation, norm, dropout_p, kernel, conv)
 
         if self.epoch_len_s is None:
-            self.fc = nn.Linear(mlp_size, len(classes))
+            if self.classes is not None:
+                self.fc = nn.Linear(mlp_size, len(self.classes))
+            else:
+                self.fc = None
             self.final_conv = nn.Conv1d(channel[0], mlp_size, kernel_size=1)
+            self._feature_dim = mlp_size
         else:
-            self.final_conv = nn.Conv1d(channel[0], len(self.classes), kernel_size=1)
+            if self.classes is not None:
+                self.final_conv = nn.Conv1d(channel[0], len(self.classes), kernel_size=1)
+            else:
+                self.final_conv = nn.Conv1d(channel[0], mlp_size, kernel_size=1)
+            if self.ts_len is not None and self.samples_per_epoch is not None and self.ts_len % self.samples_per_epoch == 0:
+                feature_channels = len(self.classes) if self.classes is not None else mlp_size
+                self._feature_dim = (self.ts_len // self.samples_per_epoch) * feature_channels
+            else:
+                raise ValueError("UTime requires ts_len aligned with samples_per_epoch to expose feature_dim().")
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor: 
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
         if self.samples_per_epoch is not None:
             if T % self.samples_per_epoch != 0:
@@ -269,27 +282,21 @@ class UTime(BaseModel):
 
         if self.samples_per_epoch is not None:
             x = self.avg_pool(x)
-            x = x.squeeze(-1).view(B, N, len(self.classes))  # (B, N, C)
-
-            # if self.output_strategy == 'mean':
-            #     x = x.mean(dim=1) 
-            # elif self.output_strategy == 'center':
-            #     x = x[:, x.shape[2] // 2, :]
-            # elif self.output_strategy == 'last':
-            #     x = x[:, -1, :]
-            # elif self.output_strategy == 'flatten':
-            #     x = x.view(B, -1)
-            #     x = self.fc(x)
-            # elif self.output_strategy == "sequence":
-            #     x = x.reshape(B*N, -1)
-            # else:
-            #     raise ValueError(f"Unknown temporal reduction mode: {self.output_strategy}")
+            x = x.squeeze(-1).view(B, N * len(self.classes))
         else:
             x = x.mean(dim=2)
-            x = self.fc(x)
-        
         return x
-        # if return_intermediate:
-        #     return x, (bottleneck_embeddings.flatten(start_dim=1), feature_embeddings.flatten(start_dim=1))
-        # else:
-        #     return x
+
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.classes is None:
+            raise ValueError("UTime.classifier() requires classes to be set.")
+        if self.samples_per_epoch is not None:
+            if x.shape[-1] % len(self.classes) != 0:
+                raise ValueError("Flattened UTime sequence features do not align with the class dimension.")
+            return x.view(x.shape[0], x.shape[-1] // len(self.classes), len(self.classes))
+        if self.fc is None:
+            raise ValueError("UTime.classifier() requires classes to be set.")
+        return self.fc(x)

@@ -46,10 +46,12 @@ class SeqSleepNet(BaseModel):
     def __init__(
         self,
         *,
-        n_channels,
+        n_channels=None,
+        n_features=None,
         ts_len,
-        classes,
-        sampling_frequency:float,  
+        classes=None,
+        sampling_frequency:float | None = None,
+        sampling_rate: float | None = None,
         n_fft=256,
         hop_length=100,
         epoch_len="30s",
@@ -59,10 +61,15 @@ class SeqSleepNet(BaseModel):
         **kwargs
     ):
         self.nfilter = nfilter
-        self.classes = classes
-        self.sampling_frequency = sampling_frequency
-        self.epoch_len_samples = int(pd.Timedelta(epoch_len).total_seconds() * sampling_frequency)
-        spec = [Spectrogram(n_fft=n_fft, hop_length=hop_length, win_length=int(2*sampling_frequency), epoch_len_samples=self.epoch_len_samples), Normalize()] 
+        self.classes = list(classes) if classes is not None else None
+        self.sampling_frequency = sampling_frequency if sampling_frequency is not None else sampling_rate
+        if self.sampling_frequency is None:
+            raise ValueError("SeqSleepNet requires sampling_frequency or sampling_rate.")
+        n_channels = n_channels if n_channels is not None else n_features
+        if n_channels is None:
+            raise ValueError("SeqSleepNet requires n_channels or n_features.")
+        self.epoch_len_samples = int(pd.Timedelta(epoch_len).total_seconds() * self.sampling_frequency)
+        spec = [Spectrogram(n_fft=n_fft, hop_length=hop_length, win_length=int(2*self.sampling_frequency), epoch_len_samples=self.epoch_len_samples), Normalize()] 
         super().__init__(preprocessors=spec)
 
         self.ts_len = ts_len
@@ -99,12 +106,16 @@ class SeqSleepNet(BaseModel):
             bidirectional=True
         )
         self.output_strategy = output_strategy
+        self._feature_dim = 2 * self.hidden_size * self.L if self.output_strategy == "flatten" else 2 * self.hidden_size
 
-        if self.output_strategy == "flatten":
-            L = self.ts_len // self.epoch_len_samples
-            self.classifier = nn.Linear(2 * self.hidden_size * L, len(self.classes))
+        if self.classes is not None:
+            if self.output_strategy == "flatten":
+                L = self.ts_len // self.epoch_len_samples
+                self.classifier_layer = nn.Linear(2 * self.hidden_size * L, len(self.classes))
+            else:
+                self.classifier_layer = nn.Linear(2 * self.hidden_size, len(self.classes))
         else:
-            self.classifier = nn.Linear(2 * self.hidden_size, len(self.classes))
+            self.classifier_layer = None
 
     def _lin_tri_filter_shape(self, nfilt, nfft, samplerate, lowfreq=0, highfreq=None):
         """
@@ -151,7 +162,7 @@ class SeqSleepNet(BaseModel):
     #         # Cannot call super().forward here, because during warmup phase the shapes do not match anymore (i.e. batch size is wrong)
     #         return self._forward(x, **kwargs)
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
         # --- Filterbanks ---
         D = x.shape[-1]
         B = x.shape[0] // self.L
@@ -192,9 +203,18 @@ class SeqSleepNet(BaseModel):
             valid_strategies = ["flatten", "window-right", "window-middle", "sequence"]
             raise ValueError(f"Unknown output strategy: {self.output_strategy}. Valid strategies are: {valid_strategies}")
 
-        logits = self.classifier(epoch_out)
+        return epoch_out
+
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.classifier_layer is None or self.classes is None:
+            raise ValueError("SeqSleepNet.classifier() requires classes to be set.")
+        logits = self.classifier_layer(x)
 
         if self.output_strategy == "sequence":
-            logits = logits.view(B, L, len(self.classes))
+            B = x.shape[0] // self.L
+            logits = logits.view(B, self.L, len(self.classes))
 
         return logits

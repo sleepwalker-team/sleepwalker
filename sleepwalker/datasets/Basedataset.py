@@ -155,6 +155,8 @@ class BaseDataset(Dataset, ABC):
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
         get_item: Optional[Callable] = None,
+        prepare_patient_data: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]]] = None,
+        filter_item: Optional[Callable[[Dict[str, Any]], bool]] = None,
         transform: Optional[list[Callable]] = None,
         num_workers:int = 4,
         online_max_tries:int = 128,
@@ -172,6 +174,10 @@ class BaseDataset(Dataset, ABC):
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
         self.get_item_callback = get_item        
+        # prepare_patient_data is for preparing patient-level data/labels before indexing starts.
+        self.prepare_patient_data = prepare_patient_data
+        # filter_item is only for filtering already-built items, not for changing their contents.
+        self.filter_item_callback = filter_item
         self.transform = transform
         self.all_patients = patients
         self.online_max_tries = online_max_tries
@@ -218,6 +224,43 @@ class BaseDataset(Dataset, ABC):
     def __len__(self):
         return sum([f.length for f in self.edf_files])
 
+    @staticmethod
+    def trim_wake(
+        data_df: pd.DataFrame,
+        label_df: Optional[pd.DataFrame],
+        label_extra_df: Optional[pd.DataFrame],
+        wake_label: str = "wake",
+    ) -> Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]:
+        if label_df is None or len(label_df) == 0:
+            return None
+
+        label_df = label_df.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)
+        non_wake = label_df["Label"] != wake_label
+        if not non_wake.any():
+            return None
+
+        non_wake_positions = np.flatnonzero(non_wake.to_numpy())
+        first_idx = int(non_wake_positions[0])
+        last_idx = int(non_wake_positions[-1])
+        label_df = label_df.iloc[first_idx:last_idx + 1].copy()
+
+        lower = label_df["Starttime"].min()
+        upper = label_df["Endtime"].max()
+
+        if label_extra_df is not None:
+            label_extra_df = label_extra_df.copy()
+            label_extra_df = label_extra_df[
+                (label_extra_df["Endtime"] > lower) & (label_extra_df["Starttime"] < upper)
+            ]
+            if len(label_extra_df) > 0:
+                label_extra_df["Starttime"] = label_extra_df["Starttime"].clip(lower=lower, upper=upper)
+                label_extra_df["Endtime"] = label_extra_df["Endtime"].clip(lower=lower, upper=upper)
+                label_extra_df = label_extra_df[label_extra_df["Endtime"] > label_extra_df["Starttime"]]
+            else:
+                label_extra_df = None
+
+        return label_df, label_extra_df
+
     def prepare_patient(self, edf_path) -> Optional[EDFFile]:
         channel_names = [c.name for c in self.channels]
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
@@ -251,8 +294,6 @@ class BaseDataset(Dataset, ABC):
                     else:
                         df_additional["Label"] = df_additional["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
                     df_additional = df_additional.dropna()
-                    extra_classes = set(df_additional["Label"].unique())
-                    df_additional = EventIndex(df_additional)
                 else:
                     df = self.get_event_df(edf_path, start) 
                     df_additional = None
@@ -266,12 +307,23 @@ class BaseDataset(Dataset, ABC):
                 if self.force_one_day and (len(df["Starttime"].dt.date.unique()) > 2 or len(df["Endtime"].dt.date.unique()) > 2):
                     raise ValueError(f"Edf file: {edf_path} appears to be longer than one entire day. Is this a loading error? If not, set force_one_day = False")
 
+                if self.prepare_patient_data is not None:
+                    prepared = self.prepare_patient_data(data_df, df, df_additional)
+                    if prepared is None:
+                        return None
+                    df, df_additional = prepared
+                    if df is None or len(df) == 0:
+                        raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient_data")
+
                 classes = set(df["Label"].unique())
 
                 start = max(start, df["Starttime"].min())
                 end = min(end, df["Endtime"].max())
 
                 df = EventIndex(df)
+                if df_additional is not None:
+                    extra_classes = set(df_additional["Label"].unique())
+                    df_additional = EventIndex(df_additional)
             else:
                 df = None
                 df_additional = None
@@ -386,6 +438,9 @@ class BaseDataset(Dataset, ABC):
             item = self.get_item_callback(data=x_df, **item)
         else:
             item["data"] = torch.from_numpy(x_df.values).float()
+
+        if item is not None and self.filter_item_callback is not None and not self.filter_item_callback(item):
+            return None
 
         return item
 

@@ -491,11 +491,8 @@ class SleepEDFx(BaseDataset):
             - sleep stage w
     """
     def __init__(self, 
-            trim_wake = "30m",
             **kwargs
         ): 
-        self.trim_wake = trim_wake
-        
         super().__init__(**kwargs)
 
     def get_event_df(self, fpath, start_date):
@@ -532,16 +529,6 @@ class SleepEDFx(BaseDataset):
             
             df = pd.DataFrame(data)
             
-            if self.trim_wake:
-                idx = df[df["Label"].isin(["sleep stage 1", "sleep stage 2", "sleep stage 3", "sleep stage 4", "sleep stage R"]) ].first_valid_index()
-                first_event_timestamp = df.loc[idx]["Starttime"]
-
-                idx = df[df["Label"].isin(["sleep stage 1", "sleep stage 2", "sleep stage 3", "sleep stage 4", "sleep stage R"]) ].last_valid_index()
-                last_event_timestamp = df.loc[idx]["Starttime"]
-
-                df.loc[df["Endtime"] < (first_event_timestamp - pd.to_timedelta(self.trim_wake)), "Label"] = None
-                df.loc[df["Starttime"] > (last_event_timestamp + pd.to_timedelta(self.trim_wake)), "Label"] = None
-
             return df
 
 if __name__ == '__main__':

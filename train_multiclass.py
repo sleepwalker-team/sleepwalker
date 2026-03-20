@@ -57,7 +57,7 @@ torch.set_num_interop_threads(1)
 
 mp.set_sharing_strategy('file_system')
 
-def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_item_fn, test_frac: float = 0.3, val_frac:float = 0.1, transform = None, dry_run:bool = False):
+def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_target_fn, test_frac: float = 0.3, val_frac:float = 0.1, transform = None, dry_run:bool = False):
     assert 0 <= test_frac < 1, "test_frac not in [0,1]"
     assert 0 <= val_frac < 1, "val_frac not in [0,1]"
     assert val_frac + test_frac < 1.0, "test_frac + val_frac >= 1! No train data"
@@ -77,7 +77,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
             num_workers = num_workers_dataset,
             sample_frequency = fs,
             event_mapping = event_mapping,
-            get_item = get_item_fn,
+            get_target = get_target_fn,
             total_input = total_input, 
             target_resolution = target_resolution,
             transform = transform
@@ -90,7 +90,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
                 transform = transform
@@ -103,7 +103,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
                 transform = transform
@@ -387,7 +387,7 @@ def run(model_name, dataset, dry_run, grad_reversal):
         fs = sample_frequency, 
         total_input = total_input, 
         target_resolution = target_resolution, 
-        get_item_fn=MulticlassTrainer.get_item,
+        get_target_fn=MulticlassTrainer.get_target,
         num_workers_dataset = num_workers_dataset,
         test_frac=0.3,
         val_frac=0.1,
@@ -419,7 +419,7 @@ def run(model_name, dataset, dry_run, grad_reversal):
     if balance_batches:
         class_cnts = estimate_class_cnts(train_ds, n_samples, num_workers_dataloader, batch_size)
         class_cnts_list = [class_cnts.get(c, 1) for c in train_ds.get_classes()]
-        train_ds.get_item_callback = partial(MulticlassTrainer.get_item, class_cnts=class_cnts_list)
+        train_ds.get_target_callback = partial(MulticlassTrainer.get_target, class_cnts=class_cnts_list)
     else:
         class_cnts = None
 

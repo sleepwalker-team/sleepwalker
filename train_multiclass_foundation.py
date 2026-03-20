@@ -59,7 +59,7 @@ torch.set_num_interop_threads(1)
 
 mp.set_sharing_strategy('file_system')
 
-def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_item_fn, test_frac: Optional[float] = 0.1, transform = None, dry_run:bool = False):
+def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_target_fn, test_frac: Optional[float] = 0.1, transform = None, dry_run:bool = False):
     channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs)) for c in channels] 
     
     edf_files = get_edf_files_in_repo(edf_path, recursive=True)
@@ -75,7 +75,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
                 transform = transform
@@ -92,7 +92,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
                 transform = transform
@@ -105,7 +105,7 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                     num_workers = num_workers_dataset,
                     sample_frequency = fs,
                     event_mapping = event_mapping,
-                    get_item = get_item_fn,
+                    get_target = get_target_fn,
                     total_input = total_input, 
                     target_resolution = target_resolution,
                     transform = transform
@@ -393,7 +393,7 @@ def run(model_name, train_datasets, test_datasets, gradient_reversal, dry_run):
             fs = sample_frequency, 
             total_input = total_input, 
             target_resolution = target_resolution, 
-            get_item_fn=MulticlassTrainer.get_item,
+            get_target_fn=MulticlassTrainer.get_target,
             num_workers_dataset = num_workers_dataset,
             test_frac=0.1,
             transform=transform, 
@@ -414,7 +414,7 @@ def run(model_name, train_datasets, test_datasets, gradient_reversal, dry_run):
             # TinySleepNet uses augmentation that changes the model input size. For testing we have to be consistent
             total_input = model_cfg[model_name]["total_input_model"] if "total_input_model" in model_cfg[model_name] else total_input, 
             target_resolution = target_resolution, 
-            get_item_fn=MulticlassTrainer.get_item,
+            get_target_fn=MulticlassTrainer.get_target,
             num_workers_dataset = num_workers_dataset,
             test_frac=0, 
             dry_run=dry_run
@@ -451,7 +451,7 @@ def run(model_name, train_datasets, test_datasets, gradient_reversal, dry_run):
         class_cnts = estimate_class_cnts(train_multi_ds, n_samples, num_workers_dataloader, batch_size)
         class_cnts_list = [class_cnts.get(c, 1) for c in train_multi_ds.get_classes()]
         for i in range(len(train_datasets)):
-            train_multi_ds.datasets[i].get_item_callback = partial(MulticlassTrainer.get_item, class_cnts=class_cnts_list)
+            train_multi_ds.datasets[i].get_target_callback = partial(MulticlassTrainer.get_target, class_cnts=class_cnts_list)
     else:
         class_cnts = None
 

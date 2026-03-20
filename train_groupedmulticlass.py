@@ -59,12 +59,12 @@ torch.set_num_interop_threads(1)
 
 mp.set_sharing_strategy('file_system')
 
-def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_item_fn, test_frac: float = 0.3, val_frac:float = 0.1, transform = None, dry_run:bool = False):
+def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_target_fn, test_frac: float = 0.3, val_frac:float = 0.1, transform = None, dry_run:bool = False):
     assert 0 <= test_frac < 1, "test_frac not in [0,1]"
     assert 0 <= val_frac < 1, "val_frac not in [0,1]"
     assert val_frac + test_frac < 1.0, "test_frac + val_frac >= 1! No train data"
 
-    channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs)) for c in channels] 
+    channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs), group="eeg") for c in channels] 
     
     edf_files = get_edf_files_in_repo(edf_path, recursive=True)
 
@@ -79,10 +79,10 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
             num_workers = num_workers_dataset,
             sample_frequency = fs,
             event_mapping = event_mapping,
-            get_item = get_item_fn,
+            get_target = get_target_fn,
             total_input = total_input, 
             target_resolution = target_resolution,
-            transform = transform
+            transform = transform,
         )
         logger.uncontext()
         logger.context("VAL")
@@ -92,10 +92,10 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
-                transform = transform
+                transform = transform,
             )
         logger.uncontext()
         logger.context("TEST")
@@ -105,10 +105,10 @@ def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, to
                 num_workers = num_workers_dataset,
                 sample_frequency = fs,
                 event_mapping = event_mapping,
-                get_item = get_item_fn,
+                get_target = get_target_fn,
                 total_input = total_input, 
                 target_resolution = target_resolution,
-                transform = transform
+                transform = transform,
             )
         logger.uncontext()
     
@@ -369,9 +369,6 @@ def run(model_name, dataset, dry_run):
     transform = model_cfg[model_name].get("transform", None)
     balance_batches = model_cfg[model_name].get("balance_batches", False)
 
-    all_channels = dataset_cfg[dataset]["channels"]
-    groups = [list(all_channels)] # Below code supports multiple groups so that we can sample fro multiple channels. Technically, we only want to channel from the EEG group for 1 target channel, hence a list of list with a single entry
-
     if dry_run:
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
@@ -396,7 +393,7 @@ def run(model_name, dataset, dry_run):
         fs = sample_frequency, 
         total_input = total_input, 
         target_resolution = target_resolution, 
-        get_item_fn=partial(GroupedChannelMulticlassTrainer.get_item, groups=groups),
+        get_target_fn=GroupedChannelMulticlassTrainer.get_target,
         num_workers_dataset = num_workers_dataset,
         test_frac=0.3,
         val_frac=0.1,
@@ -428,7 +425,7 @@ def run(model_name, dataset, dry_run):
     if balance_batches:
         class_cnts = estimate_class_cnts(train_ds, n_samples, num_workers_dataloader, batch_size)
         class_cnts_list = [class_cnts.get(c, 1) for c in train_ds.get_classes()]
-        train_ds.get_item_callback = partial(GroupedChannelMulticlassTrainer.get_item, groups=groups, class_cnts=class_cnts_list)
+        train_ds.get_target_callback = partial(GroupedChannelMulticlassTrainer.get_target, class_cnts=class_cnts_list)
     else:
         class_cnts = None
 
@@ -443,7 +440,6 @@ def run(model_name, dataset, dry_run):
         weights_torch = None
 
     trainer = GroupedChannelMulticlassTrainer(
-        groups=groups,
         epochs=epochs, 
         optimizer = optimizer,
         lr_scheduler = lr_scheduler,
@@ -453,10 +449,10 @@ def run(model_name, dataset, dry_run):
         early_stopping = 10
     )
     train_sampler = RandomSampler(train_ds, num_samples = n_samples) if n_samples is not None else None
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) ### prefetch_factor=12
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
 
     val_sampler = RandomSampler(val_ds, num_samples = n_samples) if n_samples is not None else None
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=val_sampler is None, sampler=val_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=val_sampler is None, sampler=val_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
 
     train_dict = trainer.fit(model, train_loader, val_loader)
     losses, cms = train_dict["losses"], train_dict["cms"]
@@ -465,12 +461,10 @@ def run(model_name, dataset, dry_run):
             state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
             model.load_state_dict(state_dict)
 
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
-
     for r in [1,2,3,4,5,10]:
         logger.context(f"r={r}")
-
         trainer.n_repeat_test = r
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
         test_loss, test_cm = trainer.test(model, test_loader)
 
         record = {

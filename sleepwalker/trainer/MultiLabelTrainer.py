@@ -174,7 +174,7 @@ class MultiLabelTrainer(ABC):
         return out
 
     @staticmethod
-    def get_item(patient, time, data, target, target_extra=None, class_cnts: Optional[List[float]] = None, task_config: Optional[dict[str, dict]] = None):
+    def get_target(target, target_extra=None, class_cnts: Optional[List[float]] = None, task_config: Optional[dict[str, dict]] = None):
         if task_config is None:
             raise ValueError("task_config must not be None.")
 
@@ -182,7 +182,7 @@ class MultiLabelTrainer(ABC):
         if target is None:
             return None
 
-        item = {"patient": patient, "time": time, "target": target}
+        item = {"target": target}
 
         if class_cnts and len(class_cnts) == sum(len(cfg["labels"]) for cfg in task_config.values()):
             probas = class_cnts / np.sum(class_cnts)
@@ -200,7 +200,6 @@ class MultiLabelTrainer(ABC):
             if extra is not None:
                 item["target_extra"] = extra
 
-        item["data"] = torch.from_numpy(data.values).float()
         return item
 
     def _log_from_cms(self, cms: dict[str, np.ndarray], loss_value: float, mode: str, scope: str = "batch", step: int = 0):
@@ -346,7 +345,7 @@ class MultiLabelTrainer(ABC):
                 logits_flat = logits_task.reshape(-1, logits_task.shape[-1])
                 y_flat = y_task.reshape(-1)
                 if (y_flat < 0).any():
-                    raise ValueError(f"Task '{task}' contains invalid targets. Unclear labels must be filtered in get_item().")
+                    raise ValueError(f"Task '{task}' contains invalid targets. Unclear labels must be filtered in get_target().")
                 if (y_flat >= n_classes).any():
                     raise ValueError(f"Task '{task}' contains out-of-range targets.")
 

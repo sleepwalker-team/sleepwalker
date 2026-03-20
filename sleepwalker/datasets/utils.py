@@ -11,6 +11,7 @@ import torch
 import xmltodict as xtd
 from torch.utils.data import DataLoader
 from torch.utils.data import RandomSampler
+from torch.utils.data import Sampler
 
 from sklearn.model_selection import KFold
 
@@ -23,6 +24,22 @@ import pandas as pd
 from collections import Counter
 from torch.utils.data import DataLoader
 from sleepwalker.utils import logger
+
+
+class RepeatSampler(Sampler[int]):
+    def __init__(self, sampler: Sampler[int], n_repeat: int = 1):
+        if n_repeat <= 0:
+            raise ValueError("n_repeat must be positive.")
+        self.sampler = sampler
+        self.n_repeat = n_repeat
+
+    def __iter__(self):
+        for idx in self.sampler:
+            for _ in range(self.n_repeat):
+                yield idx
+
+    def __len__(self):
+        return len(self.sampler) * self.n_repeat
 
 
 def summarize_dataset(

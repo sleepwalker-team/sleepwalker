@@ -25,6 +25,7 @@ import multiprocessing
 class ChannelConfig:
     name: str
     normalizer: Optional[Normalizer] = None  
+    group: Optional[str] = None
 
 @dataclass
 class EDFFile: 
@@ -154,14 +155,13 @@ class BaseDataset(Dataset, ABC):
         target_resolution: str | pd.Timedelta = "30s",
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
-        get_item: Optional[Callable] = None,
+        get_target: Optional[Callable] = None,
         prepare_patient_data: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]]] = None,
-        filter_item: Optional[Callable[[Dict[str, Any]], bool]] = None,
         transform: Optional[list[Callable]] = None,
         num_workers:int = 4,
         online_max_tries:int = 128,
         force_one_day: bool = True,
-        rereference: Optional[List[List[str]]] = None # [ ["C3-A1", "C4-A2"] ]
+        rereference: Optional[List[List[str]]] = None, # [ ["C3-A1", "C4-A2"] ]
     ) -> None:
         super().__init__()
         
@@ -173,11 +173,9 @@ class BaseDataset(Dataset, ABC):
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
-        self.get_item_callback = get_item        
+        self.get_target_callback = get_target
         # prepare_patient_data is for preparing patient-level data/labels before indexing starts.
         self.prepare_patient_data = prepare_patient_data
-        # filter_item is only for filtering already-built items, not for changing their contents.
-        self.filter_item_callback = filter_item
         self.transform = transform
         self.all_patients = patients
         self.online_max_tries = online_max_tries
@@ -185,6 +183,12 @@ class BaseDataset(Dataset, ABC):
         self.num_workers = num_workers
         self.force_one_day = force_one_day
         self.rereference = rereference
+        self.channel_groups: Dict[str, list[str]] = defaultdict(list)
+        for cfg in self.channels:
+            if cfg.group is not None:
+                self.channel_groups[cfg.group].append(cfg.name)
+            else:
+                self.channel_groups[cfg.name].append(cfg.name)
 
         # Events/classes
         if event_mapping is not None:
@@ -194,7 +198,7 @@ class BaseDataset(Dataset, ABC):
             self.event_mapping = None
             self.classes = []
 
-        if self.remove_unmapped_events and len(self.event_mapping) == 0:
+        if self.event_mapping is not None and self.remove_unmapped_events and len(self.event_mapping) == 0:
             logger.warning(f"You set remove_unmapped_events to true but provided an empty mapping. If you want to not extract any labels, set event_mapping to None. If you want to extract all labels, set event_mapping to an empty dictionary and remove_unmapped_events to false.")
 
         # Prepared state
@@ -221,12 +225,32 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         return len(self.edf_files)
 
+    def _select_grouped_channels(self, x_df: pd.DataFrame) -> pd.DataFrame:
+        if len(self.channel_groups) == 0:
+            return x_df
+
+        available_columns = list(x_df.columns)
+        selected_columns = []
+        renamed_columns = self.channel_groups.keys()
+
+        # Emit one sampled representative per configured group and rename the
+        # result to the conceptual group name so downstream code sees stable columns.
+        for group, group_channels in self.channel_groups.items():
+            available = [col for col in available_columns if col in set(group_channels)]
+            if len(available) == 0:
+                raise ValueError(f"No available channels found for group '{group}'.")
+
+            selected_columns.append(str(np.random.choice(available)))
+
+        x_selected = x_df.loc[:, selected_columns].copy()
+        x_selected.columns = renamed_columns
+        return x_selected
+
     def __len__(self):
         return sum([f.length for f in self.edf_files])
 
     @staticmethod
     def trim_wake(
-        data_df: pd.DataFrame,
         label_df: Optional[pd.DataFrame],
         label_extra_df: Optional[pd.DataFrame],
         wake_label: str = "wake",
@@ -391,21 +415,10 @@ class BaseDataset(Dataset, ABC):
         self.initialized = True
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
-        # start_date:pd.Timestamp, end_date, channels, sample_frequency, resample_type)
         end_date = start_date + self.total_input
-        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
-        
-        if self.rereference:
-            for refchannels in self.rereference:
-                ref_cols = [r for r in refchannels if r in x_df.columns]
-                if ref_cols:
-                    x_df[ref_cols] = x_df[ref_cols].values - x_df[ref_cols].values.mean(axis=1)[:,None]
-
-        # Target time at center for window/sequence modes
-        t_center = x_df.index[0] + (self.total_input // 2 - self.target_resolution // 2)
+        t_center = start_date + (self.total_input // 2 - self.target_resolution // 2)
         item: Dict[str, Any] = {"patient": file.path, "time": t_center}
-        
-        #if self.event_mapping is not None and len(self.classes) > 0:
+
         if file.labels:
             start_date_label = t_center
             end_date_label = start_date_label + self.target_resolution
@@ -413,6 +426,23 @@ class BaseDataset(Dataset, ABC):
             item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.classes) 
             if file.labels_extra:
                 item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.classes) 
+
+        if self.get_target_callback is not None:
+            target_item = self.get_target_callback(
+                target=item.get("target"),
+                target_extra=item.get("target_extra"),
+            )
+            if target_item is None:
+                return None
+            item.update(target_item)
+
+        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
+        
+        if self.rereference:
+            for refchannels in self.rereference:
+                ref_cols = [r for r in refchannels if r in x_df.columns]
+                if ref_cols:
+                    x_df[ref_cols] = x_df[ref_cols].values - x_df[ref_cols].values.mean(axis=1)[:,None]
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for
@@ -433,14 +463,9 @@ class BaseDataset(Dataset, ABC):
         if self.transform is not None:
             for t in self.transform:
                 x_df = t(x_df)
-            
-        if self.get_item_callback is not None:
-            item = self.get_item_callback(data=x_df, **item)
-        else:
-            item["data"] = torch.from_numpy(x_df.values).float()
 
-        if item is not None and self.filter_item_callback is not None and not self.filter_item_callback(item):
-            return None
+        x_df = self._select_grouped_channels(x_df)
+        item["data"] = torch.from_numpy(x_df.values).float()
 
         return item
 

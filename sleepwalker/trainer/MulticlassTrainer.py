@@ -76,21 +76,18 @@ class MulticlassTrainer(ABC):
         return out
 
     @staticmethod
-    def get_item(patient, time, data, target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
+    def get_target(target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
         try:
             freq = pd.to_timedelta(target.index.freq).total_seconds()
             targets = torch.tensor(target.sum().to_numpy())
             target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
 
-            item = {"patient":patient, "time":time, "target":target}
+            item = {"target":target}
 
             if class_cnts and len(class_cnts) == len(target):
-                # rejection sampling 
                 probas = class_cnts / np.sum(class_cnts)
                 m = min(probas)
-                if random.random() <= m / probas[target.argmax()]:
-                    pass #accept
-                else:
+                if random.random() > m / probas[target.argmax()]:
                     return None
 
             if target_extra is not None:
@@ -99,7 +96,6 @@ class MulticlassTrainer(ABC):
                 target_extra = MulticlassTrainer.target_to_multiclass(targets, None, len(target_extra)*freq*percentage, True)
                 item["target_extra"] = target_extra
 
-            item["data"] = torch.from_numpy(data.values).float()
             return item
         except Exception as e:
             pass

@@ -147,9 +147,9 @@ class BaseDataset(Dataset, ABC):
     """
     Base class for EDF-backed datasets.
 
-    The sample pipeline is intentionally split into three optional stages:
+    The sample pipeline is intentionally split into four optional stages:
 
-    1. `filter_patient`
+    1. `filter_target`
        Runs once per patient after loading the raw signal and event tables.
        Use this to clean or trim label tables and to reject entire patients by
        returning `None`.
@@ -185,9 +185,9 @@ class BaseDataset(Dataset, ABC):
         target_resolution: str | pd.Timedelta = "30s",
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
-        build_target: Optional[Callable] = None,
         filter_target: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]]] = None,
         filter_window: Optional[Callable] = None,
+        build_target: Optional[Callable] = None,
         build_sample: Optional[Callable] = None,
         num_workers:int = 4,
         online_max_tries:int = 128,
@@ -390,36 +390,6 @@ class BaseDataset(Dataset, ABC):
         )
         self.initialized = True
 
-    def run_filter_window(self, item: Dict[str, Any]) -> bool:
-        if self.filter_window_callback is None:
-            return True
-
-        keep_window = self.filter_window_callback(
-            target=item.get("target"),
-            target_extra=item.get("target_extra"),
-            patient=item.get("patient"),
-            time=item.get("time"),
-        )
-        if keep_window is None:
-            return False
-        if isinstance(keep_window, bool):
-            return keep_window
-        raise ValueError(f"filter_window must return bool or None, but received {type(keep_window)}.")
-
-    def run_build_target(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if self.build_target_callback is not None:
-            built_target = self.build_target_callback(
-                target=item.get("target"),
-                target_extra=item.get("target_extra"),
-                patient=item.get("patient"),
-                time=item.get("time"),
-            )
-            if built_target is None:
-                return None
-            return built_target
-
-        return {}
-
     def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if len(self.channel_groups) > 0:
             available_columns = list(x_df.columns)
@@ -464,13 +434,30 @@ class BaseDataset(Dataset, ABC):
             if file.labels_extra:
                 item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
 
-        if not self.run_filter_window(item):
-            return None
+        if self.filter_window_callback is not None:
+            keep_window = self.filter_window_callback(
+                target=item.get("target"),
+                target_extra=item.get("target_extra"),
+                patient=item.get("patient"),
+                time=item.get("time"),
+            )
+            if keep_window is None:
+                return None
+            if not isinstance(keep_window, bool):
+                raise ValueError(f"filter_window must return bool or None, but received {type(keep_window)}.")
+            if not keep_window:
+                return None
 
-        built_target = self.run_build_target(item)
-        if built_target is None:
-            return None
-        item.update(built_target)
+        if self.build_target_callback is not None:
+            built_target = self.build_target_callback(
+                target=item.get("target"),
+                target_extra=item.get("target_extra"),
+                patient=item.get("patient"),
+                time=item.get("time"),
+            )
+            if built_target is None:
+                return None
+            item.update(built_target)
 
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
         

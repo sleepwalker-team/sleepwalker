@@ -48,6 +48,10 @@ class MultiDataset(Dataset):
         self.datasets = datasets
         self.len = sum([len(d) for d in datasets])
         self.extra_target = all([d.has_extra_target() for d in datasets])
+        self.sample_frequency = datasets[0].sample_frequency
+        self.target_resolution = datasets[0].target_resolution
+        self.total_input = datasets[0].total_input
+        self.channels = datasets[0].channels
 
     def get_n_datasets(self):
         return len(self.datasets)

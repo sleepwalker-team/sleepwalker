@@ -11,7 +11,7 @@ from sleepwalker.models.Basemodel import BaseModel
 
 
 def trim_wake(
-    data_df: pd.DataFrame,
+    data_df: Optional[pd.DataFrame],
     label_df: Optional[pd.DataFrame],
     label_extra_df: Optional[pd.DataFrame],
     wake_label: str = "wake",

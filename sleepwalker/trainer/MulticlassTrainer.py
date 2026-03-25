@@ -6,13 +6,14 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
 
+from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
 
 class MulticlassTrainer(ABC):
@@ -28,6 +29,8 @@ class MulticlassTrainer(ABC):
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
         train_transform: Optional[list[Callable]] = None,
+        n_repeat_train: int = 1,
+        n_repeat_test: int = 1,
     ):
         self.epochs = epochs
         self.save_every = save_every
@@ -38,6 +41,8 @@ class MulticlassTrainer(ABC):
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
         self.train_transform = train_transform
+        self.n_repeat_train = n_repeat_train
+        self.n_repeat_test = n_repeat_test
 
         # Normalize class names once or keep original; here we keep original
         self.classes = classes
@@ -98,6 +103,35 @@ class MulticlassTrainer(ABC):
 
         return model
 
+    def _wrap_loader_with_repeats(self, loader, n_repeat: int, shuffle_default: bool):
+        sampler = getattr(loader, "sampler", None)
+        if n_repeat <= 1:
+            return loader
+
+        if isinstance(sampler, RepeatSampler):
+            if sampler.n_repeat != n_repeat:
+                logger.warning("Found a different n_repeat value in given sampler. Using supplied n_repeat")
+            return loader
+
+        if sampler is None:
+            sampler = RandomSampler(loader.dataset) if shuffle_default else SequentialSampler(loader.dataset)
+        sampler = RepeatSampler(sampler, n_repeat=n_repeat)
+
+        loader_kwargs = {
+            "dataset": loader.dataset,
+            "batch_size": loader.batch_size * n_repeat,
+            "shuffle": False,
+            "sampler": sampler,
+            "num_workers": loader.num_workers,
+            "collate_fn": loader.collate_fn,
+            "drop_last": loader.drop_last,
+            "pin_memory": loader.pin_memory,
+            "persistent_workers": loader.persistent_workers,
+        }
+        if loader.num_workers > 0 and loader.prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = loader.prefetch_factor
+        return DataLoader(**loader_kwargs)
+
     def run_epoch(self, loader, opt, model, prefix=""):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
@@ -107,6 +141,7 @@ class MulticlassTrainer(ABC):
         cnt = 0
 
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
+        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
 
         for batch in loader:
             x = batch["data"].to(self.device)
@@ -114,11 +149,23 @@ class MulticlassTrainer(ABC):
 
             if opt is not None:
                 x = self.apply_train_transform(x)
-            
-            if opt is not None: 
                 opt.zero_grad(set_to_none=True)
-            
-            logits = model(x)
+
+            if n_repeat > 1:
+                if x.shape[0] % n_repeat != 0:
+                    raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
+                base_batch = x.shape[0] // n_repeat
+                x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
+                y = y.view(base_batch, n_repeat, *y.shape[1:])[:, 0]
+
+                logits_sum = None
+                for repeat_idx in range(n_repeat):
+                    current_logits = model(x_grouped[:, repeat_idx])
+                    logits_sum = current_logits if logits_sum is None else logits_sum + current_logits
+                logits = logits_sum / n_repeat
+            else:
+                logits = model(x)
+
             loss = self.loss_function(logits, y)
             
             target_np = y.argmax(axis=1).cpu().numpy()
@@ -155,12 +202,17 @@ class MulticlassTrainer(ABC):
         return epoch_loss, cm_sum  
     
     def test(self, model: BaseModel, test_loader):
+        test_loader = self._wrap_loader_with_repeats(test_loader, self.n_repeat_test, shuffle_default=False)
         model.eval()
         with torch.inference_mode():
             test_loss, test_cm = self.run_epoch(test_loader, None, model, f"TEST") 
         return test_loss, test_cm
     
     def fit(self, model: BaseModel, train_loader, val_loader = None):
+        train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)
+        if val_loader is not None:
+            val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)
+
         opt = self.optimizer_fn(model)
 
         if self.lr_scheduler_fn is not None:

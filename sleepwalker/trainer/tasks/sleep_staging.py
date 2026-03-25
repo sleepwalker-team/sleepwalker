@@ -18,16 +18,19 @@ from sleepwalker.datasets.NCHSDB import NCHSDB
 from sleepwalker.datasets.SHHS import SHHS
 from sleepwalker.datasets.SVUH_UCD import SVUH_UCD
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
+from sleepwalker.datasets.augmentation.RandomPolarityFlip import RandomPolarityFlip
+from sleepwalker.datasets.augmentation.RandomResampleJitter import RandomResampleJitter
 from sleepwalker.datasets.augmentation.TimeShiftAndCrop import TimeShiftAndCrop
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.models import SleepTransformer
 from sleepwalker.models.AttnSleep import AttnSleep
 from sleepwalker.models.MRASleepNet import MRASleepNet
 from sleepwalker.models.SeqSleepNet import SeqSleepNet
 from sleepwalker.models.TinySleepNet import TinySleepNet
 from sleepwalker.models.USleep import USleep
-from sleepwalker.trainer.GroupedChannelMulticlassTrainer import GroupedChannelMulticlassTrainer
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
+from sleepwalker.trainer.NegativeGroupedChanelMulticlassTrainer import GradReverseTrainer
 from sleepwalker.trainer.losses import dice_loss
 
 TARGET_CLASSES = ["wake", "n1", "n2", "n3", "rem"]
@@ -49,7 +52,17 @@ DATASET_CFG = {
             "rem sleep|5": "rem",
         },
         "channels": [ChannelConfig("C4")],
-        "grouped_channels": [ChannelConfig("C3", group="eeg"), ChannelConfig("C4", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("F3", group="eeg"),
+            ChannelConfig("F4", group="eeg"),
+            ChannelConfig("C3", group="eeg"),
+            ChannelConfig("C4", group="eeg"),
+            ChannelConfig("O1", group="eeg"),
+            ChannelConfig("O2", group="eeg"),
+            ChannelConfig("M1", group="eeg"),
+            ChannelConfig("M2", group="eeg"),
+        ],
+        "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
     "cap": {
         "clazz": CAP,
@@ -63,7 +76,13 @@ DATASET_CFG = {
             "W": "wake",
         },
         "channels": [ChannelConfig("C4-A1")],
-        "grouped_channels": [ChannelConfig("C3-A2", group="eeg"), ChannelConfig("C4-A1", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("F4-C4", group="eeg"),
+            ChannelConfig("P4-O2", group="eeg"),
+            ChannelConfig("C4-P4", group="eeg"),
+            ChannelConfig("C4-A1", group="eeg"),
+        ],
+        "grouped_rereference": [["F4-C4", "P4-O2", "C4-P4", "C4-A1"]],
     },
     "isruc": {
         "clazz": ISRUC,
@@ -78,7 +97,15 @@ DATASET_CFG = {
             "w": "wake",
         },
         "channels": [ChannelConfig("C4-M1")],
-        "grouped_channels": [ChannelConfig("C3-M2", group="eeg"), ChannelConfig("C4-M1", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("F3-M2", group="eeg"),
+            ChannelConfig("C3-M2", group="eeg"),
+            ChannelConfig("O1-M2", group="eeg"),
+            ChannelConfig("F4-M1", group="eeg"),
+            ChannelConfig("C4-M1", group="eeg"),
+            ChannelConfig("O2-M1", group="eeg"),
+        ],
+        "grouped_rereference": [["F3-M2", "C3-M2", "O1-M2", "F4-M1", "C4-M1", "O2-M1"]],
     },
     "mnc": {
         "clazz": MNC,
@@ -91,7 +118,13 @@ DATASET_CFG = {
             "wake": "wake",
         },
         "channels": [ChannelConfig("C4")],
-        "grouped_channels": [ChannelConfig("C3", group="eeg"), ChannelConfig("C4", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("F3", group="eeg"),
+            ChannelConfig("F4", group="eeg"),
+            ChannelConfig("C4", group="eeg"),
+            ChannelConfig("C3", group="eeg"),
+        ],
+        "grouped_rereference": [["F3", "F4", "C4", "C3"]],
     },
     "nchsdb": {
         "clazz": NCHSDB,
@@ -107,7 +140,15 @@ DATASET_CFG = {
             "Sleep stage N3": "n3",
         },
         "channels": [ChannelConfig("EEG C4-M1")],
-        "grouped_channels": [ChannelConfig("EEG C3-M2", group="eeg"), ChannelConfig("EEG C4-M1", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("EEG C3-M2", group="eeg"),
+            ChannelConfig("EEG O2-M1", group="eeg"),
+            ChannelConfig("EEG O1-M2", group="eeg"),
+            ChannelConfig("EEG F3-M2", group="eeg"),
+            ChannelConfig("EEG C4-M1", group="eeg"),
+            ChannelConfig("EEG F4-M1", group="eeg"),
+        ],
+        "grouped_rereference": [["EEG C3-M2", "EEG O2-M1", "EEG O1-M2", "EEG F3-M2", "EEG C4-M1", "EEG F4-M1"]],
     },
     "svuhucd": {
         "clazz": SVUH_UCD,
@@ -122,6 +163,7 @@ DATASET_CFG = {
         },
         "channels": [ChannelConfig("C4A1")],
         "grouped_channels": [ChannelConfig("C3A2", group="eeg"), ChannelConfig("C4A1", group="eeg")],
+        "grouped_rereference": [["C3A2", "C4A1"]],
     },
     "shhs": {
         "clazz": SHHS,
@@ -148,7 +190,13 @@ DATASET_CFG = {
             "W": "wake",
         },
         "channels": [ChannelConfig("C4_M1")],
-        "grouped_channels": [ChannelConfig("C3_M2", group="eeg"), ChannelConfig("C4_M1", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("C3_M2", group="eeg"),
+            ChannelConfig("C4_M1", group="eeg"),
+            ChannelConfig("O2_M1", group="eeg"),
+            ChannelConfig("O1_M2", group="eeg"),
+        ],
+        "grouped_rereference": [["C3_M2", "C4_M1", "O2_M1", "O1_M2"]],
     },
     "mros": {
         "clazz": MROS,
@@ -163,6 +211,7 @@ DATASET_CFG = {
         },
         "channels": [ChannelConfig("C4")],
         "grouped_channels": [ChannelConfig("C3", group="eeg"), ChannelConfig("C4", group="eeg")],
+        "grouped_rereference": [["C3", "C4"]],
     },
     "ruhrland": {
         "clazz": Ruhrlandklinik,
@@ -175,7 +224,17 @@ DATASET_CFG = {
             "rem": "rem",
         },
         "channels": [ChannelConfig("C4")],
-        "grouped_channels": [ChannelConfig("C4", group="eeg")],
+        "grouped_channels": [
+            ChannelConfig("F3", group="eeg"),
+            ChannelConfig("F4", group="eeg"),
+            ChannelConfig("C3", group="eeg"),
+            ChannelConfig("C4", group="eeg"),
+            ChannelConfig("O1", group="eeg"),
+            ChannelConfig("O2", group="eeg"),
+            ChannelConfig("M1", group="eeg"),
+            ChannelConfig("M2", group="eeg"),
+        ],
+        "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
     "sleepedfx": {
         "clazz": SleepEDFx,
@@ -190,6 +249,7 @@ DATASET_CFG = {
         },
         "channels": [ChannelConfig("EEG Fpz-Cz")],
         "grouped_channels": [ChannelConfig("EEG Fpz-Cz", group="eeg"), ChannelConfig("EEG Pz-Oz", group="eeg")],
+        "grouped_rereference": [["EEG Fpz-Cz", "EEG Pz-Oz"]],
     },
 }
 
@@ -203,6 +263,19 @@ MODEL_CFG = {
         ),
         "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         "loss_function": torch.nn.functional.cross_entropy,
+    },
+    "sleeptransformer-aug": {
+        "clazz": SleepTransformer,
+        "total_input": "630s",
+        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1, end_factor=1e-2, total_iters=50
+        ),
+        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
+        "loss_function": torch.nn.functional.cross_entropy,
+        "transform": [
+            RandomPolarityFlip(p=0.3, flip_p=0.1),
+            RandomResampleJitter(p=0.5, scale=0.05),
+        ],
     },
     "attnsleep": {
         "clazz": AttnSleep,
@@ -277,8 +350,8 @@ def get_dataset(
     patients,
     path_root: str = "/raid/sleepwalker",
     grouped: bool = False,
-    filter_target=None,
     filter_window=None,
+    filter_target=None,
     build_target=None,
     build_sample=None,
     num_workers: int | None = None,
@@ -299,6 +372,9 @@ def get_dataset(
     clazz = dataset_cfg["clazz"]
     edf_path = os.path.join(path_root, dataset_cfg["edf_path"])
     event_mapping = dataset_cfg["event_mapping"]
+    if patients is None:
+        patients = get_edf_files_in_repo(edf_path, recursive=True)
+    rereference = dataset_cfg.get("grouped_rereference") if grouped else None
 
     return clazz(
         channels=[
@@ -313,28 +389,31 @@ def get_dataset(
         num_workers=num_workers,
         sample_frequency=sample_frequency,
         event_mapping=event_mapping,
-        filter_patient=filter_target,
+        filter_target=filter_target,
         filter_window=filter_window,
         build_target=build_target,
         build_sample=build_sample,
         total_input=model_cfg["total_input"] if total_input is None else total_input,
         target_resolution=target_resolution,
+        rereference=rereference,
     )
 
 
 def get_model_and_trainer(
     name: str,
     dataset,
+    batch_size: int,
+    epochs: int,
+    n_samples: int,
     dry_run: bool = False,
-    grouped: bool = False,
+    grad_reversal: bool = False,
 ):
     if name not in MODEL_CFG:
         raise ValueError(f"Unknown sleep staging model '{name}'.")
 
     model_cfg = copy.deepcopy(MODEL_CFG[name])
-    batch_size = TASK_DEFAULTS["batch_size"]
-    epochs = 1 if dry_run else TASK_DEFAULTS["epochs"]
-    n_samples = 1_000 if dry_run else TASK_DEFAULTS["n_samples"]
+    epochs = 1 if dry_run else epochs
+    n_samples = 1_000 if dry_run else n_samples
 
     if "total_input_model" in model_cfg:
         freq = pd.to_timedelta(1.0 / dataset.sample_frequency, unit="s")
@@ -360,17 +439,24 @@ def get_model_and_trainer(
     }
     model = clazz(**{k: v for k, v in model_kwargs.items() if k in sig.parameters})
 
-    trainer_cls = GroupedChannelMulticlassTrainer if grouped else MulticlassTrainer
-    trainer = trainer_cls(
-        epochs=epochs,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        classes=dataset.get_classes(),
-        save_every=1,
-        loss_function=loss_function,
-        early_stopping=10,
-        train_transform=model_cfg.get("transform", None),
-    )
+    trainer_kwargs = {
+        "epochs": epochs,
+        "optimizer": optimizer,
+        "lr_scheduler": lr_scheduler,
+        "classes": dataset.get_classes(),
+        "save_every": 1,
+        "loss_function": loss_function,
+        "early_stopping": 10,
+        "train_transform": model_cfg.get("transform", None),
+    }
+    if grad_reversal:
+        trainer = GradReverseTrainer(
+            feature_dim=512,
+            n_domains=dataset.get_n_datasets(),
+            **trainer_kwargs,
+        )
+    else:
+        trainer = MulticlassTrainer(**trainer_kwargs)
 
     return model, trainer, {
         "batch_size": batch_size,

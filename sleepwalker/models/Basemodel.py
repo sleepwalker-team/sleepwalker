@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable, List, Optional
+from typing import Iterable, Optional
 
 import torch
 from torch import nn
@@ -26,10 +26,24 @@ class BaseModel(nn.Module, ABC):
             x = p(x)
         return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
         x = self.apply_preprocessors(x, len(self.preprocessors)+1)
-        return self._forward(x)
+        return self._features(x)
+
+    def classifier(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+        return self._classifier(x)
 
     @abstractmethod
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+    def feature_dim(self) -> int:  # pragma: no cover - abstract
+        ...
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.features(x))
+
+    @abstractmethod
+    def _features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+        ...
+
+    @abstractmethod
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
         ...

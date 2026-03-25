@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from functools import partial
 import os
-from typing import List, Optional, Sequence, Tuple
+import multiprocessing
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import torch
 import xmltodict as xtd
 from torch.utils.data import DataLoader
 from torch.utils.data import RandomSampler
+from torch.utils.data import Sampler
 
 from sklearn.model_selection import KFold
 
@@ -23,6 +25,76 @@ import pandas as pd
 from collections import Counter
 from torch.utils.data import DataLoader
 from sleepwalker.utils import logger
+
+
+class RepeatSampler(Sampler[int]):
+    def __init__(self, sampler: Sampler[int], n_repeat: int = 1):
+        if n_repeat <= 0:
+            raise ValueError("n_repeat must be positive.")
+        self.sampler = sampler
+        self.n_repeat = n_repeat
+
+    def __iter__(self):
+        for idx in self.sampler:
+            for _ in range(self.n_repeat):
+                yield idx
+
+    def __len__(self):
+        return len(self.sampler) * self.n_repeat
+
+def _collect_patient_stats_one(args):
+    patient, summarize_patient = args
+    try:
+        return patient, summarize_patient(patient), None
+    except Exception as exc:
+        return patient, None, exc
+
+def collect_patient_stats(
+    patients: Sequence[str | os.PathLike],
+    summarize_patient: Callable[[str | os.PathLike], Optional[dict]],
+    num_workers: int = 0,
+    drop_failed: bool = True,
+) -> pd.DataFrame:
+    rows: list[dict] = []
+    patient_list = list(patients)
+
+    logger.progress_start(len(patient_list), desc="Collecting patient stats", leave=True)
+    if num_workers > 1:
+        with multiprocessing.Pool(num_workers) as pool:
+            results = pool.imap(_collect_patient_stats_one, [(patient, summarize_patient) for patient in patient_list])
+            for patient, row, exc in results:
+                try:
+                    if exc is not None:
+                        if not drop_failed:
+                            raise exc
+                        logger.warning(f"Failed to summarize patient {patient}: {exc}")
+                        continue
+                    if row is None:
+                        continue
+                    current_row = dict(row)
+                    current_row.setdefault("patient", patient)
+                    rows.append(current_row)
+                finally:
+                    logger.progress_advance(1)
+    else:
+        for patient in patient_list:
+            try:
+                row = summarize_patient(patient)
+                if row is None:
+                    continue
+                current_row = dict(row)
+                current_row.setdefault("patient", patient)
+                rows.append(current_row)
+            except Exception as exc:
+                if not drop_failed:
+                    raise
+                logger.warning(f"Failed to summarize patient {patient}: {exc}")
+            finally:
+                logger.progress_advance(1)
+
+    logger.progress_close()
+    logger.info(f"Collected patient stats for {len(rows)}/{len(patient_list)} patients.")
+    return pd.DataFrame(rows)
 
 
 def summarize_dataset(
@@ -133,13 +205,13 @@ def summarize_dataset(
 
     # --- (3) Dataset setup ---
     dataset = dataset_clazz(
-        patients=edf_files,
         channels=[ChannelConfig(name=channel_name, normalizer=None)],
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,
         num_workers=8
     )
+    dataset.initialize(edf_files, 8)
 
     # always include known class list
     dataset_classes = getattr(dataset, "classes", None)

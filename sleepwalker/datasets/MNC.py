@@ -61,22 +61,13 @@ def read_mnc(xml_path: str, start_date: datetime) -> pd.DataFrame:
 
     return df[["Label", "Starttime", "Endtime", "Duration"]]
 
-def read_xml(fpath, trim_wake, start_date):
+def read_xml(fpath, start_date):
     name = Path(fpath).name.split(".edf")[0]
     folder = Path(fpath).parent
     
     xml_path = os.path.join(folder, f"{name}.xml")
     xml_df = read_mnc(xml_path, start_date)
 
-    if trim_wake:
-        idx = xml_df[xml_df["Label"].isin(["nrem1", "nrem2", "nrem3", "rem"]) ].first_valid_index()
-        first_event_timestamp = xml_df.loc[idx]["Starttime"]
-
-        idx = xml_df[xml_df["Label"].isin(["nrem1", "nrem2", "nrem3", "rem"]) ].last_valid_index()
-        last_event_timestamp = xml_df.loc[idx]["Starttime"]
-        xml_df.loc[xml_df["Endtime"] < (first_event_timestamp - pd.to_timedelta(trim_wake)), "Label"] = None
-        xml_df.loc[xml_df["Starttime"] > (last_event_timestamp + pd.to_timedelta(trim_wake)), "Label"] = None
-    
     xml_df = xml_df[["Label", "Starttime", "Endtime"]].dropna()
 
     if len(xml_df) == 0:
@@ -152,12 +143,9 @@ class MNC(BaseDataset):
     """
 
     def __init__(self, 
-            trim_wake = "30m",
             ignore_patients_with_partial_events = False,
             **kwargs
         ): 
-        
-        self.trim_wake = trim_wake
         self.ignore_patients_with_partial_events = ignore_patients_with_partial_events
         super().__init__(**kwargs)
 
@@ -165,7 +153,7 @@ class MNC(BaseDataset):
         return False
 
     def get_event_df(self, fpath, start_date):
-        df = read_xml(fpath, self.trim_wake, start_date)
+        df = read_xml(fpath, start_date)
 
         if self.ignore_patients_with_partial_events and len(self.event_mapping) > 0:
             vals = sorted(set([v for k, v in self.event_mapping.items() if k != "default_class"]))

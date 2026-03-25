@@ -53,7 +53,7 @@ class USleep(BaseModel):
         *,
         ts_len, 
         n_channels,
-        classes,
+        classes=None,
         sampling_frequency,
         depth=4,
         init_filters=16,
@@ -65,7 +65,7 @@ class USleep(BaseModel):
         ):
         super().__init__(preprocessors=[RobustScaler()])
 
-        self.classes = classes
+        self.classes = list(classes) if classes is not None else None
         self.ts_len = ts_len
         self.n_channels = n_channels
         self.sampling_frequency = sampling_frequency
@@ -115,14 +115,18 @@ class USleep(BaseModel):
                                     dilation=1, padding=kernel_size//2))
             self.bottom_channels = ch
 
-        self.final_conv = nn.Conv1d(self.bottom_channels, len(self.classes), kernel_size=1)
+        feature_channels = len(self.classes) if self.classes is not None else self.bottom_channels
+        self.final_conv = nn.Conv1d(self.bottom_channels, feature_channels, kernel_size=1)
         self.avg_pool = nn.AvgPool1d(kernel_size=self.samples_per_epoch, stride=self.samples_per_epoch)
         self.act = nn.ELU() if activation == 'elu' else nn.Tanh() if activation == "tanh" else nn.ReLU()
-        if self.output_strategy == "flatten":
+        self._feature_dim = (self.ts_len // self.samples_per_epoch) * feature_channels if self.output_strategy == "flatten" else feature_channels
+        if self.classes is not None and self.output_strategy == "flatten":
             N = self.ts_len // self.samples_per_epoch
             self.fc = nn.Linear(N*len(self.classes), len(self.classes))
+        else:
+            self.fc = None
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor: 
+    def _features(self, x: torch.Tensor) -> torch.Tensor: 
         B, T, D = x.shape
         if T % self.samples_per_epoch != 0:
             raise ValueError(f"Input time axis T={T} is not divisible by samples_per_epoch={self.samples_per_epoch}. Ensure input length matches the expected epoch segmentation.")
@@ -151,23 +155,40 @@ class USleep(BaseModel):
             x = dec(x)
 
         # Final classifier
-        x = self.final_conv(x)                          # (B*N, C, T)
-        x = self.avg_pool(x)                            # (B*N, C, 1)
-        x = x.squeeze(-1).view(B, N, len(self.classes))  # (B, N, C)
+        x = self.final_conv(x)
+        x = self.avg_pool(x)
+        x = x.squeeze(-1).view(B, N, self.final_conv.out_channels)
 
         if self.output_strategy == 'mean':
             x = x.mean(dim=1) 
         elif self.output_strategy == 'center':
-            x = x[:, x.shape[2] // 2, :]
+            x = x[:, x.shape[1] // 2, :]
         elif self.output_strategy == 'last':
             x = x[:, -1, :]
         elif self.output_strategy == 'flatten':
             x = x.view(B, -1)
-            x = self.fc(x)
         elif self.output_strategy == "sequence":
             x = x.reshape(B*N, -1)
         else:
             raise ValueError(f"Unknown temporal reduction mode: {self.output_strategy}")
-    
+
+        return x
+
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.classes is None:
+            raise ValueError("USleep.classifier() requires classes to be set.")
+        if self.output_strategy == "flatten":
+            if self.fc is None:
+                raise ValueError("USleep.classifier() requires classes to be set.")
+            return self.fc(x)
+        if self.output_strategy == "sequence":
+            if x.shape[-1] != len(self.classes):
+                raise ValueError("USleep sequence features do not align with the class dimension.")
+            return x
+        if x.shape[-1] != len(self.classes):
+            raise ValueError("USleep features do not align with the class dimension.")
         return x
         

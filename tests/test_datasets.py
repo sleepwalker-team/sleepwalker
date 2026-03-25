@@ -1,8 +1,13 @@
 import os
 from pathlib import Path
 import pytest
+from unittest.mock import Mock
 
-from sleepwalker.datasets.Basedataset import ChannelConfig
+import numpy as np
+import pandas as pd
+import torch
+
+from sleepwalker.datasets.Basedataset import ChannelConfig, BaseDataset, EDFFile, EventIndex, batch_collate
 from sleepwalker.datasets.CAP import CAP
 from sleepwalker.datasets.MNC import MNC
 from sleepwalker.datasets.MultiDataset import MultiDataset
@@ -22,7 +27,9 @@ from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
-from sleepwalker.datasets.utils import get_edf_files_in_repo
+from sleepwalker.datasets.utils import RepeatSampler, get_edf_files_in_repo
+from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
+from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 
 from dotenv import load_dotenv
 
@@ -43,6 +50,238 @@ def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending
 def run_test(dataset_clazz, channel_name, edf_path, num_batches, batch_size = 128, num_patients = 5, ending=".edf"):
     dataset = build_dataset(dataset_clazz, channel_name, edf_path, num_patients, ending)    
     iterate_dataset(dataset, num_batches, batch_size)
+
+
+class DummyDataset(BaseDataset):
+    def initialize(self, patients, num_workers=4):
+        self.edf_files = []
+        self.lower_bounds = []
+        self.upper_bounds = []
+        self.initialized = True
+
+    def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        raise NotImplementedError
+
+
+def create_dummy_file() -> EDFFile:
+    start = pd.Timestamp("2024-01-01T00:00:00")
+    events = pd.DataFrame(
+        {
+            "Starttime": [start],
+            "Endtime": [start + pd.Timedelta(seconds=30)],
+            "Label": ["wake"],
+        }
+    )
+    return EDFFile(
+        channels=["EEG"],
+        path="dummy.edf",
+        start_date=start,
+        labels=EventIndex(events),
+        length=1,
+    )
+
+
+def test_get_item_rejects_before_loading_signal():
+    task_config = {
+        "task": {
+            "task": "task",
+            "labels": ["n1", "wake"],
+            "default": None,
+            "percentage": 0.5,
+            "target_resolution": pd.Timedelta(seconds=30),
+            "n_steps": 1,
+        }
+    }
+    dataset = DummyDataset(
+        channels=[ChannelConfig(name="EEG")],
+        sample_frequency=1,
+        total_input="30s",
+        target_resolution="30s",
+        event_mapping={"wake": "wake"},
+        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+            target=target,
+            target_extra=target_extra,
+            class_cnts=[1.0, 100.0],
+            task_config=task_config,
+        ),
+    )
+    file = create_dummy_file()
+    file.get_x = Mock(side_effect=AssertionError("signal should not be loaded"))
+    import random
+    original_random = random.random
+    random.random = lambda: 0.5
+    try:
+        item = dataset.get_item(file, file.start_date)
+    finally:
+        random.random = original_random
+
+    assert item is None
+    file.get_x.assert_not_called()
+
+
+def test_get_item_loads_signal_after_label_precheck():
+    task_config = {
+        "task": {
+            "task": "task",
+            "labels": ["wake"],
+            "default": None,
+            "percentage": 0.5,
+            "target_resolution": pd.Timedelta(seconds=30),
+            "n_steps": 1,
+        }
+    }
+    dataset = DummyDataset(
+        channels=[ChannelConfig(name="EEG")],
+        sample_frequency=1,
+        total_input="30s",
+        target_resolution="30s",
+        event_mapping={"wake": "wake"},
+        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+            target=target,
+            target_extra=target_extra,
+            task_config=task_config,
+        ),
+    )
+    file = create_dummy_file()
+    signal = pd.DataFrame(
+        {"EEG": np.arange(30, dtype=np.float32)},
+        index=pd.date_range(file.start_date, periods=30, freq="1s"),
+    )
+    file.get_x = Mock(return_value=signal)
+
+    item = dataset.get_item(file, file.start_date)
+
+    file.get_x.assert_called_once()
+    assert item is not None
+    assert torch.equal(item["data"], torch.from_numpy(signal.values).float())
+    assert item["target"].shape == (1, 1)
+
+
+def test_grouped_channel_selection_returns_one_channel_per_group():
+    dataset = DummyDataset(
+        channels=[
+            ChannelConfig(name="C3-A2", group="eeg"),
+            ChannelConfig(name="C4-A1", group="eeg"),
+        ],
+        sample_frequency=1,
+        total_input="30s",
+        target_resolution="30s",
+        event_mapping={},
+        remove_unmapped_events=False,
+    )
+    signal = pd.DataFrame(
+        {
+            "C3-A2": np.arange(30, dtype=np.float32),
+            "C4-A1": np.arange(30, dtype=np.float32) + 100,
+        },
+        index=pd.date_range("2024-01-01", periods=30, freq="1s"),
+    )
+
+    selected = dataset._select_grouped_channels(signal)
+
+    assert list(selected.columns) == ["eeg"]
+    assert selected.shape[1] == 1
+
+
+def test_repeat_sampler_repeats_indices():
+    class FixedSampler:
+        def __iter__(self):
+            return iter([0, 2, 4])
+
+        def __len__(self):
+            return 3
+
+    sampler = RepeatSampler(FixedSampler(), n_repeat=3)
+
+    assert list(iter(sampler)) == [0, 0, 0, 2, 2, 2, 4, 4, 4]
+
+
+def test_grouped_multiclass_trainer_averages_repeats():
+    class IdentityModel(torch.nn.Module):
+        preprocessors = []
+
+        def forward(self, x):
+            return x
+
+    class Loader(list):
+        batch_size = 4
+        sampler = RepeatSampler([0, 1], n_repeat=2)
+
+    batch = {
+        "data": torch.tensor(
+            [
+                [4.0, 0.0],
+                [-2.0, 0.0],
+                [0.0, 4.0],
+                [0.0, -2.0],
+            ]
+        ),
+        "target": torch.tensor(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+            ]
+        ),
+    }
+    loader = Loader([batch])
+    trainer = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
+        classes=["wake", "rem"],
+        loss_function=torch.nn.functional.cross_entropy,
+        device="cpu",
+        n_repeat_test=2,
+    )
+    trainer.steps = {"train": 0, "val": 0, "test": 0}
+    trainer.epoch_step = 0
+
+    loss, cm = trainer.run_epoch(loader, None, IdentityModel(), prefix="TEST")
+
+    assert loss >= 0
+    assert cm.sum() == 2
+    assert cm.trace() == 2
+
+
+def test_grouped_multiclass_trainer_test_wraps_loader_with_repeat_sampler():
+    class IdentityModel(torch.nn.Module):
+        preprocessors = []
+
+        def forward(self, x):
+            return x
+
+    class FixedDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, idx):
+            data = torch.tensor([4.0, 0.0]) if idx == 0 else torch.tensor([0.0, 4.0])
+            target = torch.tensor([1.0, 0.0]) if idx == 0 else torch.tensor([0.0, 1.0])
+            return {"data": data, "target": target, "patient": str(idx), "time": pd.Timestamp("2024-01-01")}
+
+    loader = torch.utils.data.DataLoader(
+        FixedDataset(),
+        batch_size=2,
+        shuffle=False,
+        collate_fn=lambda x: batch_collate(x, ignore_list=["time", "patient"]),
+    )
+    trainer = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
+        classes=["wake", "rem"],
+        loss_function=torch.nn.functional.cross_entropy,
+        device="cpu",
+        n_repeat_test=2,
+    )
+    trainer.steps = {"train": 0, "val": 0, "test": 0}
+    trainer.epoch_step = 0
+
+    loss, cm = trainer.test(IdentityModel(), loader)
+
+    assert loss >= 0
+    assert cm.sum() == 2
+    assert cm.trace() == 2
 
 def test_synthetic_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))

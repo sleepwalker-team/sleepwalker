@@ -1,25 +1,15 @@
-import random
-from typing import List, Optional
 import numpy as np
-import pandas as pd
 from sklearn.metrics import confusion_matrix
-from torch.utils.data import DataLoader
 import torch
-from dataclasses import dataclass
 
-from sleepwalker.models.Basemodel import BaseModel
-from sleepwalker.trainer.GroupedChannelMulticlassTrainer import GroupedChannelMulticlassTrainer
+from sleepwalker.datasets.utils import RepeatSampler
+from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.utils import logger
 
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
+from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
-from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-
-import torch
 import torch.nn as nn
 from torch.autograd import Function
-import numpy as np
-from sklearn.metrics import confusion_matrix
 
 # --------------------------
 # Gradient Reversal Function
@@ -68,19 +58,45 @@ class GradReverseTrainer(MulticlassTrainer):
         cnt = 0
 
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
+        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
 
         for batch in loader:
             x = batch["data"].to(self.device)
             y = batch["target"].to(self.device)
             domains = torch.tensor(batch["dataset"], dtype=torch.long, device=self.device)
 
+            if opt is not None:
+                x = self.apply_train_transform(x)
+
+            if n_repeat > 1:
+                if x.shape[0] % n_repeat != 0:
+                    raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
+                base_batch = x.shape[0] // n_repeat
+                x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
+                y = y.view(base_batch, n_repeat, *y.shape[1:])[:, 0]
+                domains = domains.view(base_batch, n_repeat)[:, 0]
+            else:
+                base_batch = x.shape[0]
+
             if opt is not None: 
                 opt.zero_grad(set_to_none=True)
             
-            # logits = model(x)
-            x = model.apply_preprocessors(x, len(model.preprocessors)+1)
-            feats = model.features(x)  # shape (B, F)
-            logits = model.classifier(feats)    # shape (B, nc)
+            if n_repeat > 1:
+                feats_sum = None
+                logits_sum = None
+                for repeat_idx in range(n_repeat):
+                    current_x = model.apply_preprocessors(x_grouped[:, repeat_idx], len(model.preprocessors) + 1)
+                    current_feats = model.features(current_x)
+                    current_logits = model.classifier(current_feats)
+                    feats_sum = current_feats if feats_sum is None else feats_sum + current_feats
+                    logits_sum = current_logits if logits_sum is None else logits_sum + current_logits
+                feats = feats_sum / n_repeat
+                logits = logits_sum / n_repeat
+            else:
+                x = model.apply_preprocessors(x, len(model.preprocessors) + 1)
+                feats = model.features(x)
+                logits = model.classifier(feats)
+
             loss_task = self.loss_function(logits, y)
 
             if mode == "train":
@@ -225,7 +241,7 @@ class GradReverseTrainer(MulticlassTrainer):
 
     #     return epoch_loss, cm_sum
 
-    def fit(self, model: BaseModel, train_loader, val_loader = None):
+    def fit(self, model, train_loader, val_loader = None):
         # TODO check model and loaders
         # TODO add annealing over epochs
         return super().fit(model, train_loader, val_loader)

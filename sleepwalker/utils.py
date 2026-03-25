@@ -264,7 +264,7 @@ class MlflowSink:
 
     def metric(self, name: str, value: float, step:int, context: str):
         # Context is ignored → metric name must be explicit
-        self.mlflow.log_metric(name, float(value), step=step)
+        self.mlflow.log_metric(name, float(value), step=step, synchronous=False)
 
     def figure(self, name: str, figure: Any, context: str):
         import tempfile, os

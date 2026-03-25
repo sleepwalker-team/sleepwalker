@@ -170,12 +170,9 @@ class CAP(BaseDataset):
     FILES_TO_EXCLUDE = ['brux1.edf', 'n4.edf', 'n8.edf', 'n16.edf', 'nfle6.edf', 'nfle25.edf', 'nfle27.edf', 'nfle33.edf', 'n12.edf', 'n16.edf']
 
     def __init__(self, 
-            trim_wake = "30m",
             disorders = ["n", "ins", "narco", "nfle", "rbd", "sdb", "brux", "plm"],
             **kwargs
         ): 
-        
-        self.trim_wake = trim_wake
         self.disorders = disorders
 
         if self.disorders is None:
@@ -224,16 +221,6 @@ class CAP(BaseDataset):
             df['Endtime'] = df['Starttime'] + df['Duration [s]'].apply(lambda row: pd.to_timedelta(f'{row} s'))
         df['Label'] = df['Sleep Stage']
         
-        if self.trim_wake:
-            sleep_stages = ["W", "S1", "S2", "S3", "W", "R"]
-            idx = df[df["Label"].isin(sleep_stages) ].first_valid_index()
-            first_event_timestamp = df.loc[idx]["Starttime"]
-
-            idx = df[df["Label"].isin(sleep_stages) ].last_valid_index()
-            last_event_timestamp = df.loc[idx]["Starttime"]
-            df.loc[df["Endtime"] < (first_event_timestamp - pd.to_timedelta(self.trim_wake)), "Label"] = None
-            df.loc[df["Starttime"] > (last_event_timestamp + pd.to_timedelta(self.trim_wake)), "Label"] = None
-
         # df["Label"] = df.apply(lambda row: None if row.Label is None else row.Label.lower().strip(), axis=1)
         # df["Label"] = df.apply(lambda row: self.event_mapping[row["Label"]] if row["Label"] in self.event_mapping else None, axis=1)
         df = df[['Label', 'Starttime', 'Endtime']].dropna()

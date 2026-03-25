@@ -182,7 +182,7 @@ class AttnSleep(BaseModel):
         *,
         n_channels: int,
         ts_len: int,
-        classes: List[str],
+        classes: List[str] | None = None,
         N: int = 2,
         d_ff: int = 80,
         h: int = 5,
@@ -193,7 +193,7 @@ class AttnSleep(BaseModel):
         super().__init__(preprocessors=preprocessors)
         self.mrcnn = MRCNN(n_channels, afr_reduced_cnn_size)
         self.h = h
-        self.classes = classes
+        self.classes = list(classes) if classes is not None else None
         
         with torch.no_grad():
             x = torch.zeros(1, n_channels, ts_len)
@@ -211,14 +211,22 @@ class AttnSleep(BaseModel):
         with torch.no_grad():
             x_encoded = self.tce(x_feat)
             flatten_len = x_encoded.flatten(1).shape[1]
-        self.fc = nn.Linear(flatten_len, len(self.classes))
+        self._feature_dim = flatten_len
+        self.fc = nn.Linear(flatten_len, len(self.classes)) if self.classes is not None else None
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
         x = x.transpose(1, 2)
         x_feat = self.mrcnn(x)
         if x_feat.shape[2] % self.h != 0:
             diff = self.h - (x_feat.shape[2] % self.h)
             x_feat = F.pad(x_feat, (0, diff))
         x_encoded = self.tce(x_feat)
-        return self.fc(x_encoded.flatten(1))
+        return x_encoded.flatten(1)
 
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fc is None or self.classes is None:
+            raise ValueError("AttnSleep.classifier() requires classes to be set.")
+        return self.fc(x)

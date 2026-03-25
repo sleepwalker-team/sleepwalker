@@ -144,6 +144,36 @@ class EventIndex:
         return df
 
 class BaseDataset(Dataset, ABC):
+    """
+    Base class for EDF-backed datasets.
+
+    The sample pipeline is intentionally split into three optional stages:
+
+    1. `filter_patient`
+       Runs once per patient after loading the raw signal and event tables.
+       Use this to clean or trim label tables and to reject entire patients by
+       returning `None`.
+
+    2. `filter_window`
+       Runs for every candidate window before the signal is loaded. It receives
+       the raw window labels (`target`, `target_extra`) and may reject the
+       window cheaply by returning `None`. This is the place for label-based
+       filtering such as class balancing or ignoring windows outside sleep.
+
+    3. `build_target`
+       Runs after window filtering and converts raw window labels into the final
+       training target representation.
+
+    4. `build_sample`
+       Runs after the window signal was loaded, re-referenced and resized. It
+       receives the signal window plus the label information and is expected to
+       return the final sample dict, typically including `data` and `target`.
+
+    `normalizers` remain part of raw data loading and may change signal values
+    but must not reject data. Model `preprocessors` remain model-side and are
+    separate from dataset preparation.
+
+    """
     def __init__(
         self,
         *,
@@ -155,9 +185,10 @@ class BaseDataset(Dataset, ABC):
         target_resolution: str | pd.Timedelta = "30s",
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
-        get_target: Optional[Callable] = None,
-        prepare_patient_data: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]]] = None,
-        transform: Optional[list[Callable]] = None,
+        build_target: Optional[Callable] = None,
+        filter_target: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]]] = None,
+        filter_window: Optional[Callable] = None,
+        build_sample: Optional[Callable] = None,
         num_workers:int = 4,
         online_max_tries:int = 128,
         force_one_day: bool = True,
@@ -173,10 +204,10 @@ class BaseDataset(Dataset, ABC):
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
-        self.get_target_callback = get_target
-        # prepare_patient_data is for preparing patient-level data/labels before indexing starts.
-        self.prepare_patient_data = prepare_patient_data
-        self.transform = transform
+        self.build_target_callback = build_target
+        self.filter_window_callback = filter_window
+        self.build_sample_callback = build_sample
+        self.filter_target_callback = filter_target
         self.all_patients = patients
         self.online_max_tries = online_max_tries
         self.initialized = False
@@ -194,15 +225,16 @@ class BaseDataset(Dataset, ABC):
         if event_mapping is not None:
             self.event_mapping = {k: v for k, v in event_mapping.items()}
             self.classes = sorted(list(set(self.event_mapping.values())))
+            self.label_classes = list(self.classes)
         else:
             self.event_mapping = None
             self.classes = []
+            self.label_classes = []
 
         if self.event_mapping is not None and self.remove_unmapped_events and len(self.event_mapping) == 0:
             logger.warning(f"You set remove_unmapped_events to true but provided an empty mapping. If you want to not extract any labels, set event_mapping to None. If you want to extract all labels, set event_mapping to an empty dictionary and remove_unmapped_events to false.")
 
         # Prepared state
-        self.ids = []
         self.initialize(self.all_patients, self.num_workers) 
 
     @abstractmethod
@@ -225,65 +257,8 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         return len(self.edf_files)
 
-    def _select_grouped_channels(self, x_df: pd.DataFrame) -> pd.DataFrame:
-        if len(self.channel_groups) == 0:
-            return x_df
-
-        available_columns = list(x_df.columns)
-        selected_columns = []
-        renamed_columns = self.channel_groups.keys()
-
-        # Emit one sampled representative per configured group and rename the
-        # result to the conceptual group name so downstream code sees stable columns.
-        for group, group_channels in self.channel_groups.items():
-            available = [col for col in available_columns if col in set(group_channels)]
-            if len(available) == 0:
-                raise ValueError(f"No available channels found for group '{group}'.")
-
-            selected_columns.append(str(np.random.choice(available)))
-
-        x_selected = x_df.loc[:, selected_columns].copy()
-        x_selected.columns = renamed_columns
-        return x_selected
-
     def __len__(self):
         return sum([f.length for f in self.edf_files])
-
-    @staticmethod
-    def trim_wake(
-        label_df: Optional[pd.DataFrame],
-        label_extra_df: Optional[pd.DataFrame],
-        wake_label: str = "wake",
-    ) -> Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]:
-        if label_df is None or len(label_df) == 0:
-            return None
-
-        label_df = label_df.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)
-        non_wake = label_df["Label"] != wake_label
-        if not non_wake.any():
-            return None
-
-        non_wake_positions = np.flatnonzero(non_wake.to_numpy())
-        first_idx = int(non_wake_positions[0])
-        last_idx = int(non_wake_positions[-1])
-        label_df = label_df.iloc[first_idx:last_idx + 1].copy()
-
-        lower = label_df["Starttime"].min()
-        upper = label_df["Endtime"].max()
-
-        if label_extra_df is not None:
-            label_extra_df = label_extra_df.copy()
-            label_extra_df = label_extra_df[
-                (label_extra_df["Endtime"] > lower) & (label_extra_df["Starttime"] < upper)
-            ]
-            if len(label_extra_df) > 0:
-                label_extra_df["Starttime"] = label_extra_df["Starttime"].clip(lower=lower, upper=upper)
-                label_extra_df["Endtime"] = label_extra_df["Endtime"].clip(lower=lower, upper=upper)
-                label_extra_df = label_extra_df[label_extra_df["Endtime"] > label_extra_df["Starttime"]]
-            else:
-                label_extra_df = None
-
-        return label_df, label_extra_df
 
     def prepare_patient(self, edf_path) -> Optional[EDFFile]:
         channel_names = [c.name for c in self.channels]
@@ -331,13 +306,13 @@ class BaseDataset(Dataset, ABC):
                 if self.force_one_day and (len(df["Starttime"].dt.date.unique()) > 2 or len(df["Endtime"].dt.date.unique()) > 2):
                     raise ValueError(f"Edf file: {edf_path} appears to be longer than one entire day. Is this a loading error? If not, set force_one_day = False")
 
-                if self.prepare_patient_data is not None:
-                    prepared = self.prepare_patient_data(data_df, df, df_additional)
+                if self.filter_target_callback is not None:
+                    prepared = self.filter_target_callback(data_df, df, df_additional)
                     if prepared is None:
                         return None
                     df, df_additional = prepared
                     if df is None or len(df) == 0:
-                        raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient_data")
+                        raise ValueError(f"Edf file: {edf_path} was filtered out in filter_patient")
 
                 classes = set(df["Label"].unique())
 
@@ -407,12 +382,74 @@ class BaseDataset(Dataset, ABC):
 
         if not self.event_mapping:
             self.classes = sorted(list(all_classes))
+            self.label_classes = list(self.classes)
 
         logger.info(
             f"Dataset initialized with {len(self.edf_files)}/{total_n_patients} patients. "
             f"Total windows: {len(self)}. Classes: {len(self.classes)}"
         )
         self.initialized = True
+
+    def run_filter_window(self, item: Dict[str, Any]) -> bool:
+        if self.filter_window_callback is None:
+            return True
+
+        keep_window = self.filter_window_callback(
+            target=item.get("target"),
+            target_extra=item.get("target_extra"),
+            patient=item.get("patient"),
+            time=item.get("time"),
+        )
+        if keep_window is None:
+            return False
+        if isinstance(keep_window, bool):
+            return keep_window
+        raise ValueError(f"filter_window must return bool or None, but received {type(keep_window)}.")
+
+    def run_build_target(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self.build_target_callback is not None:
+            built_target = self.build_target_callback(
+                target=item.get("target"),
+                target_extra=item.get("target_extra"),
+                patient=item.get("patient"),
+                time=item.get("time"),
+            )
+            if built_target is None:
+                return None
+            return built_target
+
+        return {}
+
+    def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if len(self.channel_groups) > 0:
+            available_columns = list(x_df.columns)
+            selected_columns = []
+            renamed_columns = self.channel_groups.keys()
+
+            # Emit one sampled representative per configured group and rename the
+            # result to the conceptual group name so downstream code sees stable columns.
+            for group, group_channels in self.channel_groups.items():
+                available = [col for col in available_columns if col in set(group_channels)]
+                if len(available) == 0:
+                    raise ValueError(f"No available channels found for group '{group}'.")
+
+                selected_columns.append(str(np.random.choice(available)))
+
+            x_selected = x_df.loc[:, selected_columns].copy()
+            x_selected.columns = renamed_columns
+            x_df = x_selected
+
+        if self.build_sample_callback is not None:
+            return self.build_sample_callback(
+                data=x_df,
+                target=item.get("target"),
+                target_extra=item.get("target_extra"),
+                patient=item.get("patient"),
+                time=item.get("time"),
+                **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
+            )
+        else:
+            return {"data": torch.from_numpy(x_df.values).float()}
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
         end_date = start_date + self.total_input
@@ -423,18 +460,17 @@ class BaseDataset(Dataset, ABC):
             start_date_label = t_center
             end_date_label = start_date_label + self.target_resolution
 
-            item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.classes) 
+            item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
             if file.labels_extra:
-                item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.classes) 
+                item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
 
-        if self.get_target_callback is not None:
-            target_item = self.get_target_callback(
-                target=item.get("target"),
-                target_extra=item.get("target_extra"),
-            )
-            if target_item is None:
-                return None
-            item.update(target_item)
+        if not self.run_filter_window(item):
+            return None
+
+        built_target = self.run_build_target(item)
+        if built_target is None:
+            return None
+        item.update(built_target)
 
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
         
@@ -460,12 +496,10 @@ class BaseDataset(Dataset, ABC):
         elif len(x_df) > self.get_timeseries_len():
             x_df = x_df.head(n = self.get_timeseries_len())
 
-        if self.transform is not None:
-            for t in self.transform:
-                x_df = t(x_df)
-
-        x_df = self._select_grouped_channels(x_df)
-        item["data"] = torch.from_numpy(x_df.values).float()
+        transformed_item = self.run_build_sample(item, x_df)
+        if transformed_item is None:
+            return None
+        item.update(transformed_item)
 
         return item
 

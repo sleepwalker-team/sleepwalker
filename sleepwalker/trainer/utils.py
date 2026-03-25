@@ -1,12 +1,50 @@
 import json
 import os
+import random
 import tempfile
-from typing import Optional
+from typing import List, Optional
 import numpy as np
 import pandas as pd
 import torch
 
 from sleepwalker.models.Basemodel import BaseModel 
+
+
+def trim_wake(
+    data_df: pd.DataFrame,
+    label_df: Optional[pd.DataFrame],
+    label_extra_df: Optional[pd.DataFrame],
+    wake_label: str = "wake",
+) -> Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]:
+    if label_df is None or len(label_df) == 0:
+        return None
+
+    label_df = label_df.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)
+    non_wake = label_df["Label"] != wake_label
+    if not non_wake.any():
+        return None
+
+    non_wake_positions = np.flatnonzero(non_wake.to_numpy())
+    first_idx = int(non_wake_positions[0])
+    last_idx = int(non_wake_positions[-1])
+    label_df = label_df.iloc[first_idx:last_idx + 1].copy()
+
+    lower = label_df["Starttime"].min()
+    upper = label_df["Endtime"].max()
+
+    if label_extra_df is not None:
+        label_extra_df = label_extra_df.copy()
+        label_extra_df = label_extra_df[
+            (label_extra_df["Endtime"] > lower) & (label_extra_df["Starttime"] < upper)
+        ]
+        if len(label_extra_df) > 0:
+            label_extra_df["Starttime"] = label_extra_df["Starttime"].clip(lower=lower, upper=upper)
+            label_extra_df["Endtime"] = label_extra_df["Endtime"].clip(lower=lower, upper=upper)
+            label_extra_df = label_extra_df[label_extra_df["Endtime"] > label_extra_df["Starttime"]]
+        else:
+            label_extra_df = None
+
+    return label_df, label_extra_df
 
 def read_jsonl(filename: str) -> pd.DataFrame:
     """
@@ -217,3 +255,54 @@ def f1_score_from_confusion_matrix(confusion_matrix, macro=False) -> float:
             micro_f1 = 2 * (micro_precision * micro_recall) / (micro_precision + micro_recall)
         
         return micro_f1
+
+def target_to_multiclass(target, default_idx, min_event_seconds, raise_error=True):
+    """
+    Simplified: target is a 1D tensor of size (num_classes,).
+    Returns a one-hot tensor based on threshold.
+    """
+    num_classes = target.shape[0]
+
+    active = target > min_event_seconds
+    active_sum = active.sum().item()
+
+    if raise_error and active_sum > 1:
+        raise ValueError("Multiple active classes found.")
+
+    out = torch.zeros(num_classes, dtype=torch.float)
+
+    if active_sum == 1:
+        idx = active.nonzero(as_tuple=False).item()
+        out[idx] = 1.0
+    elif active_sum == 0:
+        if default_idx is not None:
+            out[default_idx] = 1.0
+        elif raise_error:
+            raise ValueError("Ambiguous class labels found with no active class and no default_idx.")
+
+    return out
+
+def get_target_as_multiclass(target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
+    try:
+        freq = pd.to_timedelta(target.index.freq).total_seconds()
+        targets = torch.tensor(target.sum().to_numpy())
+        target = target_to_multiclass(targets, None, len(target)*freq*percentage, True)
+
+        item = {"target":target}
+
+        if class_cnts and len(class_cnts) == len(target):
+            probas = class_cnts / np.sum(class_cnts)
+            m = min(probas)
+            if random.random() > m / probas[target.argmax()]:
+                return None
+
+        if target_extra is not None:
+            freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
+            targets = torch.tensor(target_extra.sum().to_numpy())
+            target_extra = target_to_multiclass(targets, None, len(target_extra)*freq*percentage, True)
+            item["target_extra"] = target_extra
+
+        return item
+    except Exception as e:
+        pass
+    return None

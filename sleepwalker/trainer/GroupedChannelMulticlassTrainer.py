@@ -72,6 +72,9 @@ class GroupedChannelMulticlassTrainer(MulticlassTrainer):
             x = batch["data"].to(self.device)
             y = batch["target"].to(self.device)
 
+            if opt is not None:
+                x = self.apply_train_transform(x)
+
             if n_repeat > 1:
                 if x.shape[0] % n_repeat != 0:
                     raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")

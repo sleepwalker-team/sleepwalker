@@ -1,10 +1,14 @@
 #!/bin/env python3
 
 import argparse
-import inspect
 import os
+from functools import partial
 
-import mlflow
+import torch
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader
+from torch.utils.data import RandomSampler
+from torchinfo import summary
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -12,389 +16,193 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
 os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
-from functools import partial
-from typing import Optional
-
-import pandas as pd
-import torch
-from torch.utils.data import RandomSampler
-from torch.utils.data import DataLoader
-from torchinfo import summary
-import torch.multiprocessing as mp
-
-from sleepwalker.datasets import ChannelConfig
-from sleepwalker.datasets.ABC import ABC
-from sleepwalker.datasets.Apples import Apples
-from sleepwalker.datasets.Basedataset import BaseDataset, batch_collate
-from sleepwalker.datasets.CAP import CAP
-from sleepwalker.datasets.ISRUC import ISRUC
-from sleepwalker.datasets.MNC import MNC
-from sleepwalker.datasets.MROS import MROS
-from sleepwalker.datasets.MultiDataset import MultiDataset
-from sleepwalker.datasets.NCHSDB import NCHSDB
-from sleepwalker.datasets.SHHS import SHHS
-from sleepwalker.datasets.SVUH_UCD import SVUH_UCD
-from sleepwalker.datasets.SleepEDFx import SleepEDFx
-from sleepwalker.datasets.augmentation.TimeShiftAndCrop import TimeShiftAndCrop
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.utils import estimate_class_cnts, get_edf_files_in_repo, random_split
-from sleepwalker.datasets import Ruhrlandklinik
-from sleepwalker.models import SleepTransformer
-from sleepwalker.models.AttnSleep import AttnSleep
-from sleepwalker.models.MRASleepNet import MRASleepNet
-from sleepwalker.models.SeqSleepNet import SeqSleepNet
-from sleepwalker.models.TinySleepNet import TinySleepNet
-from sleepwalker.models.USleep import USleep
-from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.losses import class_weights_for_loss, dice_loss
-from sleepwalker.trainer.utils import append_to_jsonl
-from sleepwalker.utils import logger, MlflowSink, suppress_stdout_logging
+from sleepwalker.trainer.losses import class_weights_for_loss
+from sleepwalker.trainer.tasks.sleep_staging import DATASET_CFG, MODEL_CFG, TARGET_CLASSES, get_dataset, get_model_and_trainer
+from sleepwalker.trainer.utils import append_to_jsonl, get_target_as_multiclass, trim_wake
+from sleepwalker.utils import logger, suppress_stdout_logging
 
 from lamarr_energy_tracker import EnergyTracker
 
 torch.set_num_threads(2)
 torch.set_num_interop_threads(1)
 
-mp.set_sharing_strategy('file_system')
+mp.set_sharing_strategy("file_system")
 
-def build_dataset(edf_path: str|os.PathLike, clazz, event_mapping, fs: float, total_input:str, target_resolution: str, num_workers_dataset: int, channels: list[str], get_target_fn, test_frac: float = 0.3, val_frac:float = 0.1, transform = None, dry_run:bool = False):
-    assert 0 <= test_frac < 1, "test_frac not in [0,1]"
-    assert 0 <= val_frac < 1, "val_frac not in [0,1]"
-    assert val_frac + test_frac < 1.0, "test_frac + val_frac >= 1! No train data"
+SCORED_SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
+BATCH_SIZE = 128
+N_SAMPLES = 250_000
+NUM_WORKERS_DATASET = 16
+NUM_WORKERS_DATALOADER = 16
+TEST_FRAC = 0.3
+VAL_FRAC = 0.1
+EXPERIMENT_NAME = "multiclass"
+DATASET_ROOT = "/raid/sleepwalker"
+SLEEP_PERCENTAGE = 0.5
+REJECT_OUTSIDE_SLEEP = False
 
-    channel_cfg = [ChannelConfig(name=c, normalizer=EEGFilterNormalizer(fs = fs)) for c in channels] 
-    
-    edf_files = get_edf_files_in_repo(edf_path, recursive=True)
 
-    train_patients, test_patients = random_split(edf_files, test_frac=test_frac)
-    train_patients, val_patients = random_split(train_patients, test_frac=val_frac)
+def filter_multiclass_window(
+    target,
+    target_extra=None,
+    reject_outside_sleep: bool = False,
+    sleep_percentage: float = 0.5,
+    **_kwargs,
+):
+    if target is None:
+        return False
+
+    if reject_outside_sleep:
+        sleep_cols = [c for c in SCORED_SLEEP_LABELS if c in target.columns]
+        if len(sleep_cols) == 0:
+            raise ValueError(
+                f"reject_outside_sleep requires sleep labels {SCORED_SLEEP_LABELS}, "
+                f"but target columns are {list(target.columns)}."
+            )
+        if target[sleep_cols].any(axis=1).mean() < sleep_percentage:
+            return False
+
+    return True
+
+
+def build_multiclass_target(
+    target,
+    target_extra=None,
+    percentage: float = 0.5,
+    class_cnts=None,
+    target_classes=None,
+    **_kwargs,
+):
+    if target is None:
+        return None
+
+    if target_classes is not None:
+        target = target.reindex(columns=target_classes, fill_value=0)
+        if target_extra is not None:
+            target_extra = target_extra.reindex(columns=target_classes, fill_value=0)
+
+    return {
+        "target": get_target_as_multiclass(
+            target=target,
+            target_extra=target_extra,
+            percentage=percentage,
+            class_cnts=class_cnts,
+        )
+    }
+
+
+def build_multiclass_sample(data, target, **item):
+    item["data"] = torch.from_numpy(data.values).float()
+    item["target"] = target
+    return item
+
+
+def get_dataset_splits(dataset_name: str, model_name: str, grouped: bool, target_classes: list[str]):
+    dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
+    patients = get_edf_files_in_repo(dataset_path, recursive=True)
+
+    train_patients, test_patients = random_split(patients, test_frac=TEST_FRAC)
+    train_patients, val_patients = random_split(train_patients, test_frac=VAL_FRAC)
+
+    filter_window = partial(
+        filter_multiclass_window,
+        reject_outside_sleep=REJECT_OUTSIDE_SLEEP,
+        sleep_percentage=SLEEP_PERCENTAGE,
+    )
+    build_target = partial(build_multiclass_target, target_classes=target_classes)
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
-        train_ds = clazz(
-            channels = channel_cfg,
-            patients = train_patients,
-            num_workers = num_workers_dataset,
-            sample_frequency = fs,
-            event_mapping = event_mapping,
-            get_target = get_target_fn,
-            total_input = total_input, 
-            target_resolution = target_resolution,
-            transform = transform
+        train_ds = get_dataset(
+            name=dataset_name,
+            model_name=model_name,
+            patients=train_patients,
+            path_root=DATASET_ROOT,
+            grouped=grouped,
+            num_workers=NUM_WORKERS_DATASET,
+            filter_target=trim_wake,
+            filter_window=filter_window,
+            build_target=build_target,
+            build_sample=build_multiclass_sample,
         )
         logger.uncontext()
         logger.context("VAL")
-        val_ds = clazz(
-                channels = channel_cfg,
-                patients = val_patients,
-                num_workers = num_workers_dataset,
-                sample_frequency = fs,
-                event_mapping = event_mapping,
-                get_target = get_target_fn,
-                total_input = total_input, 
-                target_resolution = target_resolution,
-                transform = transform
-            )
+        val_ds = get_dataset(
+            name=dataset_name,
+            model_name=model_name,
+            patients=val_patients,
+            path_root=DATASET_ROOT,
+            grouped=grouped,
+            num_workers=NUM_WORKERS_DATASET,
+            filter_target=trim_wake,
+            filter_window=filter_window,
+            build_target=build_target,
+            build_sample=build_multiclass_sample,
+        )
         logger.uncontext()
         logger.context("TEST")
-        test_ds = clazz(
-                channels = channel_cfg,
-                patients = test_patients,
-                num_workers = num_workers_dataset,
-                sample_frequency = fs,
-                event_mapping = event_mapping,
-                get_target = get_target_fn,
-                total_input = total_input, 
-                target_resolution = target_resolution,
-                transform = transform
-            )
+        test_ds = get_dataset(
+            name=dataset_name,
+            model_name=model_name,
+            patients=test_patients,
+            path_root=DATASET_ROOT,
+            grouped=grouped,
+            num_workers=NUM_WORKERS_DATASET,
+            filter_target=trim_wake,
+            filter_window=filter_window,
+            build_target=build_target,
+            build_sample=build_multiclass_sample,
+        )
         logger.uncontext()
-    
-        logger.info(f"Loaded {train_ds.get_n_patients()} / {len(train_patients)} patients for training and {test_ds.get_n_patients()} / {len(test_patients)} patients for test and {val_ds.get_n_patients()} / {len(val_patients)} patients for test for validation")
-    return train_ds, test_ds, val_ds
 
-folder = "/raid/"
-dataset_cfg = {
-    "abc": {
-        "clazz": ABC, 
-        "edf_path": f"/{folder}/sleepwalker/abc",
-        "event_mapping": {
-            "wake|0": "wake",
-            "stage 1 sleep|1": "n1",
-            "stage 2 sleep|2": "n2",
-            "stage 3 sleep|3": "n3",
-            "rem sleep|5": "rem"
-        },
-        "channels": ["C4"]
-    },
-    "cap": { 
-        "clazz": CAP, 
-        "edf_path": f"/{folder}/sleepwalker/cap",
-        "event_mapping": {
-            "S1":"n1",
-            "S2":"n2",
-            "S3":"n3",
-            "S4":"n3",
-            "R":"rem",
-            "W":"wake"
-        },
-        "channels": ["C4-A1"]
-    },
-    "isruc": { 
-        "clazz": ISRUC, 
-        "edf_path": f"/{folder}/sleepwalker/isruc",
-        "event_mapping": {
-            "N1":"n1",
-            "N2":"n2",
-            "n2":"n2",
-            "N3":"n3",
-            "R":"rem",
-            "W":"wake",
-            "w":"wake"
-        },
-        "channels": ["C4-M1"]
-    },
-    "mnc": { 
-        "clazz": MNC, 
-        "edf_path": f"/{folder}/sleepwalker/mnc/cnc",
-        "event_mapping": {
-            "nrem1":"n1",
-            "nrem2":"n2",
-            "nrem3":"n3",
-            "rem":"rem",
-            "wake":"wake",
-        },
-        "channels": ["C4"]
-    },
-    "nchsdb": { 
-        "clazz": NCHSDB, 
-        "edf_path": f"/{folder}/sleepwalker/nchsdb/sleep_data",
-        "event_mapping": {
-            "Sleep stage 1":"n1",
-            "Sleep stage 2":"n2",
-            "Sleep stage 3":"n3",
-            "Sleep stage R":"rem",
-            "Sleep stage W":"wake",
-            "Sleep stage N1": "n1",
-            "Sleep stage N2": "n2",
-            "Sleep stage N3": "n3"
-        },
-        "channels": ["EEG C4-M1"]
-    }, 
-    "svuhucd": { 
-        "clazz": SVUH_UCD, 
-        "edf_path": f"/{folder}/sleepwalker/svuh-ucd",
-        "event_mapping": {
-            "0": "wake",
-            "1": "rem",
-            "2": "n1",
-            "3": "n2",
-            "4": "n3",
-            "5": "n3"
-        },
-        "channels": ["C3A2", "C4A1"]
-    },
-    "shhs": { 
-        "clazz": SHHS, 
-        "edf_path": f"/{folder}/sleepwalker/shhs",
-        "event_mapping": {
-            "wake|0": "wake",
-            "stage 1 sleep|1": "n1",
-            "stage 2 sleep|2": "n2",
-            "stage 3 sleep|3": "n3",
-            "stage 4 sleep|4": "n3",
-            "rem sleep|5": "rem"
-        },
-        "channels": ["EEG"]
-    },  
-    # TEST
-    "apples": {
-        "clazz": Apples, 
-        "edf_path": f"/{folder}/sleepwalker/apples/polysomnography",
-        "event_mapping": {
-            "N1":"n1",
-            "N2":"n2",
-            "N3":"n3",
-            "R":"rem",
-            "W":"wake"
-        },
-        "channels": ["C4_M1"]
-    }, 
-    "mros": {
-        "clazz": MROS, 
-        "edf_path": f"/{folder}/sleepwalker/mros",
-        "event_mapping": {
-            "wake|0": "wake",
-            "stage 1 sleep|1": "n1",
-            "stage 2 sleep|2": "n2",
-            "stage 3 sleep|3": "n3",
-            "stage 4 sleep|4": "n3",
-            "rem sleep|5": "rem"
-        },
-        "channels": ["C4"]
-    },
-    "ruhrland": { 
-        "clazz": Ruhrlandklinik, 
-        "edf_path": f"/{folder}/sleepwalker/ruhrlandklinik/raw",
-        "event_mapping": {
-            "wach": "wake",
-            "n1": "n1",
-            "n2": "n2",
-            "n3": "n3",
-            "rem": "rem"
-        },
-        "channels": ["C4"]
-    },
-    "sleepedfx": {
-        "clazz": SleepEDFx, 
-        "edf_path": f"/{folder}/sleepwalker/sleep-edfx",
-        "event_mapping": {
-            "sleep stage w": "wake",
-            "sleep stage 1": "n1",
-            "sleep stage 2": "n2",
-            "sleep stage 3": "n3",
-            "sleep stage 4": "n3",
-            "sleep stage r": "rem"
-        },
-        "channels": ["EEG Fpz-Cz"]
-    },
-}
+    logger.info(
+        f"Loaded {train_ds.get_n_patients()} / {len(train_patients)} patients for training and "
+        f"{test_ds.get_n_patients()} / {len(test_patients)} patients for test and "
+        f"{val_ds.get_n_patients()} / {len(val_patients)} patients for validation"
+    )
+    return train_ds, val_ds, test_ds
 
-model_cfg = {
-    "sleeptransformer":{
-        "clazz": SleepTransformer,
-        "total_input": "630s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
-        "loss_function":torch.nn.functional.cross_entropy
-    },
-    "attnsleep":{
-        "clazz": AttnSleep,
-        "total_input": "30s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-3, amsgrad=True),
-        "loss_function":torch.nn.functional.cross_entropy,
-        "loss_mode": "inverse-log", 
-        # I am not sure if these class_weights are correct. They are not explicitly mentioned in the paper and only available in the 
-        # original source code. The source code first maps classes to indices and then merges the indicies to combine S3/S4 into N3. 
-        # Finally, scores are assigned based on the indicies. I did not execute / debug the code, so I am not 100% sure if these weights
-        # match.
-        "class_weights": {"wake": 1.5, "n1": 2, "n2": 1.5, "n3": 1, "rem": 1.5}
-    },
-    "mrasleepnet":{
-        "clazz": MRASleepNet,
-        "total_input": "40s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-4),
-        "loss_function":torch.nn.functional.cross_entropy,
-        "loss_mode": "inverse-log", 
-        # I am not sure if these class_weights are correct. They are not explicitly mentioned in the paper and only available in the 
-        # original source code. The source code first maps classes to indices and then merges the indicies to combine S3/S4 into N3. 
-        # Finally, scores are assigned based on the indicies. I did not execute / debug the code, so I am not 100% sure if these weights
-        # match.
-        "class_weights": {"wake": 1.5, "n1": 2, "n2": 1.5, "n3": 1, "rem": 1.5}
-    },
-    "seqsleepnet":{
-        "clazz": SeqSleepNet,
-        "total_input": "900s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-4),
-        "loss_function":torch.nn.functional.cross_entropy
-    },
-    "tinysleepnet":{
-        "clazz": TinySleepNet,
-        "total_input": "500s", # We use data augmentation that shifts the input slightly across the time axis. Ultimately, we want to have an input of 450s (chunk_len (=15) * 30s), which we get by cropping the timeseries (see preprocessor below). To correct augment the data, we require a slightly larger input which we get here
-        "total_input_model": "450s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay = 1.0e-3),
-        "loss_function":torch.nn.functional.cross_entropy,
-        "loss_mode": "regular", 
-        "class_weights": {"wake": 1, "n1": 1.5, "n2": 1, "n3": 1, "rem": 1},
-        "transform": [TimeShiftAndCrop(max_shift="60s", fill="closest", sampling_frequency=100, output_size="450s")],
-        "seq_len":15,
-        "use_lstm":True
-    },
-    "usleep": { 
-        "clazz": USleep,
-        "total_input": "1050s",
-        "lr_scheduler": lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=50),
-        "optimizer": lambda model: torch.optim.Adam(model.parameters(), lr=5e-6, amsgrad=True),
-        "loss_function":dice_loss,
-        "loss_mode": "regular", 
-        "channel": [32, 64, 128, 256],
-        "maxpool": [10, 8, 6, 4,],
-        "kernel": [5, 5, 5, 5,],
-        "activation": "relu",
-        "norm": "batch", 
-        "mlp_size": 128,
-        "balance_batches":True
-    }
-}
 
-def create_model(cls, **kwargs):
-    # only pass what the class supports
-    sig = inspect.signature(cls)
-    params = {k: v for k, v in kwargs.items() if k in sig.parameters}
-    return cls(**params)
-
-def run(model_name, dataset, dry_run, grad_reversal):
-    if model_name not in model_cfg:
-        logger.warning(f"Did not find {model_name} in model_cfg -- Ignoring this model")
+def run(model_name, dataset_name, dry_run, grouped=False):
+    if dataset_name not in DATASET_CFG:
+        logger.warning(f"Unknown sleep staging dataset '{dataset_name}'.")
+        return
+    if model_name not in MODEL_CFG:
+        logger.warning(f"Unknown sleep staging model '{model_name}'.")
         return
 
-    if dataset not in dataset_cfg:
-        logger.warning(f"Did not find {dataset} in dataset_cfg -- Aborting")
+    target_classes = TARGET_CLASSES
+
+    try:
+        train_ds, val_ds, test_ds = get_dataset_splits(
+            dataset_name=dataset_name,
+            model_name=model_name,
+            grouped=grouped,
+            target_classes=target_classes,
+        )
+    except ValueError as exc:
+        logger.warning(str(exc))
         return
 
-    # common parameter
-    batch_size = 128
-    epochs = 100 if not dry_run else 1
-    target_resolution = "30s"
-    n_samples = 250_000 if not dry_run else 1_000 
-    experiment_name = "multiclass"
-    num_workers_dataset = 16
-    num_workers_dataloader = 16
-    sample_frequency = 100
+    model, trainer, run_cfg = get_model_and_trainer(
+        name=model_name,
+        dataset=train_ds,
+        dry_run=dry_run,
+        grouped=grouped,
+    )
 
-    # model specific parameters
-    total_input = model_cfg[model_name]["total_input"]
-    model_clazz = model_cfg[model_name]["clazz"]
-    lr_scheduler = model_cfg[model_name]["lr_scheduler"]
-    optimizer = model_cfg[model_name]["optimizer"]
-    loss_function = model_cfg[model_name]["loss_function"]
-    loss_mode = model_cfg[model_name].get("loss_mode", "regular")
-    class_weights = model_cfg[model_name].get("class_weights", {})
-    transform = model_cfg[model_name].get("transform", None)
-    balance_batches = model_cfg[model_name].get("balance_batches", False)
-
+    run_cfg["batch_size"] = BATCH_SIZE
+    run_cfg["n_samples"] = 1_000 if dry_run else N_SAMPLES
+    experiment_name = f"{EXPERIMENT_NAME}-grouped" if grouped else EXPERIMENT_NAME
     if dry_run:
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
     else:
         tracker = EnergyTracker(project_name=experiment_name)
         tracker.start()
-    
-    # with open(os.path.expanduser("~/mlflow/auth_config.ini"),"r") as f:
-    #     TRACKING_URI=f.read().strip()
-    # ARTIFACT_URI=f"/raid/mlruns"
 
-    # mlflow_sink = MlflowSink(tracking_uri=TRACKING_URI, experiment=experiment_name, artifact_uri=ARTIFACT_URI)
-    # logger.add_sink(mlflow_sink)
-    logger.start_run(run_name=experiment_name,tags={"model":model_name})
-
-    logger.context(dataset)
-    train_ds, test_ds, val_ds = build_dataset(**dataset_cfg[dataset], 
-        fs = sample_frequency, 
-        total_input = total_input, 
-        target_resolution = target_resolution, 
-        get_target_fn=MulticlassTrainer.get_target,
-        num_workers_dataset = num_workers_dataset,
-        test_frac=0.3,
-        val_frac=0.1,
-        transform=transform, 
-        dry_run=dry_run
-    )
-    logger.uncontext()
+    logger.start_run(run_name=experiment_name, tags={"model": model_name})
 
     if os.path.exists("sleepwalker.log"):
         os.remove("sleepwalker.log")
@@ -402,51 +210,67 @@ def run(model_name, dataset, dry_run, grad_reversal):
     logger.info(f"Loaded {train_ds.get_n_patients()} for training")
     logger.info(f"Loaded {val_ds.get_n_patients()} for validation")
     logger.info(f"Loaded {test_ds.get_n_patients()} for testing")
+    logger.info(f"Input data is {run_cfg['ts_len']} x {run_cfg['n_channels']}")
+    summary(model, input_size=(1, run_cfg["ts_len"], run_cfg["n_channels"]), depth=5, row_settings=["hide_recursive_layers"])
 
-    if "total_input_model" in model_cfg[model_name]:
-        # TinySleepNet uses augmentation that changes the model input size. Hence its actual input size is different from total_input 
-        freq = pd.to_timedelta(1.0 / sample_frequency, unit="s")
-        total_input = pd.to_timedelta(model_cfg[model_name]["total_input_model"])
-        ts_len = int(total_input.total_seconds() / freq.total_seconds())
-    else:
-        ts_len = train_ds.get_timeseries_len()
-
-    n_channels = 1
-    model = create_model(cls=model_clazz, classes=train_ds.get_classes(), ts_len=ts_len, n_channels=n_channels, sampling_frequency=sample_frequency, **model_cfg[model_name])
-    logger.info(f"Input data is {ts_len} x {n_channels}")
-    model_stats = summary(model, input_size=(1, ts_len, n_channels), depth=5, row_settings=["hide_recursive_layers"])
-
-    if balance_batches:
-        class_cnts = estimate_class_cnts(train_ds, n_samples, num_workers_dataloader, batch_size)
+    class_cnts = None
+    if run_cfg["balance_batches"]:
+        class_cnts = estimate_class_cnts(
+            train_ds,
+            run_cfg["n_samples"],
+            NUM_WORKERS_DATALOADER,
+            run_cfg["batch_size"],
+        )
         class_cnts_list = [class_cnts.get(c, 1) for c in train_ds.get_classes()]
-        train_ds.get_target_callback = partial(MulticlassTrainer.get_target, class_cnts=class_cnts_list)
-    else:
-        class_cnts = None
+        train_ds.build_target_callback = partial(
+            build_multiclass_target,
+            target_classes=target_classes,
+            class_cnts=class_cnts_list,
+        )
 
-    if loss_mode != "regular":
-        if class_cnts is None: 
-            class_cnts = estimate_class_cnts(train_ds, n_samples, num_workers_dataloader, batch_size) 
-        class_weights = class_weights_for_loss(class_weights, class_cnts, loss_mode)
-    
+    if run_cfg["loss_mode"] != "regular":
+        if class_cnts is None:
+            class_cnts = estimate_class_cnts(
+                train_ds,
+                run_cfg["n_samples"],
+                NUM_WORKERS_DATALOADER,
+                run_cfg["batch_size"],
+            )
+        class_weights = class_weights_for_loss(run_cfg["class_weights"], class_cnts, run_cfg["loss_mode"])
+    else:
+        class_weights = run_cfg["class_weights"]
+
     if len(class_weights) > 0:
         weights_torch = torch.tensor([class_weights.get(c, 1) for c in train_ds.get_classes()], device="cuda")
-    else:
-        weights_torch = None
+        trainer.loss_function = partial(run_cfg["loss_function"], weight=weights_torch)
 
-    trainer = MulticlassTrainer(
-        epochs=epochs, 
-        optimizer = optimizer,
-        lr_scheduler = lr_scheduler,
-        classes = train_ds.get_classes(), 
-        save_every = 1,
-        loss_function=partial(loss_function, weight=weights_torch), 
-        early_stopping = 10
+    train_sampler = RandomSampler(train_ds, num_samples=run_cfg["n_samples"]) if run_cfg["n_samples"] is not None else None
+    val_sampler = RandomSampler(val_ds, num_samples=run_cfg["n_samples"]) if run_cfg["n_samples"] is not None else None
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=run_cfg["batch_size"],
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+        num_workers=NUM_WORKERS_DATALOADER,
+        collate_fn=partial(batch_collate, ignore_list=["time", "patient"]),
+        drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=2,
+        pin_memory=True,
     )
-    train_sampler = RandomSampler(train_ds, num_samples = n_samples) if n_samples is not None else None
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=train_sampler is None, sampler=train_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) ### prefetch_factor=12
-
-    val_sampler = RandomSampler(val_ds, num_samples = n_samples) if n_samples is not None else None
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=val_sampler is None, sampler=val_sampler, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=run_cfg["batch_size"],
+        shuffle=val_sampler is None,
+        sampler=val_sampler,
+        num_workers=NUM_WORKERS_DATALOADER,
+        collate_fn=partial(batch_collate, ignore_list=["time", "patient"]),
+        drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=2,
+        pin_memory=True,
+    )
 
     train_dict = trainer.fit(model, train_loader, val_loader)
     losses, cms = train_dict["losses"], train_dict["cms"]
@@ -455,31 +279,53 @@ def run(model_name, dataset, dry_run, grad_reversal):
             state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
             model.load_state_dict(state_dict)
 
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, sampler=None, num_workers=num_workers_dataloader, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True)
+    GROUPED_TEST_REPEATS = [1, 2, 3, 4, 5, 10] if else [1]
+    for repeat in GROUPED_TEST_REPEATS:
+        if grouped:
+            trainer.n_repeat_test = repeat
+            logger.context(f"r={repeat}")
 
-    test_loss, test_cm = trainer.test(model, test_loader)
-    record = {
-        "model": model_name,
-        "test_loss":test_loss,
-        "test_cm":test_cm,
-        "train_loss":losses,
-        "train_cm":cms,
-        "dataset":dataset,
-        "classes":train_ds.get_classes(),
-        "artifact_root": train_dict["checkpoint"] if "checkpoint" in train_dict else "",
-    }
-    if "best_model" in train_dict:
-        record["best_model"] = train_dict["best_model"]
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=run_cfg["batch_size"],
+            shuffle=False,
+            sampler=None,
+            num_workers=NUM_WORKERS_DATALOADER,
+            collate_fn=partial(batch_collate, ignore_list=["time", "patient"]),
+            drop_last=False,
+            persistent_workers=True,
+            prefetch_factor=2,
+            pin_memory=True,
+        )
+        test_loss, test_cm = trainer.test(model, test_loader)
+        record = {
+            "model": model_name,
+            "test_loss": test_loss,
+            "test_cm": test_cm,
+            "train_loss": losses,
+            "train_cm": cms,
+            "dataset": dataset_name,
+            "classes": train_ds.get_classes(),
+            "artifact_root": train_dict["checkpoint"] if "checkpoint" in train_dict else "",
+        }
+        if grouped:
+            record["repeat"] = repeat
+        if "best_model" in train_dict:
+            record["best_model"] = train_dict["best_model"]
+        append_to_jsonl(experiment_name, record)
+        if grouped:
+            logger.uncontext()
 
-    append_to_jsonl(f"{experiment_name}", record)
-
-    if not dry_run: tracker.stop()
+    if not dry_run:
+        tracker.stop()
     logger.end_run()
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train and evaluate a sleep-staging model on one dataset with a single EEG channels.')
-    parser.add_argument("--model", help='The model to be trained. Appropriate training parameters are choosen automatically', required=False, default="sleeptransformer", type=str)
-    parser.add_argument("--data", help='Dataset to train the model on', required=False, default="sleepedfx", type=str)
-    parser.add_argument("--dry", help='If set, performs a quick test run without actually training the model', action="store_true")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train and evaluate a sleep-staging model on one dataset.")
+    parser.add_argument("--model", required=False, default="sleeptransformer", type=str)
+    parser.add_argument("--data", required=False, default="sleepedfx", type=str)
+    parser.add_argument("--grouped", action="store_true")
+    parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
-    run(args.model, args.data, args.dry)
+    run(args.model, args.data, args.dry, grouped=args.grouped)

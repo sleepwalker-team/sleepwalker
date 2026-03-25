@@ -1,11 +1,7 @@
-from functools import partial
-import functools
-import inspect
 import os
-import random
 import shutil
 import tempfile
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
@@ -14,7 +10,6 @@ from torch.utils.data import DataLoader
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
-from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
 
@@ -31,7 +26,8 @@ class MulticlassTrainer(ABC):
         warmup_device: str = "cpu",
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
-        early_stopping: Optional[int] = None
+        early_stopping: Optional[int] = None,
+        train_transform: Optional[list[Callable]] = None,
     ):
         self.epochs = epochs
         self.save_every = save_every
@@ -41,6 +37,7 @@ class MulticlassTrainer(ABC):
         
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
+        self.train_transform = train_transform
 
         # Normalize class names once or keep original; here we keep original
         self.classes = classes
@@ -48,58 +45,19 @@ class MulticlassTrainer(ABC):
         
         self.loss_function = loss_function
 
-    @staticmethod
-    def target_to_multiclass(target, default_idx, min_event_seconds, raise_error=True):
-        """
-        Simplified: target is a 1D tensor of size (num_classes,).
-        Returns a one-hot tensor based on threshold.
-        """
-        num_classes = target.shape[0]
+    def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
+        if self.train_transform is None or len(self.train_transform) == 0:
+            return x
 
-        active = target > min_event_seconds
-        active_sum = active.sum().item()
-
-        if raise_error and active_sum > 1:
-            raise ValueError("Multiple active classes found.")
-
-        out = torch.zeros(num_classes, dtype=torch.float)
-
-        if active_sum == 1:
-            idx = active.nonzero(as_tuple=False).item()
-            out[idx] = 1.0
-        elif active_sum == 0:
-            if default_idx is not None:
-                out[default_idx] = 1.0
-            elif raise_error:
-                raise ValueError("Ambiguous class labels found with no active class and no default_idx.")
-
-        return out
-
-    @staticmethod
-    def get_target(target, target_extra = None, percentage:float = 0.5, class_cnts:Optional[List[float]] = None):
-        try:
-            freq = pd.to_timedelta(target.index.freq).total_seconds()
-            targets = torch.tensor(target.sum().to_numpy())
-            target = MulticlassTrainer.target_to_multiclass(targets, None, len(target)*freq*percentage, True)
-
-            item = {"target":target}
-
-            if class_cnts and len(class_cnts) == len(target):
-                probas = class_cnts / np.sum(class_cnts)
-                m = min(probas)
-                if random.random() > m / probas[target.argmax()]:
-                    return None
-
-            if target_extra is not None:
-                freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
-                targets = torch.tensor(target_extra.sum().to_numpy())
-                target_extra = MulticlassTrainer.target_to_multiclass(targets, None, len(target_extra)*freq*percentage, True)
-                item["target_extra"] = target_extra
-
-            return item
-        except Exception as e:
-            pass
-        return None
+        x_device = x.device
+        out = []
+        # TODO We could parallelize this for improve performance, e.g. move to a BaseDataset?
+        for sample in x:
+            sample_df = pd.DataFrame(sample.detach().cpu().numpy())
+            for transform in self.train_transform:
+                sample_df = transform(sample_df)
+            out.append(torch.from_numpy(sample_df.to_numpy()).to(x_device, dtype=x.dtype))
+        return torch.stack(out, dim=0)
 
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
@@ -153,6 +111,9 @@ class MulticlassTrainer(ABC):
         for batch in loader:
             x = batch["data"].to(self.device)
             y = batch["target"].to(self.device)
+
+            if opt is not None:
+                x = self.apply_train_transform(x)
             
             if opt is not None: 
                 opt.zero_grad(set_to_none=True)

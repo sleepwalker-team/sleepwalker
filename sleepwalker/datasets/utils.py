@@ -205,13 +205,13 @@ def summarize_dataset(
 
     # --- (3) Dataset setup ---
     dataset = dataset_clazz(
-        patients=edf_files,
         channels=[ChannelConfig(name=channel_name, normalizer=None)],
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,
         num_workers=8
     )
+    dataset.initialize(edf_files, 8)
 
     # always include known class list
     dataset_classes = getattr(dataset, "classes", None)

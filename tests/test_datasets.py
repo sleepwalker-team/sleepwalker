@@ -28,7 +28,7 @@ from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
 from sleepwalker.datasets.utils import RepeatSampler, get_edf_files_in_repo
-from sleepwalker.trainer.GroupedChannelMulticlassTrainer import GroupedChannelMulticlassTrainer
+from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 
 from dotenv import load_dotenv
@@ -93,13 +93,17 @@ def test_get_item_rejects_before_loading_signal():
         }
     }
     dataset = DummyDataset(
-        patients=[],
         channels=[ChannelConfig(name="EEG")],
         sample_frequency=1,
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        get_target=lambda **kwargs: MultiLabelTrainer.get_target(class_cnts=[1.0, 100.0], task_config=task_config, **kwargs),
+        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+            target=target,
+            target_extra=target_extra,
+            class_cnts=[1.0, 100.0],
+            task_config=task_config,
+        ),
     )
     file = create_dummy_file()
     file.get_x = Mock(side_effect=AssertionError("signal should not be loaded"))
@@ -127,13 +131,16 @@ def test_get_item_loads_signal_after_label_precheck():
         }
     }
     dataset = DummyDataset(
-        patients=[],
         channels=[ChannelConfig(name="EEG")],
         sample_frequency=1,
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        get_target=lambda **kwargs: MultiLabelTrainer.get_target(task_config=task_config, **kwargs),
+        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+            target=target,
+            target_extra=target_extra,
+            task_config=task_config,
+        ),
     )
     file = create_dummy_file()
     signal = pd.DataFrame(
@@ -152,7 +159,6 @@ def test_get_item_loads_signal_after_label_precheck():
 
 def test_grouped_channel_selection_returns_one_channel_per_group():
     dataset = DummyDataset(
-        patients=[],
         channels=[
             ChannelConfig(name="C3-A2", group="eeg"),
             ChannelConfig(name="C4-A1", group="eeg"),
@@ -199,6 +205,7 @@ def test_grouped_multiclass_trainer_averages_repeats():
 
     class Loader(list):
         batch_size = 4
+        sampler = RepeatSampler([0, 1], n_repeat=2)
 
     batch = {
         "data": torch.tensor(
@@ -219,7 +226,7 @@ def test_grouped_multiclass_trainer_averages_repeats():
         ),
     }
     loader = Loader([batch])
-    trainer = GroupedChannelMulticlassTrainer(
+    trainer = MulticlassTrainer(
         epochs=1,
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["wake", "rem"],
@@ -259,7 +266,7 @@ def test_grouped_multiclass_trainer_test_wraps_loader_with_repeat_sampler():
         shuffle=False,
         collate_fn=lambda x: batch_collate(x, ignore_list=["time", "patient"]),
     )
-    trainer = GroupedChannelMulticlassTrainer(
+    trainer = MulticlassTrainer(
         epochs=1,
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["wake", "rem"],

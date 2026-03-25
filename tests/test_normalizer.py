@@ -120,12 +120,12 @@ def test_eegfilternorm_integration():
     fs = 100
     normalizer = EEGFilterNormalizer(fs=fs)
     dataset = SyntheticDataset(
-        patients=edf_files,
         channels=[ChannelConfig(name="EEG", normalizer=normalizer)],
         sample_frequency=fs,
         event_mapping={},
         remove_unmapped_events=False,
     )
+    dataset.initialize(edf_files)
     iterate_dataset(dataset, NUM_BATCHES)
 
 if __name__ == '__main__':

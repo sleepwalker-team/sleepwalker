@@ -350,11 +350,9 @@ def get_dataset(
     patients,
     path_root: str = "/raid/sleepwalker",
     grouped: bool = False,
-    filter_window=None,
-    filter_target=None,
-    build_target=None,
-    build_sample=None,
-    num_workers: int | None = None,
+    prepare_patient=None,
+    prepare_target=None,
+    prepare_sample=None,
     total_input: str | None = None,
 ):
     if name not in DATASET_CFG:
@@ -366,7 +364,6 @@ def get_dataset(
     model_cfg = MODEL_CFG[model_name]
     sample_frequency = TASK_DEFAULTS["sample_frequency"]
     target_resolution = TASK_DEFAULTS["target_resolution"]
-    num_workers = 16 if num_workers is None else num_workers
     selected_channels = dataset_cfg["grouped_channels"] if grouped else [dataset_cfg["channels"][0]]
 
     clazz = dataset_cfg["clazz"]
@@ -385,14 +382,11 @@ def get_dataset(
             )
             for cfg in selected_channels
         ],
-        patients=patients,
-        num_workers=num_workers,
         sample_frequency=sample_frequency,
         event_mapping=event_mapping,
-        filter_target=filter_target,
-        filter_window=filter_window,
-        build_target=build_target,
-        build_sample=build_sample,
+        prepare_patient=prepare_patient,
+        prepare_target=prepare_target,
+        prepare_sample=prepare_sample,
         total_input=model_cfg["total_input"] if total_input is None else total_input,
         target_resolution=target_resolution,
         rereference=rereference,

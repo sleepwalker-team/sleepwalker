@@ -19,8 +19,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 from sleepwalker.datasets.Basedataset import BaseDataset, batch_collate
 from sleepwalker.datasets.MultiDataset import MultiDataset
-from sleepwalker.datasets.utils import collect_patient_stats, estimate_class_cnts, get_edf_files_in_repo, random_split
-from sleepwalker.core.signal import read_edf_meta
+from sleepwalker.datasets.utils import estimate_class_cnts, get_edf_files_in_repo, random_split
 from sleepwalker.trainer.losses import class_weights_for_loss
 from sleepwalker.trainer.tasks.sleep_staging import DATASET_CFG, MODEL_CFG, TARGET_CLASSES, get_dataset, get_model_and_trainer
 from sleepwalker.trainer.utils import append_to_jsonl, get_target_as_multiclass, trim_wake
@@ -48,39 +47,25 @@ GROUPED_TEST_REPEATS = [1, 2, 3, 4, 5, 10]
 SLEEP_TIME_FILTER_QUANTILE = 0.05
 
 
-def filter_multiclass_window(
+def prepare_multiclass_target(
     target,
     target_extra=None,
-    reject_outside_sleep: bool = False,
-    sleep_percentage: float = 0.5,
-    **_kwargs,
+    percentage: float = 0.5,
+    class_cnts=None,
+    target_classes=None,
 ):
     if target is None:
-        return False
+        return None
 
-    if reject_outside_sleep:
+    if REJECT_OUTSIDE_SLEEP:
         sleep_cols = [c for c in SCORED_SLEEP_LABELS if c in target.columns]
         if len(sleep_cols) == 0:
             raise ValueError(
                 f"reject_outside_sleep requires sleep labels {SCORED_SLEEP_LABELS}, "
                 f"but target columns are {list(target.columns)}."
             )
-        if target[sleep_cols].any(axis=1).mean() < sleep_percentage:
-            return False
-
-    return True
-
-
-def build_multiclass_target(
-    target,
-    target_extra=None,
-    percentage: float = 0.5,
-    class_cnts=None,
-    target_classes=None,
-    **_kwargs,
-):
-    if target is None:
-        return None
+        if target[sleep_cols].any(axis=1).mean() < SLEEP_PERCENTAGE:
+            return None
 
     if target_classes is not None:
         target = target.reindex(columns=target_classes, fill_value=0)
@@ -97,52 +82,41 @@ def build_multiclass_target(
     }
 
 
-def build_multiclass_sample(data, target, **item):
+def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
+    trimmed = trim_wake(data_df, label_df, label_extra_df)
+    if trimmed is None:
+        return None
+    label_df, label_extra_df = trimmed
+    return data_df, label_df, label_extra_df
+
+
+def prepare_multiclass_sample(data, target, **item):
     item["data"] = torch.from_numpy(data.values).float()
     item["target"] = target
     return item
 
-# TODO
-# - Change naming in BaseDataset -> fight for all filter funcions
-# - Refactor this weird mess below
-# - Add documentation
-
-def summarize_patient_sleep_time(dataset_name: str, patient: str) -> dict | None:
-    dataset_cfg = DATASET_CFG[dataset_name]
-    dataset = dataset_cfg["clazz"](
-        patients=[],
-        channels=[dataset_cfg["channels"][0]],
-        sample_frequency=100, # Dummy, not really used
-        event_mapping=dataset_cfg["event_mapping"],
-        num_workers=0,
-    )
-
-    meta = read_edf_meta(patient)
-    events = dataset.get_event_df(patient, meta["start"]).copy()
-    events["Label"] = events["Label"].apply(
-        lambda x: dataset_cfg["event_mapping"][x] if x in dataset_cfg["event_mapping"] else None
-    )
-    events = events.dropna()
-
-    trimmed = trim_wake(None, events, None)
-    if trimmed is None:
+def summarize_patient_sleep_time(patient: str, label_df: pd.DataFrame | None, **_kwargs) -> dict | None:
+    if label_df is None or len(label_df) == 0:
         return None
-
-    trimmed_events, _ = trimmed
+    trimmed_events = label_df.copy()
     trimmed_events["duration_s"] = (trimmed_events["Endtime"] - trimmed_events["Starttime"]).dt.total_seconds()
     sleep_seconds = trimmed_events.loc[trimmed_events["Label"].isin(SCORED_SLEEP_LABELS), "duration_s"].sum()
     return {"patient": patient, "sleep_seconds": float(sleep_seconds)}
 
 
-def filter_patients_by_sleep_time(dataset_name: str, patients: list[str]) -> list[str]:
+def filter_patients_by_sleep_time(dataset_name: str, model_name: str, grouped: bool, patients: list[str]) -> list[str]:
     if len(patients) < 3:
         return patients
 
-    stats_df = collect_patient_stats(
-        patients,
-        summarize_patient=partial(summarize_patient_sleep_time, dataset_name),
-        num_workers=NUM_WORKERS_DATASET,
+    dataset = get_dataset(
+        name=dataset_name,
+        model_name=model_name,
+        patients=[],
+        path_root=DATASET_ROOT,
+        grouped=grouped,
+        prepare_patient=prepare_sleep_staging_patient,
     )
+    stats_df = dataset.get_patient_stats(patients, summarize_patient_sleep_time, num_workers=NUM_WORKERS_DATASET)
     if len(stats_df) < 3 or "sleep_seconds" not in stats_df.columns:
         return patients
 
@@ -176,30 +150,25 @@ def build_loader(dataset, batch_size: int, n_samples: int | None, shuffle_defaul
     )
 
 def build_dataset_from_patients(dataset_name: str, model_name: str, grouped: bool, patients: list[str]):
-    filter_window = partial(
-        filter_multiclass_window,
-        reject_outside_sleep=REJECT_OUTSIDE_SLEEP,
-        sleep_percentage=SLEEP_PERCENTAGE,
-    )
-    build_target = partial(build_multiclass_target, target_classes=TARGET_CLASSES)
+    prepare_target = partial(prepare_multiclass_target, target_classes=TARGET_CLASSES)
 
-    return get_dataset(
+    dataset = get_dataset(
         name=dataset_name,
         model_name=model_name,
         patients=patients,
         path_root=DATASET_ROOT,
         grouped=grouped,
-        num_workers=NUM_WORKERS_DATASET,
-        filter_target=trim_wake,
-        filter_window=filter_window,
-        build_target=build_target,
-        build_sample=build_multiclass_sample,
+        prepare_patient=prepare_sleep_staging_patient,
+        prepare_target=prepare_target,
+        prepare_sample=prepare_multiclass_sample,
     )
+    dataset.initialize(patients, NUM_WORKERS_DATASET)
+    return dataset
 
 def split_train_val_test(dataset_name: str, model_name: str, grouped: bool, dry_run: bool):
     dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
     patients = get_edf_files_in_repo(dataset_path, recursive=True)
-    patients = filter_patients_by_sleep_time(dataset_name, patients)
+    patients = filter_patients_by_sleep_time(dataset_name, model_name, grouped, patients)
     if dry_run:
         patients = patients[:2]
 
@@ -222,7 +191,7 @@ def split_train_val_test(dataset_name: str, model_name: str, grouped: bool, dry_
 def split_train_val(dataset_name: str, model_name: str, grouped: bool, dry_run: bool):
     dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
     patients = get_edf_files_in_repo(dataset_path, recursive=True)
-    patients = filter_patients_by_sleep_time(dataset_name, patients)
+    patients = filter_patients_by_sleep_time(dataset_name, model_name, grouped, patients)
     if dry_run:
         patients = patients[:2]
 
@@ -240,7 +209,7 @@ def split_train_val(dataset_name: str, model_name: str, grouped: bool, dry_run: 
 def load_test_dataset(dataset_name: str, model_name: str, grouped: bool, dry_run: bool):
     dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
     patients = get_edf_files_in_repo(dataset_path, recursive=True)
-    patients = filter_patients_by_sleep_time(dataset_name, patients)
+    patients = filter_patients_by_sleep_time(dataset_name, model_name, grouped, patients)
     if dry_run:
         patients = patients[:2]
 
@@ -253,17 +222,12 @@ def load_test_dataset(dataset_name: str, model_name: str, grouped: bool, dry_run
             patients=patients,
             path_root=DATASET_ROOT,
             grouped=grouped,
-            num_workers=NUM_WORKERS_DATASET,
-            filter_target=trim_wake,
-            filter_window=partial(
-                filter_multiclass_window,
-                reject_outside_sleep=REJECT_OUTSIDE_SLEEP,
-                sleep_percentage=SLEEP_PERCENTAGE,
-            ),
-            build_target=partial(build_multiclass_target, target_classes=TARGET_CLASSES),
-            build_sample=build_multiclass_sample,
+            prepare_patient=prepare_sleep_staging_patient,
+            prepare_target=partial(prepare_multiclass_target, target_classes=TARGET_CLASSES),
+            prepare_sample=prepare_multiclass_sample,
             total_input=total_input,
         )
+        test_ds.initialize(patients, NUM_WORKERS_DATASET)
         logger.uncontext()
     return test_ds
 
@@ -356,15 +320,15 @@ def run(model_name, train_datasets: list[str], test_datasets: list[str] | None, 
         )
         class_cnts_list = [class_cnts.get(c, 1) for c in train_dataset.get_classes()]
         callback = partial(
-            build_multiclass_target,
+            prepare_multiclass_target,
             target_classes=train_dataset.get_classes(),
             class_cnts=class_cnts_list,
         )
         if isinstance(train_dataset, MultiDataset):
             for current_ds in train_dataset.datasets:
-                current_ds.build_target_callback = callback
+                current_ds.prepare_target_callback = callback
         else:
-            train_dataset.build_target_callback = callback
+            train_dataset.prepare_target_callback = callback
 
     if run_cfg["loss_mode"] != "regular":
         if class_cnts is None:

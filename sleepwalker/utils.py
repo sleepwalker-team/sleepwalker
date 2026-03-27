@@ -5,6 +5,40 @@ from typing import Any, Dict, Optional, List, Protocol
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 
+# (Pretty-print) Number of learnable parameters for PyTorch models
+def count_parameters(model, pretty=True):
+    def pretty_int(n):
+        if n >= 1_000_000_000:
+            v = n / 1_000_000_000
+            s = f"{v:.3g}b"
+        elif n >= 1_000_000:
+            v = n / 1_000_000
+            s = f"{v:.3g}m"
+        elif n >= 1_000:
+            v = n / 1_000
+            s = f"{v:.3g}k"
+        else:
+            s = str(n)
+        return s
+
+    def count_recursive(module):
+        total_params = 0
+        
+        for child in module.children():
+            child_params = count_recursive(child)
+            total_params += child_params
+        
+        if list(module.children()) == []:  # if module has no children, it's a layer
+            for param in module.parameters():
+                total_params += param.numel()
+        
+        return total_params
+    
+    p = count_recursive(model)
+    if pretty:
+        return pretty_int(p)
+    return p
+
 # ---------------------------
 # Level-aware formatter
 # ---------------------------

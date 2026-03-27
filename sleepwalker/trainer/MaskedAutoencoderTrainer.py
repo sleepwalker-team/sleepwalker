@@ -148,11 +148,8 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        X = torch.cat(X, 0).cpu().numpy()
-        y = torch.cat(y, 0).cpu().numpy()
-
-        clf = LogisticRegression(max_iter=1000)
-        clf.fit(X, y)
+        X_train = torch.cat(X, 0).cpu().numpy()
+        y_train = torch.cat(y, 0).cpu().numpy()
 
         # Embed the test data for the downstream model
         logger.progress_start(total=len(test_loader) * test_loader.batch_size, desc='Embed TEST', leave=True)
@@ -169,13 +166,40 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        if len(X) > 0:
-            X = torch.cat(X, 0).cpu().numpy()
-            y = torch.cat(y, 0).cpu().numpy()
+        X_test = torch.cat(X, 0).cpu().numpy()
+        y_test = torch.cat(y, 0).cpu().numpy()
 
-            y_pred = clf.predict(X)
-            cm = confusion_matrix(y, y_pred)
-            self._log_from_cm(cm, mode='test', scope='epoch', step=self.epoch_step)
+        # Train three models:
+        #   1. Take the CLS token as embedding
+        #   2. Take the average window tokens (all of them)
+        #   3. Take the average of the middle 150 seconds
+
+        X_train_cls = X_train[:, 0].reshape(X_train.shape[0], -1)
+        X_train_total = X_train[:, 1:].mean(1).reshape(X_train.shape[0], -1)
+        X_train_sub = X_train[:, 31:81].mean(1).reshape(X_train.shape[0], -1)
+
+        X_test_cls = X_test[:, 0].reshape(X_test.shape[0], -1)
+        X_test_total = X_test[:, 1:].mean(1).reshape(X_test.shape[0], -1)
+        X_test_sub = X_test[:, 31:81].mean(1).reshape(X_test.shape[0], -1)
+
+        clf_cls = LogisticRegression(max_iter=10000)
+        clf_cls.fit(X_train_cls, y_train)
+        y_pred = clf_cls.predict(X_test_cls)
+        cm = confusion_matrix(y_test, y_pred)
+        self._log_from_cm(cm, mode='CLS', scope='epoch', step=self.epoch_step)
+
+        clf_total = LogisticRegression(max_iter=10000)
+        clf_total.fit(X_train_total, y_train)
+        y_pred = clf_total.predict(X_test_total)
+        cm = confusion_matrix(y_test, y_pred)
+        self._log_from_cm(cm, mode='TOTAL', scope='epoch', step=self.epoch_step)
+
+        clf_sub = LogisticRegression(max_iter=10000)
+        clf_sub.fit(X_train_sub, y_train)
+        y_pred = clf_sub.predict(X_test_sub)
+        cm = confusion_matrix(y_test, y_pred)
+        self._log_from_cm(cm, mode='SUB', scope='epoch', step=self.epoch_step)
+
     
     def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None):
         opt = self.optimizer_fn(model)

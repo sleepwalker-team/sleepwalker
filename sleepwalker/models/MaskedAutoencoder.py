@@ -128,7 +128,7 @@ class MaskedAutoencoder(BaseModel):
 
         z = self.encoder(x)
         z = self.encoder_norm(z)
-        z = z[:, 0]
+        z = rearrange(z, '(B D) N F -> B N F D', D=D, B=B)
         return z
 
     def forward(self, x):

@@ -93,6 +93,26 @@ class MaskedAutoencoder(BaseModel):
             self.cls_token = nn.Parameter(torch.zeros(1,1,self.enc_dim))
             nn.init.trunc_normal_(self.cls_token, std=0.02)
 
+    def get_hyperparameters(self):
+        hp = {
+            'token_size': self.token_size,
+            'window_size': self.window_size,
+            'window_step_size': self.window_step_size,
+            'mask_fraction': self.mask_fraction,
+            'enc_heads': self.enc_heads,
+            'enc_depth': self.enc_depth,
+            'enc_dim': self.enc_dim,
+            'enc_dropout': self.enc_dropout,
+            'enc_mlp_ratio': self.enc_mlp_ratio,
+            'dec_heads': self.dec_heads,
+            'dec_depth': self.dec_depth,
+            'dec_dim': self.dec_dim,
+            'dec_dropout': self.dec_dropout,
+            'dec_mlp_ratio': self.dec_mlp_ratio,
+            'use_cls': self.use_cls,
+        }
+        return hp
+
     # TODO: At the moment, we concatenate the channel dimension to the batch dimension, meaning we cut out different timesteps per channel
     def _random_mask(self, B, N, device):
         rand_indices = torch.stack([torch.randperm(N) for _ in range(B)], 0).to(device)

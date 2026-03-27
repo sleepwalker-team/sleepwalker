@@ -14,7 +14,7 @@ from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.trainer.utils import trim_wake, get_target_as_multiclass
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
-from sleepwalker.utils import logger, MlflowSink
+from sleepwalker.utils import logger, MlflowSink, count_parameters
 
 load_dotenv()
 
@@ -173,13 +173,16 @@ def main():
     train_dl, val_dl, test_dl = get_dataloader(train_ds, val_ds, test_ds)
 
     model = MaskedAutoencoder()
+    print('Number of parameters:', count_parameters(model))
+    model_hp = model.get_hyperparameters()
 
     print('Tracking to MLFLOW instance', os.environ['MLFLOW_URL'])
     logger.add_sink(MlflowSink(tracking_uri=os.environ['MLFLOW_URL'], experiment='debug', artifact_uri=None))
-    logger.start_run(run_name='testrun', params={})
+    logger.start_run(run_name='testrun', params=model_hp)
 
+    EPOCHS=25
     trainer = MaskedAutoencoderTrainer(
-        epochs=10,
+        epochs=EPOCHS,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=2e-3),
         classes=train_ds.get_classes(),
         device=DEVICE,

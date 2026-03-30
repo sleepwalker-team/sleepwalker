@@ -17,7 +17,9 @@ from sleepwalker.utils import logger
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
 
 def masked_mse(y_pred, y_true, mask):
-    return (((y_pred - y_true)**2) * mask).mean()
+    sq_err = (y_pred - y_true)**2  # [B, F, N, D]
+    mask_expanded = mask.expand_as(sq_err) 
+    return sq_err[mask_expanded.bool()].mean()
 
 class MaskedAutoencoderTrainer(ABC):
     def __init__(

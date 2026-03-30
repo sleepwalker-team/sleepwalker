@@ -174,19 +174,11 @@ class MaskedAutoencoderTrainer(ABC):
         #   2. Take the average of the middle 150 seconds
         #   3. Take the average of the middle 30 seconds (since they have context already)
 
-        X_train_total = X_train[:, 1:].mean(1).reshape(X_train.shape[0], -1)
-        X_train_sub150 = X_train[:, 31:81].mean(1).reshape(X_train.shape[0], -1)
-        X_train_sub30 = X_train[:, 51:61].mean(1).reshape(X_train.shape[0], -1)
+        X_train_sub150 = X_train[:, 31:81].mean(1).mean(-1)
+        X_train_sub30 = X_train[:, 51:61].mean(1).mean(-1)
 
-        X_test_total = X_test[:, 1:].mean(1).reshape(X_test.shape[0], -1)
-        X_test_sub150 = X_test[:, 31:81].mean(1).reshape(X_test.shape[0], -1)
-        X_test_sub30 = X_test[:, 51:61].mean(1).reshape(X_test.shape[0], -1)
-
-        clf_total = LogisticRegression(max_iter=10000)
-        clf_total.fit(X_train_total, y_train)
-        y_pred = clf_total.predict(X_test_total)
-        cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='TOTAL', scope='epoch', step=self.epoch_step)
+        X_test_sub150 = X_test[:, 31:81].mean(1).mean(-1)
+        X_test_sub30 = X_test[:, 51:61].mean(1).mean(-1)
 
         clf_sub = LogisticRegression(max_iter=10000)
         clf_sub.fit(X_train_sub150, y_train)
@@ -199,58 +191,6 @@ class MaskedAutoencoderTrainer(ABC):
         y_pred = clf_sub.predict(X_test_sub30)
         cm = confusion_matrix(y_test, y_pred)
         self._log_from_cm(cm, mode='SUB30', scope='epoch', step=self.epoch_step)
-
-        # Finally, lets test CLS again, but with a shorter context window
-        logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL', leave=True)
-
-        logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL (middle 150s)', leave=True)
-        X = []
-        y = []
-        for batch in val_loader:
-            x = batch['data'].to(self.device)
-            shape_before = x.shape
-            x = x[:, 9000:24000]
-            shape_after = x.shape
-            class_label = batch['target'].argmax(-1).to(self.device)
-            embeddings = model.embed(x)
-            embeddings = embeddings[:, 0]
-
-            X.append(embeddings)
-            y.append(class_label)
-            logger.progress_advance(val_loader.batch_size)
-
-        logger.progress_close()
-
-        X_train = torch.cat(X, 0).cpu().numpy()
-        y_train = torch.cat(y, 0).cpu().numpy()
-
-        logger.progress_start(total=len(test_loader) * test_loader.batch_size, desc='Embed TEST (middle 150s)', leave=True)
-        X = []
-        y = []
-        for batch in test_loader:
-            x = batch['data'].to(self.device)
-            class_label = batch['target'].argmax(-1).to(self.device)
-            embeddings = model.embed(x)
-            embeddings = embeddings[:, 0]
-
-            X.append(embeddings)
-            y.append(class_label)
-            logger.progress_advance(test_loader.batch_size)
-
-        logger.progress_close()
-
-        X_test = torch.cat(X, 0).cpu().numpy()
-        y_test = torch.cat(y, 0).cpu().numpy()
-
-        X_train_cls = X_train.reshape(X_train.shape[0], -1)
-        X_test_cls = X_test.reshape(X_test.shape[0], -1)
-
-        clf_cls = LogisticRegression(max_iter=10000)
-        clf_cls.fit(X_train_cls, y_train)
-        y_pred = clf_total.predict(X_test_cls)
-        cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='CLS', scope='epoch', step=self.epoch_step)
-
     
     def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None):
         opt = self.optimizer_fn(model)

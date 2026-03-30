@@ -75,7 +75,8 @@ def get_datasets():
     val_patients, test_patients = random_split(rest, test_frac=0.5, seed=918171)
 
     channels = [
-        ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY))
+        ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+        ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
     ]
     event_mapping = {
         'wach': 'wake',

@@ -162,14 +162,17 @@ class MaskedAutoencoder(BaseModel):
         x = self.input_projection(x)
         x = x + self.encoder_positional_encoding.pe[1:N+1].unsqueeze(0)
 
-        # Apply masking
-        ids_keep, ids_discard = self._random_mask(B*D, N, x.device)
+        # Apply masking (one mask per batch item, shared across channels)
+        ids_keep, ids_discard = self._random_mask(B, N, x.device)
+        ids_keep_bd = ids_keep.repeat_interleave(D, dim=0)
+        ids_discard_bd = ids_discard.repeat_interleave(D, dim=0)
         _B = torch.arange(B*D)[:, None] # Indexing helper
-        x = x[_B, ids_keep]
+        x = x[_B, ids_keep_bd]
 
         # Create mask (for later)
-        mask = torch.zeros((B*D, N)).to(x.device)
-        mask[_B, ids_discard] = 1
+        _Bb = torch.arange(B)[:, None]
+        mask = torch.zeros((B, N)).to(x.device)
+        mask[_Bb, ids_discard] = 1
 
         if self.use_cls:
             pe = self.encoder_positional_encoding.pe[0]
@@ -184,8 +187,8 @@ class MaskedAutoencoder(BaseModel):
         # Create full tokens again, filling dropped-out tokens with masking token
         offset = 1 if self.use_cls else 0
         dec_tokens = torch.zeros(B*D, N+offset, self.dec_dim).to(z.device)
-        dec_tokens[_B, ids_keep+offset] = dec_keep[:, 1:] if self.use_cls else dec_keep
-        dec_tokens[_B, ids_discard+offset] = self.mask_token.expand(B*D, ids_discard.shape[-1], -1)
+        dec_tokens[_B, ids_keep_bd+offset] = dec_keep[:, 1:] if self.use_cls else dec_keep
+        dec_tokens[_B, ids_discard_bd+offset] = self.mask_token.expand(B*D, ids_discard_bd.shape[-1], -1)
         if self.use_cls:
             dec_tokens[:, 0] = dec_keep[:, 0]
 
@@ -199,6 +202,6 @@ class MaskedAutoencoder(BaseModel):
             dec_tokens = dec_tokens[:, 1:]
         patches = self.output_projection(dec_tokens)
         patches = rearrange(patches, 'B N D F -> B F N D')
-        mask = rearrange(mask, '(B D) N -> B 1 N D', B=B, D=D)
+        mask = mask.unsqueeze(1).unsqueeze(-1).expand(B, 1, N, D)
 
         return patches, mask

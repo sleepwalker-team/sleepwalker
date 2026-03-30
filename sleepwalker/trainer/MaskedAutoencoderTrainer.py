@@ -172,15 +172,23 @@ class MaskedAutoencoderTrainer(ABC):
         y_test = torch.cat(y, 0).cpu().numpy()
 
         # Train three models:
-        #   1. Take the average window tokens (all of them)
+        #   1. Take the CLS token
         #   2. Take the average of the middle 150 seconds
         #   3. Take the average of the middle 30 seconds (since they have context already)
 
+        X_train_cls = X_train[:, 0:1].mean(1).mean(-1)
         X_train_sub150 = X_train[:, 31:81].mean(1).mean(-1)
         X_train_sub30 = X_train[:, 51:61].mean(1).mean(-1)
 
+        X_test_cls = X_test[:, 0:1].mean(1).mean(-1)
         X_test_sub150 = X_test[:, 31:81].mean(1).mean(-1)
         X_test_sub30 = X_test[:, 51:61].mean(1).mean(-1)
+
+        clf_cls = LogisticRegression(max_iter=10000)
+        clf_cls.fit(X_train_cls, y_train)
+        y_pred = clf_cls.predict(X_test_cls)
+        cm = confusion_matrix(y_test, y_pred)
+        self._log_from_cm(cm, mode='CLS', scope='epoch', step=self.epoch_step)
 
         clf_sub = LogisticRegression(max_iter=10000)
         clf_sub.fit(X_train_sub150, y_train)

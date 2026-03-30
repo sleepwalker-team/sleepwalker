@@ -2,19 +2,18 @@ import torch
 from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Normalize(Preprocessor):
-    def __init__(self, dims=(0,)):
+    def __init__(self):
         super().__init__()
         self.register_buffer("mean", None)
         self.register_buffer("M2", None)
         self.count = 0
-        self.dims = dims
         # self.register_buffer("count", torch.tensor(0.0))
 
     def update(self, data: torch.Tensor):
         # Batch statistics
         batch_count = data.shape[0]
-        batch_mean = data.mean(dim=self.dims, keepdim=True)
-        batch_M2 = ((data - batch_mean) ** 2).sum(dim=self.dims, keepdim=True)
+        batch_mean = data.mean(dim=0)
+        batch_M2 = ((data - batch_mean) ** 2).sum(dim=0)
 
         if self.mean is None:
             # Initialize with first batch

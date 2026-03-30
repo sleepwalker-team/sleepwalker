@@ -31,7 +31,7 @@ class MaskedAutoencoder(BaseModel):
     ):
         spec = [
             WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
-            Normalize()
+            Normalize(stat_dims=(1,3))
         ]
         super().__init__(preprocessors=spec)
 

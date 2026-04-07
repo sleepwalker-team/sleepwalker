@@ -223,7 +223,7 @@ def build_weighted_task_config(task_config, class_cnts):
         if len(class_weights) > 0:
             weights_torch = torch.tensor(
                 [class_weights.get(label, 1.0) for label in current_cfg["labels"]],
-                #device="cuda:0",
+                device="cuda:0",
                 dtype=torch.float32,
             )
             current_cfg["loss_function"] = partial(loss_function, weight=weights_torch)

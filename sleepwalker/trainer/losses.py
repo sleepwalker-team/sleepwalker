@@ -135,8 +135,6 @@ def estimate_multilabel_class_cnts(
         num_workers = num_workers,
         collate_fn = partial(batch_collate, ignore_list=["time", "patient", "data"]),
         drop_last = False,
-        persistent_workers = num_workers > 0,
-        pin_memory = False,
     )
 
     class_cnts = {

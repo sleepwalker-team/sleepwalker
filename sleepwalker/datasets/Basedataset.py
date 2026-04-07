@@ -19,6 +19,7 @@ from torch.utils.data import Dataset
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
 from sleepwalker.datasets.normalizer import Normalizer
+from sleepwalker.trainer.utils import build_multiclass_target
 import multiprocessing
 
 @dataclass
@@ -26,6 +27,7 @@ class ChannelConfig:
     name: str
     normalizer: Optional[Normalizer] = None  
     group: Optional[str] = None
+    quality_name: Optional[str] = None
 
 @dataclass
 class EDFFile: 
@@ -42,7 +44,7 @@ class EDFFile:
 
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
         if self.X is None:
-            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type)
+            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type, True)
             # TODO allow normalization after augmentation?  
             if self.normalizers:
                 for col, norm in self.normalizers.items():
@@ -308,7 +310,7 @@ class BaseDataset(Dataset, ABC):
 
     prepare_patient
         Optional callback for whole-patient preparation. It receives
-        `data_df`, `label_df`, `label_extra_df`, `patient`, `start`, and `end`.
+        `data_df`, `label_df`, `label_extra_df`, and `patient`.
         It should return `(data_df, label_df, label_extra_df)` or `None`.
 
     prepare_target
@@ -344,7 +346,7 @@ class BaseDataset(Dataset, ABC):
     Trim wake once per patient:
 
     ```python
-    def prepare_patient(data_df, label_df, label_extra_df, **_kwargs):
+    def prepare_patient(data_df, label_df, label_extra_df, patient=None):
         trimmed = trim_wake(data_df, label_df, label_extra_df)
         if trimmed is None:
             return None
@@ -355,23 +357,29 @@ class BaseDataset(Dataset, ABC):
     Build a multiclass target and reject low-sleep windows cheaply:
 
     ```python
-    def prepare_target(target, target_extra=None, **_kwargs):
+    def prepare_target(target, target_extra=None, patient=None, time=None):
         if target is None:
             return None
         sleep_fraction = target[["n1", "n2", "n3", "rem"]].any(axis=1).mean()
         if sleep_fraction < 0.5:
             return None
-        return {"target": get_target_as_multiclass(target, target_extra)}
+        return build_multiclass_target(target, target_extra)
     ```
 
     Convert signals to tensors and reject bad windows:
 
     ```python
-    def prepare_sample(data, target, **item):
+    def prepare_sample(data, target, target_extra=None, patient=None, time=None):
         if data.isna().mean().mean() > 0.1:
             return None
-        item["data"] = torch.from_numpy(data.values).float()
-        item["target"] = target
+        item = {
+            "data": torch.from_numpy(data.values).float(),
+            "target": target,
+            "patient": patient,
+            "time": time,
+        }
+        if target_extra is not None:
+            item["target_extra"] = target_extra
         return item
     ```
     """
@@ -414,11 +422,16 @@ class BaseDataset(Dataset, ABC):
         self.lower_bounds: list[int] = []
         self.upper_bounds: list[int] = []
         self.channel_groups: Dict[str, list[str]] = defaultdict(list)
+        self.channel_configs_by_name: Dict[str, ChannelConfig] = {}
+        self.channel_configs_by_group: Dict[str, list[ChannelConfig]] = defaultdict(list)
         for cfg in self.channels:
+            self.channel_configs_by_name[cfg.name] = cfg
             if cfg.group is not None:
                 self.channel_groups[cfg.group].append(cfg.name)
+                self.channel_configs_by_group[cfg.group].append(cfg)
             else:
                 self.channel_groups[cfg.name].append(cfg.name)
+                self.channel_configs_by_group[cfg.name].append(cfg)
 
         # Events/classes
         if event_mapping is not None:
@@ -453,16 +466,24 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         return len(self.edf_files)
 
+    def get_input_channels(self) -> list[str]:
+        return list(self.channel_groups.keys())
+
     def __len__(self):
         return sum([f.length for f in self.edf_files])
 
     def _prepare_patient_artifacts(self, edf_path):
-        channel_names = [c.name for c in self.channels]
+        channel_names = []
+        for cfg in self.channels:
+            channel_names.append(cfg.name)
+            if cfg.quality_name is not None:
+                channel_names.append(cfg.quality_name)
+        channel_names = list(dict.fromkeys(channel_names))
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
         classes = set()
         extra_classes = set()
-        data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type)
+        data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type, verbose=True)
         if data_df is None or len(data_df) == 0:
             raise ValueError("Found empty EDF file")
 
@@ -514,8 +535,6 @@ class BaseDataset(Dataset, ABC):
                     label_df=df,
                     label_extra_df=df_additional,
                     patient=edf_path,
-                    start=start,
-                    end=end,
                 )
                 if prepared is None:
                     return None
@@ -613,8 +632,6 @@ class BaseDataset(Dataset, ABC):
                 data_df=artifacts["data_df"],
                 label_df=artifacts["label_df"],
                 label_extra_df=artifacts["label_extra_df"],
-                start=artifacts["start"],
-                end=artifacts["end"],
             )
             if row is None:
                 return None
@@ -680,27 +697,39 @@ class BaseDataset(Dataset, ABC):
         self.initialized = True
 
     def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        quality_df = None
         if len(self.channel_groups) > 0:
             available_columns = list(x_df.columns)
             selected_columns = []
-            renamed_columns = self.channel_groups.keys()
+            renamed_columns = list(self.channel_groups.keys())
+            selected_quality = {}
 
             # Emit one sampled representative per configured group and rename the
             # result to the conceptual group name so downstream code sees stable columns.
-            for group, group_channels in self.channel_groups.items():
-                available = [col for col in available_columns if col in set(group_channels)]
+            for group, group_cfgs in self.channel_configs_by_group.items():
+                available = [cfg for cfg in group_cfgs if cfg.name in set(available_columns)]
                 if len(available) == 0:
                     raise ValueError(f"No available channels found for group '{group}'.")
 
-                selected_columns.append(str(np.random.choice(available)))
+                selected_cfg = available[int(np.random.choice(len(available)))]
+                selected_columns.append(selected_cfg.name)
+                if selected_cfg.quality_name is not None:
+                    if selected_cfg.quality_name not in x_df.columns:
+                        raise ValueError(
+                            f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
+                        )
+                    selected_quality[group] = x_df[selected_cfg.quality_name].copy()
 
             x_selected = x_df.loc[:, selected_columns].copy()
             x_selected.columns = renamed_columns
             x_df = x_selected
+            if len(selected_quality) > 0:
+                quality_df = pd.DataFrame(selected_quality, index=x_df.index)
 
         if self.prepare_sample_callback is not None:
             return self.prepare_sample_callback(
                 data=x_df,
+                quality_data=quality_df,
                 target=item.get("target"),
                 target_extra=item.get("target_extra"),
                 patient=item.get("patient"),
@@ -708,7 +737,8 @@ class BaseDataset(Dataset, ABC):
                 **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
             )
         else:
-            return {"data": torch.from_numpy(x_df.values).float()}
+            item["data"] = torch.from_numpy(x_df.values).float()
+            return item
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
         end_date = start_date + self.total_input

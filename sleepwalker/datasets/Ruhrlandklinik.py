@@ -356,8 +356,8 @@ class Ruhrlandklinik(BaseDataset):
                     non_cnt += 1
                     xls_file.at[idx, "Ereignis"] = None
         
-        if non_cnt > 0:
-            logger.info(f"Removed {non_cnt} annotations for patient {edf_path}, due to not being asleep.")
+        # if non_cnt > 0:
+        #     logger.info(f"Removed {non_cnt} annotations for patient {edf_path}, due to not being asleep.")
 
         arousals = ["arousal", "plm-arousal", "rera"]
         if any(a.lower() in events for a in arousals):

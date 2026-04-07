@@ -27,7 +27,8 @@ from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
-from sleepwalker.datasets.utils import RepeatSampler, get_edf_files_in_repo
+from sleepwalker.datasets.NumpyDataset import NumpyDataset
+from sleepwalker.datasets.utils import RepeatSampler, export_dataset_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 
@@ -98,9 +99,11 @@ def test_get_item_rejects_before_loading_signal():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
             target=target,
             target_extra=target_extra,
+            patient=patient,
+            time=time,
             class_cnts=[1.0, 100.0],
             task_config=task_config,
         ),
@@ -136,9 +139,11 @@ def test_get_item_loads_signal_after_label_precheck():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
             target=target,
             target_extra=target_extra,
+            patient=patient,
+            time=time,
             task_config=task_config,
         ),
     )
@@ -495,3 +500,146 @@ if __name__ == '__main__':
     # test_multi_dataset()
     # test_cap_dataset()
     test_zarr_dataset()
+
+
+class CacheReadyDataset(torch.utils.data.Dataset):
+    def __init__(self):
+        self.sample_frequency = 2
+        self.resample_type = 'nearest'
+        self.total_input = pd.Timedelta(seconds=2)
+        self.target_resolution = pd.Timedelta(seconds=1)
+        self.classes = ['wake', 'rem']
+        self.label_classes = list(self.classes)
+        self.initialized = True
+        self.all_patients = ['patient-a', 'patient-b']
+
+    def __len__(self):
+        return 3
+
+    def get_classes(self):
+        return list(self.classes)
+
+    def has_extra_target(self):
+        return True
+
+    def get_n_patients(self):
+        return 2
+
+    def get_input_channels(self):
+        return ['eeg', 'emg']
+
+    def get_timeseries_len(self):
+        return 4
+
+    def __getitem__(self, idx):
+        base = idx * 10
+        return {
+            'data': torch.tensor([[base + 1, base + 2], [base + 3, base + 4], [base + 5, base + 6], [base + 7, base + 8]], dtype=torch.float32),
+            'target': torch.tensor([1.0, 0.0], dtype=torch.float32) if idx % 2 == 0 else torch.tensor([0.0, 1.0], dtype=torch.float32),
+            'target_extra': torch.tensor([float(idx), float(idx + 1)], dtype=torch.float32),
+            'patient': 'patient-a' if idx < 2 else 'patient-b',
+            'time': pd.Timestamp('2024-01-01') + pd.Timedelta(seconds=idx),
+            'dataset': idx % 2,
+        }
+
+
+class GroupedCacheDataset(torch.utils.data.Dataset):
+    def __init__(self):
+        self.sample_frequency = 1
+        self.resample_type = 'nearest'
+        self.total_input = pd.Timedelta(seconds=3)
+        self.target_resolution = pd.Timedelta(seconds=1)
+        self.classes = ['wake']
+        self.label_classes = list(self.classes)
+        self.initialized = True
+        self.all_patients = ['patient-a']
+
+    def __len__(self):
+        return 1
+
+    def get_classes(self):
+        return list(self.classes)
+
+    def has_extra_target(self):
+        return False
+
+    def get_n_patients(self):
+        return 1
+
+    def get_input_channels(self):
+        return ['eeg']
+
+    def get_timeseries_len(self):
+        return 3
+
+    def __getitem__(self, idx):
+        channel_a = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
+        channel_b = torch.tensor([[11.0], [12.0], [13.0]], dtype=torch.float32)
+        data = channel_a if np.random.choice([0, 1]) == 0 else channel_b
+        return {
+            'data': data,
+            'target': torch.tensor([1.0], dtype=torch.float32),
+            'patient': 'patient-a',
+            'time': pd.Timestamp('2024-01-01'),
+        }
+
+
+def test_numpy_dataset_export_roundtrip(tmp_path):
+    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache', num_workers=0, batch_size=2, extra_keys=['dataset'])
+
+    dataset = NumpyDataset(cache_dir)
+
+    assert len(dataset) == 3
+    assert dataset.get_classes() == ['wake', 'rem']
+    assert dataset.has_extra_target() is True
+    assert dataset.get_input_channels() == ['eeg', 'emg']
+
+    item = dataset[1]
+    assert torch.equal(item['data'], torch.tensor([[11.0, 12.0], [13.0, 14.0], [15.0, 16.0], [17.0, 18.0]]))
+    assert torch.equal(item['target'], torch.tensor([0.0, 1.0]))
+    assert torch.equal(item['target_extra'], torch.tensor([1.0, 2.0]))
+    assert item['patient'] == 'patient-a'
+    assert item['time'] == pd.Timestamp('2024-01-01 00:00:01')
+    assert item['dataset'] == 1
+
+
+def test_numpy_dataset_supports_memmap(tmp_path):
+    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache', num_workers=0, batch_size=2)
+
+    dataset = NumpyDataset(cache_dir, in_memory=False)
+
+    assert len(dataset) == 3
+    assert dataset[0]['data'].shape == (4, 2)
+
+
+def test_numpy_cache_freezes_one_export_pass(tmp_path, monkeypatch):
+    source = GroupedCacheDataset()
+    choices = iter([1, 0, 0])
+    monkeypatch.setattr(np.random, 'choice', lambda values: next(choices))
+
+    cache_dir = export_dataset_to_numpy_dir(source, tmp_path / 'cache', num_workers=0, batch_size=1)
+    cached = NumpyDataset(cache_dir)
+
+    first = cached[0]['data'].clone()
+    second = cached[0]['data'].clone()
+    assert torch.equal(first, second)
+    assert torch.equal(first, torch.tensor([[11.0], [12.0], [13.0]]))
+
+    live_item = source[0]['data']
+    assert torch.equal(live_item, torch.tensor([[1.0], [2.0], [3.0]]))
+
+
+def test_numpy_dataset_chunked_roundtrip(tmp_path):
+    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache_chunked', num_workers=0, batch_size=2, extra_keys=['dataset'], n_samples_per_file=2)
+
+    assert (cache_dir / 'data.000000.npy').exists()
+    assert (cache_dir / 'data.000001.npy').exists()
+
+    dataset = NumpyDataset(cache_dir, in_memory=False)
+
+    assert len(dataset) == 3
+    item = dataset[2]
+    assert torch.equal(item['data'], torch.tensor([[21.0, 22.0], [23.0, 24.0], [25.0, 26.0], [27.0, 28.0]]))
+    assert torch.equal(item['target'], torch.tensor([1, 0]))
+    assert item['patient'] == 'patient-b'
+    assert item['dataset'] == 0

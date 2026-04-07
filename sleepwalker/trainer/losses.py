@@ -1,6 +1,11 @@
+from functools import partial
 from typing import Literal, Optional
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, RandomSampler
+
+from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.utils import logger
 
 
 def dice_loss(pred, target, weight = None, epsilon=1e-3):
@@ -53,3 +58,114 @@ def class_weights_for_loss(user_weights: dict[str, float], class_distribution: d
             new_weights[c] = mu * np.clip(np.log( (total * mu) / class_distribution[c]), min=1.0)
         
     return new_weights
+
+
+def build_multilabel_task_masks(
+    y: torch.Tensor,
+    task_config: dict[str, dict],
+    condition_task: Optional[str] = None,
+    condition_labels: Optional[list[str]] = None,
+    conditioned_tasks: Optional[list[str]] = None,
+):
+    task_specs = list(task_config.values())
+    task_masks = {
+        cfg["task"]: torch.ones(y.shape[0], dtype=torch.bool, device=y.device)
+        for cfg in task_specs
+    }
+    if condition_task is None:
+        return task_masks
+
+    if condition_labels is None or len(condition_labels) == 0:
+        raise ValueError("condition_labels must not be empty when condition_task is set.")
+
+    condition_idx = None
+    for idx, cfg in enumerate(task_specs):
+        if cfg["task"] == condition_task:
+            condition_idx = idx
+            condition_cfg = cfg
+            break
+    if condition_idx is None:
+        raise ValueError(f"Unknown condition_task '{condition_task}'.")
+
+    unknown_labels = [label for label in condition_labels if label not in condition_cfg["labels"]]
+    if len(unknown_labels) > 0:
+        raise ValueError(
+            f"condition_labels contains labels not present in task '{condition_task}': {unknown_labels}"
+        )
+
+    y_condition = y[:, condition_idx, :condition_cfg["n_steps"]]
+    if (y_condition < 0).any():
+        raise ValueError(
+            f"Condition task '{condition_task}' contains invalid targets. "
+            "Unclear labels must be filtered in get_target()."
+        )
+
+    condition_mask = torch.zeros_like(y_condition, dtype=torch.bool)
+    for idx in [condition_cfg["labels"].index(label) for label in condition_labels]:
+        condition_mask |= y_condition == idx
+    condition_mask = condition_mask.any(dim=1)
+
+    conditioned = set(conditioned_tasks or [task for task in task_config if task != condition_task])
+    for task in conditioned:
+        if task not in task_config:
+            raise ValueError(f"Unknown conditioned task '{task}'.")
+        if task == condition_task:
+            raise ValueError("condition_task must not also be listed in conditioned_tasks.")
+        task_masks[task] = condition_mask
+
+    return task_masks
+
+
+def estimate_multilabel_class_cnts(
+    dataset,
+    task_config: dict[str, dict],
+    condition_task: Optional[str] = None,
+    condition_labels: Optional[list[str]] = None,
+    conditioned_tasks: Optional[list[str]] = None,
+    n_samples: Optional[int] = None,
+    num_workers: int = 8,
+    batch_size: int = 128,
+):
+    sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
+    loader = DataLoader(
+        dataset = dataset,
+        batch_size = batch_size,
+        shuffle = False,
+        sampler = sampler,
+        num_workers = num_workers,
+        collate_fn = partial(batch_collate, ignore_list=["time", "patient", "data"]),
+        drop_last = False,
+        persistent_workers = num_workers > 0,
+        pin_memory = False,
+    )
+
+    class_cnts = {
+        cfg["task"]: torch.zeros(len(cfg["labels"]), dtype=torch.float64)
+        for cfg in task_config.values()
+    }
+    logger.progress_start(len(loader) * batch_size, desc="Estimating class counts", leave=True)
+    for batch in loader:
+        y = batch["target"]
+        task_masks = build_multilabel_task_masks(
+            y,
+            task_config,
+            condition_task=condition_task,
+            condition_labels=condition_labels,
+            conditioned_tasks=conditioned_tasks,
+        )
+        for task_idx, cfg in enumerate(task_config.values()):
+            y_task = y[:, task_idx, :cfg["n_steps"]]
+            y_selected = y_task[task_masks[cfg["task"]]]
+            if y_selected.numel() == 0:
+                continue
+            if (y_selected < 0).any():
+                raise ValueError(f"Task '{cfg['task']}' contains invalid targets while estimating class counts.")
+            counts = torch.bincount(y_selected.reshape(-1), minlength=len(cfg["labels"]))
+            class_cnts[cfg["task"]] += counts.to(dtype=torch.float64)
+        logger.progress_advance(batch_size)
+    logger.progress_close()
+
+    return {
+        task: {label: float(class_cnts[task][idx].item()) for idx, label in enumerate(task_config[task]["labels"])}
+        for task in task_config
+    }

@@ -22,7 +22,7 @@ from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.utils import estimate_class_cnts, get_edf_files_in_repo, random_split
 from sleepwalker.trainer.losses import class_weights_for_loss
 from sleepwalker.trainer.tasks.sleep_staging import DATASET_CFG, MODEL_CFG, TARGET_CLASSES, get_dataset, get_model_and_trainer
-from sleepwalker.trainer.utils import append_to_jsonl, get_target_as_multiclass, trim_wake
+from sleepwalker.trainer.utils import append_to_jsonl, build_multiclass_target, trim_wake
 from sleepwalker.utils import logger, suppress_stdout_logging
 
 from lamarr_energy_tracker import EnergyTracker
@@ -50,6 +50,8 @@ SLEEP_TIME_FILTER_QUANTILE = 0.05
 def prepare_multiclass_target(
     target,
     target_extra=None,
+    patient=None,
+    time=None,
     percentage: float = 0.5,
     class_cnts=None,
     target_classes=None,
@@ -72,28 +74,26 @@ def prepare_multiclass_target(
         if target_extra is not None:
             target_extra = target_extra.reindex(columns=target_classes, fill_value=0)
 
-    return {
-        "target": get_target_as_multiclass(
-            target=target,
-            target_extra=target_extra,
-            percentage=percentage,
-            class_cnts=class_cnts,
-        )
-    }
+    return build_multiclass_target(
+        target=target,
+        target_extra=target_extra,
+        percentage=percentage,
+        class_cnts=class_cnts,
+    )
 
-
-def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
+def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):
     trimmed = trim_wake(data_df, label_df, label_extra_df)
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
     return data_df, label_df, label_extra_df
 
-
-def prepare_multiclass_sample(data, target, **item):
-    item["data"] = torch.from_numpy(data.values).float()
-    item["target"] = target
-    return item
+# def prepare_multiclass_sample(data, target, **item):
+#     item["data"] = torch.from_numpy(data.values).float()
+#     item["target"] = target
+#     if item.get("target_extra") is None:
+#         item.pop("target_extra", None)
+#     return item
 
 def summarize_patient_sleep_time(patient: str, label_df: pd.DataFrame | None, **_kwargs) -> dict | None:
     if label_df is None or len(label_df) == 0:
@@ -160,7 +160,7 @@ def build_dataset_from_patients(dataset_name: str, model_name: str, grouped: boo
         grouped=grouped,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_target=prepare_target,
-        prepare_sample=prepare_multiclass_sample,
+        prepare_sample=None,
     )
     dataset.initialize(patients, NUM_WORKERS_DATASET)
     return dataset
@@ -350,7 +350,7 @@ def run(model_name, train_datasets: list[str], test_datasets: list[str] | None, 
     val_loader = build_loader(val_dataset, run_cfg["batch_size"], run_cfg["n_samples"], shuffle_default=True)
 
     train_dict = trainer.fit(model, train_loader, val_loader)
-    losses, cms = train_dict["losses"], train_dict["cms"]
+    losses, cms = train_dict["losses"], train_dict["outputs"]
     if "checkpoint" in train_dict:
         with torch.inference_mode():
             state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")

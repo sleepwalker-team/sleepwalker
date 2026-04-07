@@ -1,22 +1,20 @@
-import os
-import shutil
-import tempfile
 from typing import Callable, Optional
 import numpy as np
-import pandas as pd
 from sklearn.metrics import confusion_matrix
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from abc import ABC
-from torch.optim.lr_scheduler import OneCycleLR
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.utils import logger
-
 from sleepwalker.datasets.utils import RepeatSampler
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
+from sleepwalker.trainer.utils import (
+    cohen_kappa_from_confusion_matrix,
+    f1_score_from_confusion_matrix,
+    format_confusion_table,
+    render_confusion_table_grid,
+)
 
-class MulticlassTrainer(ABC):
+
+class MulticlassTrainer(BaseTrainer):
     def __init__(
         self,
         epochs: int,
@@ -32,37 +30,22 @@ class MulticlassTrainer(ABC):
         n_repeat_train: int = 1,
         n_repeat_test: int = 1,
     ):
-        self.epochs = epochs
-        self.save_every = save_every
-        self.early_stopping_patience = early_stopping
-        self.device = device
-        self.warmup_device = warmup_device
-        
-        self.optimizer_fn = optimizer
-        self.lr_scheduler_fn = lr_scheduler
-        self.train_transform = train_transform
-        self.n_repeat_train = n_repeat_train
-        self.n_repeat_test = n_repeat_test
+        super().__init__(
+            epochs=epochs,
+            optimizer=optimizer,
+            device=device,
+            warmup_device=warmup_device,
+            save_every=save_every,
+            lr_scheduler=lr_scheduler,
+            early_stopping=early_stopping,
+            train_transform=train_transform,
+            n_repeat_train=n_repeat_train,
+            n_repeat_test=n_repeat_test,
+        )
 
-        # Normalize class names once or keep original; here we keep original
         self.classes = classes
-        self.num_classes = len(classes)  
-        
+        self.num_classes = len(classes)
         self.loss_function = loss_function
-
-    def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
-        if self.train_transform is None or len(self.train_transform) == 0:
-            return x
-
-        x_device = x.device
-        out = []
-        # TODO We could parallelize this for improve performance, e.g. move to a BaseDataset?
-        for sample in x:
-            sample_df = pd.DataFrame(sample.detach().cpu().numpy())
-            for transform in self.train_transform:
-                sample_df = transform(sample_df)
-            out.append(torch.from_numpy(sample_df.to_numpy()).to(x_device, dtype=x.dtype))
-        return torch.stack(out, dim=0)
 
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
@@ -79,58 +62,6 @@ class MulticlassTrainer(ABC):
         logger.metric(f"{scope}/{mode}/f1_macro", f1_macro, step=step)  
         logger.metric(f"{scope}/{mode}/coehns_kappa", kappa, step=step)  
         logger.metric(f"{scope}/{mode}/loss", float(loss_value), step=step) 
-
-    def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
-        model.to(device)
-        total_batches = len(data_loader)
-        batch_size = data_loader.batch_size  
-
-        if batch_size is None:
-            raise ValueError(f"batch_size should not be None here.")
-
-        for idx in range(len(model.preprocessors)):
-            logger.progress_start(total_batches*batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
-            if model.preprocessors[idx].requires_warmup():
-                for batch in data_loader:
-                    x = batch["data"].to(device)
-                    x = model.apply_preprocessors(x, idx)
-                    model.preprocessors[idx].update(x)
-                    logger.progress_advance(batch_size)
-            else:
-                # No warmup required -> Set tqdm bar to final value directly                
-                logger.progress_advance(total_batches*batch_size)
-            logger.progress_close()
-
-        return model
-
-    def _wrap_loader_with_repeats(self, loader, n_repeat: int, shuffle_default: bool):
-        sampler = getattr(loader, "sampler", None)
-        if n_repeat <= 1:
-            return loader
-
-        if isinstance(sampler, RepeatSampler):
-            if sampler.n_repeat != n_repeat:
-                logger.warning("Found a different n_repeat value in given sampler. Using supplied n_repeat")
-            return loader
-
-        if sampler is None:
-            sampler = RandomSampler(loader.dataset) if shuffle_default else SequentialSampler(loader.dataset)
-        sampler = RepeatSampler(sampler, n_repeat=n_repeat)
-
-        loader_kwargs = {
-            "dataset": loader.dataset,
-            "batch_size": loader.batch_size * n_repeat,
-            "shuffle": False,
-            "sampler": sampler,
-            "num_workers": loader.num_workers,
-            "collate_fn": loader.collate_fn,
-            "drop_last": loader.drop_last,
-            "pin_memory": loader.pin_memory,
-            "persistent_workers": loader.persistent_workers,
-        }
-        if loader.num_workers > 0 and loader.prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = loader.prefetch_factor
-        return DataLoader(**loader_kwargs)
 
     def run_epoch(self, loader, opt, model, prefix=""):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
@@ -198,96 +129,6 @@ class MulticlassTrainer(ABC):
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
         self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step)  
+        logger.info(render_confusion_table_grid([format_confusion_table(self.classes, cm_sum)], header=f"{mode.upper()} confusion matrix", n_cols=1))
 
         return epoch_loss, cm_sum  
-    
-    def test(self, model: BaseModel, test_loader):
-        test_loader = self._wrap_loader_with_repeats(test_loader, self.n_repeat_test, shuffle_default=False)
-        model.eval()
-        with torch.inference_mode():
-            test_loss, test_cm = self.run_epoch(test_loader, None, model, f"TEST") 
-        return test_loss, test_cm
-    
-    def fit(self, model: BaseModel, train_loader, val_loader = None):
-        train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)
-        if val_loader is not None:
-            val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)
-
-        opt = self.optimizer_fn(model)
-
-        if self.lr_scheduler_fn is not None:
-            lr_scheduler = self.lr_scheduler_fn(opt)
-            if isinstance(lr_scheduler, OneCycleLR):
-                raise ValueError(f"OneCycleLR is currently not supported") # TODO
-        else:
-            lr_scheduler = None
-
-        if self.early_stopping_patience and val_loader is None:
-            logger.warning(f"early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
-            self.early_stopping_patience = None
-
-        logger.context("Warmup preprocessors")
-        self.warmup_preprocessors(model, train_loader, self.warmup_device) 
-        logger.uncontext()
-
-        model = model.to(self.device)
-        val_losses: list[float] = []
-        losses = []
-        cms = []
-
-        self.best_model_idx = None
-        self.best_checkpoint = None
-        self.steps = {"train":0, "val":0, "test":0}
-        self.epoch_step = 0
-        self.last_folder = None
-
-        for epoch in range(self.epochs):
-            model.train()
-            loss, cm = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
-            cms.append({"train":cm})
-            losses.append({"train":loss})
-
-            if self.save_every > 0 and (epoch % self.save_every == 0):
-                logger.info(f"Logging intermediate model after {epoch} epochs.")
-                
-                self.last_folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
-                logger.artifact(path=os.path.join(self.last_folder, "model.pt"), dest=f"{epoch}")
-                logger.artifact(path=os.path.join(self.last_folder, "optimizer.pt"), dest=f"{epoch}")
-                if lr_scheduler:
-                    logger.artifact(path=os.path.join(self.last_folder, "scheduler.pt"), dest=f"{epoch}")
-
-            if lr_scheduler is not None:
-                lr_scheduler.step()
-
-            if val_loader is not None:
-                model.eval()
-                with torch.inference_mode():
-                    val_loss, val_cm = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]") 
-                cms[-1]["val"] =  val_cm
-                losses[-1]["val"] =  val_loss
-                val_losses.append(val_loss)
-            
-                imin = np.argmin(val_losses)
-                if self.best_model_idx is None or imin != self.best_model_idx:
-                    if self.best_checkpoint is not None:
-                        logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
-                        shutil.rmtree(self.best_checkpoint)
-                    
-                    self.best_checkpoint = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix="sleepwalker_best_model_")) 
-                    self.best_model_idx = imin
-
-                if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
-                    logger.info(f"Early stopping after {epoch} epochs - best epoch was {imin}") 
-                    return {
-                        "losses":losses,
-                        "cms":cms,
-                        "best_model":imin,
-                        "checkpoint":self.best_checkpoint
-                    }
-            
-            self.epoch_step += 1
-
-        if self.last_folder is not None:
-            return { "losses":losses, "cms":cms, "checkpoint":self.last_folder}
-        else:
-            return { "losses":losses, "cms":cms}

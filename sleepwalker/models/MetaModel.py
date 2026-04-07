@@ -19,7 +19,7 @@ class MetaModel(BaseModel):
         self,
         *,
         task_config: dict[str, dict],
-        input_channels: list[str],
+        input_channels: Optional[list[str]] = None,
         models: list[MetaModelEntry],
         preprocessors: Optional[list] = None,
     ):
@@ -27,11 +27,17 @@ class MetaModel(BaseModel):
 
         self.task_config = dict(task_config)
         self.classes = []
-        self.input_channels = list(input_channels)
+        self.input_channels = [] if input_channels is None else list(input_channels)
         for task, cfg in self.task_config.items():
             if "labels" not in cfg or "n_steps" not in cfg:
                 raise ValueError(f"Task '{task}' must provide normalized config with 'labels' and 'n_steps'.")
             self.classes.extend(cfg["labels"])
+
+        if input_channels is None:
+            for entry in models:
+                for channel in entry.input_channels:
+                    if channel not in self.input_channels:
+                        self.input_channels.append(channel)
 
         self.model_entries = []
         feature_sizes = []
@@ -39,7 +45,6 @@ class MetaModel(BaseModel):
             missing = [c for c in entry.input_channels if c not in self.input_channels]
             if len(missing) > 0:
                 raise ValueError(f"Unknown input channels for submodel #{idx}: {missing}")
-
             if not hasattr(entry.model, "features"):
                 raise ValueError(f"Submodel #{idx} must implement features(x).")
             if not hasattr(entry.model, "feature_dim"):

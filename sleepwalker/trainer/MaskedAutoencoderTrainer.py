@@ -132,7 +132,7 @@ class MaskedAutoencoderTrainer(ABC):
         return epoch_loss
 
     @torch.inference_mode
-    def run_sleep_classification(self, val_loader, test_loader, model):
+    def run_sleep_classification(self, val_loader, test_loader, model, middle_slices=150):
         model.eval()
         logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL', leave=True)
 
@@ -171,36 +171,23 @@ class MaskedAutoencoderTrainer(ABC):
         X_test = torch.cat(X, 0).cpu().numpy()
         y_test = torch.cat(y, 0).cpu().numpy()
 
-        # Train three models:
-        #   1. Take the CLS token
-        #   2. Take the average of the middle 150 seconds
-        #   3. Take the average of the middle 30 seconds (since they have context already)
+        # Slice out middle fo prediction
+        T = X_train.shape[1]
+        middle_slices = middle_slices // (model.token_size // int(test_loader.dataset.sample_frequency))
+        _from = T//2 - middle_slices // 2
+        _to = T//2 + middle_slices // 2
+        if model.use_cls:
+            _from += 1 
+            _to += 1
 
-        X_train_cls = X_train[:, 0:1].mean(1).mean(-1)
-        X_train_sub150 = X_train[:, 31:81].mean(1).mean(-1)
-        X_train_sub30 = X_train[:, 51:61].mean(1).mean(-1)
+        X_train = X_train[:, _from:_to].mean(1).mean(-1)
+        X_test = X_test[:, _from:_to].mean(1).mean(-1)
 
-        X_test_cls = X_test[:, 0:1].mean(1).mean(-1)
-        X_test_sub150 = X_test[:, 31:81].mean(1).mean(-1)
-        X_test_sub30 = X_test[:, 51:61].mean(1).mean(-1)
-
-        clf_cls = LogisticRegression(max_iter=10000)
-        clf_cls.fit(X_train_cls, y_train)
-        y_pred = clf_cls.predict(X_test_cls)
+        clf_cls = LogisticRegression(max_iter=1000)
+        clf_cls.fit(X_train, y_train)
+        y_pred = clf_cls.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='CLS', scope='epoch', step=self.epoch_step)
-
-        clf_sub = LogisticRegression(max_iter=10000)
-        clf_sub.fit(X_train_sub150, y_train)
-        y_pred = clf_sub.predict(X_test_sub150)
-        cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='SUB150', scope='epoch', step=self.epoch_step)
-
-        clf_sub = LogisticRegression(max_iter=10000)
-        clf_sub.fit(X_train_sub30, y_train)
-        y_pred = clf_sub.predict(X_test_sub30)
-        cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='SUB30', scope='epoch', step=self.epoch_step)
+        self._log_from_cm(cm, mode='sleep', scope='epoch', step=self.epoch_step)
     
     def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None):
         opt = self.optimizer_fn(model)

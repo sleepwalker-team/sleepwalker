@@ -194,7 +194,6 @@ def summarize_dataset(
     # If no channel provided → return only metadata + coverage
     if channel_name is None:
         return {
-            "n_patients":dataset.n_patients,
             "duration_stats": duration_stats,
             "duration_histogram": duration_hist,
             "signal_coverage": signal_coverage,
@@ -209,7 +208,6 @@ def summarize_dataset(
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,
-        num_workers=8
     )
     dataset.initialize(edf_files, 8)
 
@@ -219,7 +217,6 @@ def summarize_dataset(
     # if class frequency estimation is disabled, stop here
     if not estimate_class_frequencies:
         return {
-            "n_patients":dataset.n_patients,
             "duration_stats": duration_stats,
             "duration_histogram": duration_hist,
             "signal_coverage": signal_coverage,
@@ -236,6 +233,7 @@ def summarize_dataset(
         collate_fn=lambda x: batch_collate(
             x, ignore_list=["time", "patient", "target", "target_extra"]
         ),
+        num_workers=8
     )
 
     label_counter = Counter()
@@ -261,7 +259,6 @@ def summarize_dataset(
     logger.info("Finished summarizing dataset")
 
     return {
-        "n_patients": dataset.n_patients,
         "duration_stats": duration_stats,
         "duration_histogram": duration_hist,
         "signal_coverage": signal_coverage,

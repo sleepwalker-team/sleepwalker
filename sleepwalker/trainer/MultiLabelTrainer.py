@@ -1,3 +1,4 @@
+from functools import partial
 import random
 from collections import OrderedDict
 from typing import Callable, Optional
@@ -8,14 +9,10 @@ import torch
 from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.models.MetaModel import MetaModel
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
-from sleepwalker.trainer.losses import build_multilabel_task_masks
-from sleepwalker.trainer.utils import (
-    cohen_kappa_from_confusion_matrix,
-    f1_score_from_confusion_matrix,
-    format_confusion_table,
-    render_confusion_table_grid,
-    resolve_multiclass_index,
-)
+from sleepwalker.trainer.losses import build_multilabel_task_masks, class_weights_for_loss, estimate_multilabel_class_cnts
+from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
+from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.trainer.utils.targets import resolve_multiclass_index
 from sleepwalker.utils import logger
 
 
@@ -124,6 +121,47 @@ class MultiLabelTrainer(BaseTrainer):
                 raise ValueError(f"Task '{task}' is missing loss_function.")
             self.task_loss_functions[task] = cfg["loss_function"]
             self.task_loss_weights[task] = float(cfg["task_weight"])
+
+    def warmup_trainer(self, data_loader, device: str = "cuda"):
+        needs_counts = any((cfg.get("loss_mode", "none") or "none") != "none" for cfg in self.task_config.values())
+        if not needs_counts:
+            return
+
+        class_cnts = estimate_multilabel_class_cnts(
+            data_loader,
+            self.task_config,
+            condition_task=self.condition_task,
+            condition_labels=[
+                self.task_config[self.condition_task]["labels"][idx]
+                for idx in sorted(self.condition_label_idx)
+            ] if self.condition_task is not None else None,
+            conditioned_tasks=list(self.conditioned_tasks) if self.condition_task is not None else None,
+        )
+        logger.info(f"Estimated class counts: {class_cnts}")
+
+        for cfg in self.task_specs:
+            task = cfg["task"]
+            loss_function = cfg.get("loss_function") or torch.nn.functional.cross_entropy
+            loss_mode = cfg.get("loss_mode", "none") or "none"
+            class_weights = dict(cfg.get("class_weights", {}))
+            if loss_mode not in {"none", "inverse", "inverse-log"}:
+                raise ValueError(f"Task '{task}' has invalid loss_mode '{loss_mode}'.")
+            if loss_mode != "none":
+                task_cnts = class_cnts.get(task)
+                if task_cnts is None:
+                    raise ValueError(f"Missing class counts for task '{task}'.")
+                task_cnts = {label: max(float(task_cnts.get(label, 0.0)), 1.0) for label in cfg["labels"]}
+                class_weights = class_weights_for_loss(class_weights, task_cnts, loss_mode)
+
+            if len(class_weights) > 0:
+                weights_torch = torch.tensor(
+                    [class_weights.get(label, 1.0) for label in cfg["labels"]],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                self.task_loss_functions[task] = partial(loss_function, weight=weights_torch)
+            else:
+                self.task_loss_functions[task] = loss_function
 
     @staticmethod
     def normalize_task_config(task_config: dict[str, dict]):

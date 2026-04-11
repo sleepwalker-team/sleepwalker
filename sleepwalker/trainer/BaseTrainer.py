@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 from sleepwalker.datasets.utils import RepeatSampler
-from sleepwalker.trainer.utils import store_checkpoint
+from sleepwalker.trainer.utils.disk import store_checkpoint
 from sleepwalker.utils import logger
 
 
@@ -78,6 +78,9 @@ class BaseTrainer(ABC):
 
         return model
 
+    def warmup_trainer(self, data_loader, device: str = "cuda"):
+        return
+
     def _wrap_loader_with_repeats(self, loader, n_repeat: int, shuffle_default: bool):
         sampler = getattr(loader, "sampler", None)
         if n_repeat <= 1:
@@ -117,6 +120,10 @@ class BaseTrainer(ABC):
         train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)
         if val_loader is not None:
             val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)
+
+        logger.context("Warmup trainer")
+        self.warmup_trainer(train_loader)
+        logger.uncontext()
 
         opt = self.optimizer_fn(model)
 

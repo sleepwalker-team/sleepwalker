@@ -1,17 +1,17 @@
+from functools import partial
+import random
 from typing import Callable, Optional
 import numpy as np
 from sklearn.metrics import confusion_matrix
 import torch
 
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
+from sleepwalker.trainer.losses import class_weights_for_loss
 from sleepwalker.utils import logger
 from sleepwalker.datasets.utils import RepeatSampler
-from sleepwalker.trainer.utils import (
-    cohen_kappa_from_confusion_matrix,
-    f1_score_from_confusion_matrix,
-    format_confusion_table,
-    render_confusion_table_grid,
-)
+from sleepwalker.datasets.utils import estimate_class_cnts
+from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
+from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
 
 class MulticlassTrainer(BaseTrainer):
@@ -29,6 +29,9 @@ class MulticlassTrainer(BaseTrainer):
         train_transform: Optional[list[Callable]] = None,
         n_repeat_train: int = 1,
         n_repeat_test: int = 1,
+        loss_mode: str = "regular",
+        class_weights: Optional[dict[str, float]] = None,
+        balance_batches: bool = False,
     ):
         super().__init__(
             epochs=epochs,
@@ -46,6 +49,88 @@ class MulticlassTrainer(BaseTrainer):
         self.classes = classes
         self.num_classes = len(classes)
         self.loss_function = loss_function
+        self.base_loss_function = loss_function
+        self.loss_mode = loss_mode
+        self.class_weights = dict(class_weights or {})
+        self.balance_batches = balance_batches
+
+    def _keep_balanced_target(self, target, class_cnts: list[float]) -> bool:
+        target_arr = target.detach().cpu().numpy() if isinstance(target, torch.Tensor) else np.asarray(target)
+        if target_arr.ndim == 0:
+            target_idx = int(target_arr.item())
+        elif target_arr.ndim == 1:
+            target_idx = int(np.argmax(target_arr))
+        else:
+            raise ValueError(f"Expected multiclass target with ndim <= 1, got shape {target_arr.shape}.")
+
+        probas = np.asarray(class_cnts, dtype=float)
+        if probas.ndim != 1 or len(probas) == 0:
+            raise ValueError("class_cnts must be a non-empty 1D sequence.")
+        if target_idx < 0 or target_idx >= len(probas):
+            raise ValueError(f"Target index {target_idx} out of range for {len(probas)} classes.")
+
+        probas = probas / probas.sum()
+        keep_prob = float(np.clip(probas.min() / probas[target_idx], 0.0, 1.0))
+        return random.random() <= keep_prob
+
+    def _wrap_prepare_target_for_balancing(self, prepare_target, class_cnts: list[float]):
+        def wrapped_prepare_target(*args, **kwargs):
+            prepared_target = prepare_target(*args, **kwargs)
+            if prepared_target is None:
+                return None
+            if not isinstance(prepared_target, dict):
+                raise ValueError(f"prepare_target must return dict or None, but received {type(prepared_target)}.")
+            if "target" not in prepared_target:
+                raise ValueError("Balanced multiclass training requires prepare_target to return a 'target' entry.")
+            if not self._keep_balanced_target(prepared_target["target"], class_cnts):
+                return None
+            return prepared_target
+
+        return wrapped_prepare_target
+
+    def warmup_trainer(self, data_loader, device: str = "cuda"):
+        dataset = data_loader.dataset
+
+        class_cnts = None
+        if self.balance_batches or self.loss_mode != "regular":
+            class_cnts = estimate_class_cnts(data_loader)
+
+        if self.balance_batches and class_cnts is not None:
+            current_datasets = dataset.datasets if hasattr(dataset, "datasets") else [dataset]
+            can_balance_batches = True
+            for current_ds in current_datasets:
+                if not hasattr(current_ds, "prepare_target_callback"):
+                    logger.warning(
+                        "Ignoring balance_batches because the training dataset does not expose "
+                        f"a mutable prepare_target_callback. Found {type(current_ds).__name__}. "
+                        "Batch balancing only works for live EDF-backed datasets, not frozen numpy caches."
+                    )
+                    can_balance_batches = False
+                    break
+                base_callback = getattr(current_ds, "_base_prepare_target_callback", current_ds.prepare_target_callback)
+                if base_callback is None:
+                    raise ValueError("balance_batches requires a prepare_target callback on the training dataset.")
+            if can_balance_batches:
+                for current_ds in current_datasets:
+                    base_callback = getattr(current_ds, "_base_prepare_target_callback", current_ds.prepare_target_callback)
+                    current_ds._base_prepare_target_callback = base_callback
+                    current_ds.prepare_target_callback = self._wrap_prepare_target_for_balancing(
+                        base_callback,
+                        [class_cnts.get(c, 1.0) for c in current_ds.get_classes()],
+                    )
+
+        if self.loss_mode != "regular":
+            if class_cnts is None:
+                raise ValueError("class counts are required for non-regular multiclass loss modes.")
+            class_weights = class_weights_for_loss(self.class_weights, class_cnts, self.loss_mode)
+        else:
+            class_weights = self.class_weights
+
+        if len(class_weights) > 0:
+            weights_torch = torch.tensor([class_weights.get(c, 1) for c in dataset.get_classes()], device=self.device)
+            self.loss_function = partial(self.base_loss_function, weight=weights_torch)
+        else:
+            self.loss_function = self.base_loss_function
 
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  

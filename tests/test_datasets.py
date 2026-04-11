@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 
 from sleepwalker.datasets.Basedataset import ChannelConfig, BaseDataset, EDFFile, EventIndex, batch_collate
 from sleepwalker.datasets.CAP import CAP
@@ -26,9 +27,8 @@ from sleepwalker.datasets.WSC import WSC
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
-from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
-from sleepwalker.datasets.utils import RepeatSampler, export_dataset_to_numpy_dir, get_edf_files_in_repo
+from sleepwalker.datasets.utils import RepeatSampler, export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 
@@ -62,6 +62,17 @@ class DummyDataset(BaseDataset):
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         raise NotImplementedError
+
+
+def build_export_loader(dataset, batch_size=128):
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=export_batch_collate,
+        drop_last=False,
+    )
 
 
 def create_dummy_file() -> EDFFile:
@@ -104,7 +115,7 @@ def test_get_item_rejects_before_loading_signal():
             target_extra=target_extra,
             patient=patient,
             time=time,
-            class_cnts=[1.0, 100.0],
+            class_cnts={"task": {"n1": 1.0, "wake": 100.0}},
             task_config=task_config,
         ),
     )
@@ -182,7 +193,8 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
         index=pd.date_range("2024-01-01", periods=30, freq="1s"),
     )
 
-    selected = dataset._select_grouped_channels(signal)
+    built = dataset.build_sample_from_window_df({"patient": "p", "time": signal.index[0]}, signal)
+    selected = pd.DataFrame(built["data"].numpy(), index=signal.index, columns=["eeg"])
 
     assert list(selected.columns) == ["eeg"]
     assert selected.shape[1] == 1
@@ -430,19 +442,6 @@ def test_wsc_dataset():
 
     run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
-def test_zarr_dataset():
-    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
-    ZARR_PATH = os.environ.get("ZARR_PATH")
-    ZARR_PATH = "/raid/sleepwalker/zarr"
-
-    if not ZARR_PATH or not Path(ZARR_PATH).exists():
-        pytest.skip("Zarr dataset not available. ")
-    
-    zarr_files = get_zarr_files_in_repo(ZARR_PATH)
-
-    dataset = ZarrDataset(zarr_files, total_input = "630s", target_resolution = "30s", sample_frequency = 100)
-    iterate_dataset(dataset, NUM_BATCHES)
-
 def test_multi_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     CAP_PATH = os.environ.get("CAP_PATH") 
@@ -499,19 +498,44 @@ if __name__ == '__main__':
     # test_wsc_dataset() 
     # test_multi_dataset()
     # test_cap_dataset()
-    test_zarr_dataset()
 
 
-class CacheReadyDataset(torch.utils.data.Dataset):
+class CacheReadyDataset(DummyDataset):
     def __init__(self):
-        self.sample_frequency = 2
-        self.resample_type = 'nearest'
-        self.total_input = pd.Timedelta(seconds=2)
-        self.target_resolution = pd.Timedelta(seconds=1)
+        super().__init__(
+            channels=[ChannelConfig(name="eeg"), ChannelConfig(name="emg")],
+            sample_frequency=2,
+            total_input="2s",
+            target_resolution="1s",
+            event_mapping=None,
+        )
         self.classes = ['wake', 'rem']
         self.label_classes = list(self.classes)
         self.initialized = True
         self.all_patients = ['patient-a', 'patient-b']
+        self._files = []
+        base_time = pd.Timestamp('2024-01-01')
+        for idx in range(3):
+            base = idx * 10
+            signal = pd.DataFrame(
+                [
+                    [base + 1, base + 2],
+                    [base + 3, base + 4],
+                    [base + 5, base + 6],
+                    [base + 7, base + 8],
+                ],
+                columns=["eeg", "emg"],
+                index=pd.date_range(base_time + pd.Timedelta(seconds=idx) - pd.Timedelta(milliseconds=500), periods=4, freq="500ms"),
+            )
+            self._files.append(
+                EDFFile(
+                    channels=["eeg", "emg"],
+                    path='patient-a' if idx < 2 else 'patient-b',
+                    start_date=base_time + pd.Timedelta(seconds=idx) - pd.Timedelta(milliseconds=500),
+                    length=1,
+                    X=signal,
+                )
+            )
 
     def __len__(self):
         return 3
@@ -524,9 +548,6 @@ class CacheReadyDataset(torch.utils.data.Dataset):
 
     def get_n_patients(self):
         return 2
-
-    def get_input_channels(self):
-        return ['eeg', 'emg']
 
     def get_timeseries_len(self):
         return 4
@@ -543,16 +564,38 @@ class CacheReadyDataset(torch.utils.data.Dataset):
         }
 
 
-class GroupedCacheDataset(torch.utils.data.Dataset):
+class GroupedCacheDataset(DummyDataset):
     def __init__(self):
-        self.sample_frequency = 1
-        self.resample_type = 'nearest'
-        self.total_input = pd.Timedelta(seconds=3)
-        self.target_resolution = pd.Timedelta(seconds=1)
+        super().__init__(
+            channels=[
+                ChannelConfig(name="channel-a", group="eeg"),
+                ChannelConfig(name="channel-b", group="eeg"),
+            ],
+            sample_frequency=1,
+            total_input="3s",
+            target_resolution="1s",
+            event_mapping=None,
+        )
         self.classes = ['wake']
         self.label_classes = list(self.classes)
         self.initialized = True
         self.all_patients = ['patient-a']
+        self._file = EDFFile(
+            channels=["channel-a", "channel-b"],
+            path="patient-a",
+            start_date=pd.Timestamp("2023-12-31 23:59:59"),
+            length=1,
+            X=pd.DataFrame(
+                {
+                    "channel-a": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                    "channel-b": np.array([11.0, 12.0, 13.0], dtype=np.float32),
+                },
+                index=pd.date_range("2024-01-01", periods=3, freq="1s"),
+            ),
+        )
+        self.edf_files = [self._file]
+        self.lower_bounds = [0]
+        self.upper_bounds = [1]
 
     def __len__(self):
         return 1
@@ -566,26 +609,26 @@ class GroupedCacheDataset(torch.utils.data.Dataset):
     def get_n_patients(self):
         return 1
 
-    def get_input_channels(self):
-        return ['eeg']
-
     def get_timeseries_len(self):
         return 3
 
     def __getitem__(self, idx):
-        channel_a = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
-        channel_b = torch.tensor([[11.0], [12.0], [13.0]], dtype=torch.float32)
-        data = channel_a if np.random.choice([0, 1]) == 0 else channel_b
-        return {
-            'data': data,
-            'target': torch.tensor([1.0], dtype=torch.float32),
-            'patient': 'patient-a',
-            'time': pd.Timestamp('2024-01-01'),
-        }
+        return super().__getitem__(idx)
 
 
 def test_numpy_dataset_export_roundtrip(tmp_path):
-    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache', num_workers=0, batch_size=2, extra_keys=['dataset'])
+    cache_dir = export_dataloader_to_numpy_dir(
+        DataLoader(
+            CacheReadyDataset(),
+            batch_size=128,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda batch: export_batch_collate(batch, extra_keys=["dataset"]),
+            drop_last=False,
+        ),
+        tmp_path / 'cache',
+        extra_keys=['dataset'],
+    )
 
     dataset = NumpyDataset(cache_dir)
 
@@ -604,7 +647,7 @@ def test_numpy_dataset_export_roundtrip(tmp_path):
 
 
 def test_numpy_dataset_supports_memmap(tmp_path):
-    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache', num_workers=0, batch_size=2)
+    cache_dir = export_dataloader_to_numpy_dir(build_export_loader(CacheReadyDataset()), tmp_path / 'cache')
 
     dataset = NumpyDataset(cache_dir, in_memory=False)
 
@@ -617,7 +660,7 @@ def test_numpy_cache_freezes_one_export_pass(tmp_path, monkeypatch):
     choices = iter([1, 0, 0])
     monkeypatch.setattr(np.random, 'choice', lambda values: next(choices))
 
-    cache_dir = export_dataset_to_numpy_dir(source, tmp_path / 'cache', num_workers=0, batch_size=1)
+    cache_dir = export_dataloader_to_numpy_dir(build_export_loader(source), tmp_path / 'cache')
     cached = NumpyDataset(cache_dir)
 
     first = cached[0]['data'].clone()
@@ -630,7 +673,19 @@ def test_numpy_cache_freezes_one_export_pass(tmp_path, monkeypatch):
 
 
 def test_numpy_dataset_chunked_roundtrip(tmp_path):
-    cache_dir = export_dataset_to_numpy_dir(CacheReadyDataset(), tmp_path / 'cache_chunked', num_workers=0, batch_size=2, extra_keys=['dataset'], n_samples_per_file=2)
+    cache_dir = export_dataloader_to_numpy_dir(
+        DataLoader(
+            CacheReadyDataset(),
+            batch_size=128,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda batch: export_batch_collate(batch, extra_keys=["dataset"]),
+            drop_last=False,
+        ),
+        tmp_path / 'cache_chunked',
+        extra_keys=['dataset'],
+        n_samples_per_file=2,
+    )
 
     assert (cache_dir / 'data.000000.npy').exists()
     assert (cache_dir / 'data.000001.npy').exists()

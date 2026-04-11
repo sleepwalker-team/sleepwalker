@@ -19,7 +19,6 @@ from torch.utils.data import Dataset
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
 from sleepwalker.datasets.normalizer import Normalizer
-from sleepwalker.trainer.utils import build_multiclass_target
 import multiprocessing
 
 @dataclass
@@ -300,6 +299,12 @@ class BaseDataset(Dataset, ABC):
         Length of the target interval associated with each item. In sleep
         staging this is often `"30s"`.
 
+    stride
+        Time between consecutive sampled windows. Defaults to
+        `target_resolution`, which preserves the previous behavior. Set
+        `stride < total_input` to sample overlapping windows while keeping the
+        target interval length unchanged.
+
     event_mapping
         Mapping from raw dataset-specific event labels to the labels used by
         your task, e.g. `{"Sleep stage W": "wake"}`.
@@ -391,6 +396,7 @@ class BaseDataset(Dataset, ABC):
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
         target_resolution: str | pd.Timedelta = "30s",
+        stride: Optional[str | pd.Timedelta] = None,
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
         prepare_patient: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
@@ -410,6 +416,11 @@ class BaseDataset(Dataset, ABC):
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
+        self.stride = pd.to_timedelta(stride) if stride is not None else self.target_resolution
+        if self.stride <= pd.Timedelta(0):
+            raise ValueError("stride must be positive.")
+        if self.stride > self.total_input:
+            raise ValueError("stride must be smaller than or equal to total_input.")
         self.prepare_target_callback = prepare_target
         self.prepare_sample_callback = prepare_sample
         self.prepare_patient_callback = prepare_patient
@@ -568,7 +579,7 @@ class BaseDataset(Dataset, ABC):
             if artifacts is None:
                 return None
 
-            n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.target_resolution)
+            n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.stride)
 
             if n_items <= 0:
                 raise ValueError(
@@ -808,7 +819,7 @@ class BaseDataset(Dataset, ABC):
             file = self.edf_files[pidx]
 
             new_idx = idx - self.lower_bounds[pidx] 
-            cur_date = file.start_date + self.target_resolution * new_idx 
+            cur_date = file.start_date + self.stride * new_idx 
             
             try:
                 item = self.get_item(file, cur_date)

@@ -29,6 +29,10 @@ class MultiDataset(Dataset):
         total_input = [d.total_input for d in datasets]
         if len(set(total_input)) > 1:
             raise ValueError(f"All datasets must have the same total_input")
+
+        strides = [getattr(d, "stride", d.target_resolution) for d in datasets]
+        if len(set(strides)) > 1:
+            raise ValueError(f"All datasets must have the same stride")
         
         classes = [set(d.classes) for d in datasets]
         if not all(set(lst) == set(classes[0]) for lst in classes):
@@ -51,6 +55,7 @@ class MultiDataset(Dataset):
         self.sample_frequency = datasets[0].sample_frequency
         self.target_resolution = datasets[0].target_resolution
         self.total_input = datasets[0].total_input
+        self.stride = getattr(datasets[0], "stride", datasets[0].target_resolution)
         self.channels = datasets[0].channels
 
     def get_n_datasets(self):

@@ -4,6 +4,7 @@ import torch
 from functools import partial
 from torch.utils.data import DataLoader, Dataset
 
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.models.MetaModel import MetaModel, MetaModelEntry
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
@@ -285,13 +286,18 @@ def test_estimate_class_cnts_respects_conditioning():
     ])
 
     class_cnts = estimate_multilabel_class_cnts(
-        dataset,
+        DataLoader(
+            dataset,
+            batch_size=2,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]),
+            drop_last=False,
+        ),
         task_config,
         condition_task="sleep",
         condition_labels=["n2"],
         conditioned_tasks=["breathing"],
-        num_workers=0,
-        batch_size=2,
     )
 
     assert class_cnts == {

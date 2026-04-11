@@ -6,7 +6,7 @@ from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.utils import logger
 
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
 import torch.nn as nn
 from torch.autograd import Function

@@ -3,28 +3,25 @@
 import argparse
 from functools import partial
 import os
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, RandomSampler
-from torchinfo import summary
 
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
-from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
-from sleepwalker.datasets.utils import export_dataset_to_numpy_dir, get_edf_files_in_repo
+from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.models import MetaModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
+from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
-from sleepwalker.trainer.losses import class_weights_for_loss, estimate_multilabel_class_cnts
-from sleepwalker.trainer.utils import append_to_jsonl, trim_wake
+from sleepwalker.trainer.utils.filtering import trim_wake
 from sleepwalker.utils import MlflowSink, logger
 
 # TODO METAMODEL
@@ -197,43 +194,6 @@ def build_dataset():
     return dataset
 
 
-def build_weighted_task_config(task_config, class_cnts):
-    configured_task_config = {}
-    for task, cfg in task_config.items():
-        current_cfg = dict(cfg)
-        loss_function = current_cfg.get("loss_function") or torch.nn.functional.cross_entropy
-        loss_mode = current_cfg.get("loss_mode", "none")
-        if not loss_mode:
-            loss_mode = "none"
-
-        class_weights = dict(current_cfg.get("class_weights", {}))
-
-        if loss_mode not in {"none", "inverse", "inverse-log"}:
-            raise ValueError(f"Task '{task}' has invalid loss_mode '{loss_mode}'.")
-        if loss_mode != "none":
-            task_cnts = class_cnts.get(task)
-            if task_cnts is None:
-                raise ValueError(f"Missing class counts for task '{task}'.")
-            task_cnts = {
-                label: max(float(task_cnts.get(label, 0.0)), 1.0)
-                for label in current_cfg["labels"]
-            }
-            class_weights = class_weights_for_loss(class_weights, task_cnts, loss_mode)
-
-        if len(class_weights) > 0:
-            weights_torch = torch.tensor(
-                [class_weights.get(label, 1.0) for label in current_cfg["labels"]],
-                device="cuda:0",
-                dtype=torch.float32,
-            )
-            current_cfg["loss_function"] = partial(loss_function, weight=weights_torch)
-        else:
-            current_cfg["loss_function"] = loss_function
-        configured_task_config[task] = current_cfg
-
-    return configured_task_config
-
-
 def summarize_patient_quality(patient, data_df, label_df, label_extra_df):
     if data_df is None or len(data_df) == 0 or label_df is None or len(label_df) == 0:
         return None
@@ -323,40 +283,20 @@ def initialize_dataset(dataset, patients):
     dataset.initialize(filtered_patients, num_workers=num_workers_dataset)
     return dataset
 
-def load_or_build_dataset(patients, split_cache_path: str | None = None):
-    if split_cache_path is not None:
-        meta_path = os.path.join(split_cache_path, "meta.json")
-        has_data = os.path.exists(os.path.join(split_cache_path, "data.npy")) or len(list(Path(split_cache_path).glob("data.*.npy"))) > 0
-        if os.path.exists(meta_path) and has_data:
-            logger.info(f"Loading frozen sample cache from {split_cache_path}")
-            return NumpyDataset(split_cache_path,in_memory=False)
+def list_split_patients(purpose: str, dry_run: bool) -> list[str]:
+    edf_root = edf_folder if purpose == "train" else edf_folder_test
+    patients = [p for p in get_edf_files_in_repo(edf_root, recursive=True) if has_required_channels(p)]
+    return patients[:2] if dry_run else patients
 
-        logger.info(f"Frozen sample cache not found at {split_cache_path}. Building it from EDF files.")
 
-    dataset = initialize_dataset(build_dataset(), patients)
-    if split_cache_path is not None:
-        export_dataset_to_numpy_dir(
-            dataset,
-            split_cache_path,
-            num_workers=num_workers_dataloader,
-            batch_size=batch_size,
-        )
-        return NumpyDataset(split_cache_path,in_memory=False)
-    return dataset
+def load_split_dataset(purpose: str, enable_cache: bool, cache_path: str, dry_run: bool):
+    split_cache_path = os.path.join(cache_path, purpose)
+    if enable_cache:
+        logger.info(f"Loading frozen sample cache from {split_cache_path}")
+        return NumpyDataset(split_cache_path, in_memory=False)
 
-def build_loader(dataset):
-    sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=sampler is None,
-        sampler=sampler,
-        num_workers=num_workers_dataloader,
-        pin_memory=True,
-        collate_fn=batch_collate,
-        drop_last=False,
-        persistent_workers=True,
-    )
+    patients = list_split_patients(purpose, dry_run)
+    return initialize_dataset(build_dataset(), patients)
 
 
 def build_model(dataset):
@@ -406,7 +346,7 @@ def main():
     parser.add_argument(
         "--enable-cache",
         action="store_true",
-        help="Use a numpy-backed dataset cache. If the requested cache is missing, it is generated from the EDF-backed dataset.",
+        help="Load numpy-backed dataset caches. Cache creation/refresh is handled outside this script.",
     )
     parser.add_argument(
         "--cache-path",
@@ -415,47 +355,20 @@ def main():
     )
     args = parser.parse_args()
 
-    train_cache_path = os.path.join(args.cache_path, "train")
-    test_cache_path = os.path.join(args.cache_path, "test")
-
-    train_patients = None
-    test_patients = None
-    train_cache_ready = os.path.exists(os.path.join(train_cache_path, "meta.json")) and (os.path.exists(os.path.join(train_cache_path, "data.npy")) or len(list(Path(train_cache_path).glob("data.*.npy"))) > 0)
-    test_cache_ready = os.path.exists(os.path.join(test_cache_path, "meta.json")) and (os.path.exists(os.path.join(test_cache_path, "data.npy")) or len(list(Path(test_cache_path).glob("data.*.npy"))) > 0)
-    if not args.enable_cache or not train_cache_ready:
-        train_patients = [p for p in get_edf_files_in_repo(edf_folder, recursive=True) if has_required_channels(p)]
-    if not args.enable_cache or not test_cache_ready:
-        test_patients = [p for p in get_edf_files_in_repo(edf_folder_test, recursive=True) if has_required_channels(p)]
-
     if os.path.exists("sleepwalker.log"):
         os.remove("sleepwalker.log")
 
     logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
 
     logger.context("Train")
-    train_dataset = load_or_build_dataset(train_patients, train_cache_path if args.enable_cache else None)
+    train_dataset = load_split_dataset("train", args.enable_cache, args.cache_path, dry_run=False)
     logger.uncontext()
 
     logger.context("Test")
-    test_dataset = load_or_build_dataset(test_patients, test_cache_path if args.enable_cache else None)
+    test_dataset = load_split_dataset("test", args.enable_cache, args.cache_path, dry_run=False)
     logger.uncontext()
 
-    if any(t.get("loss_mode", "none") != "none" and t.get("loss_mode", "none") is not None for t in task_config.values()):
-        class_cnts = estimate_multilabel_class_cnts(
-            train_dataset,
-            normalized_task_config,
-            condition_task="sleep",
-            condition_labels=["n1", "n2", "n3", "rem"],
-            conditioned_tasks=["breathing", "arousal", "desat"],
-            n_samples=n_samples,
-            num_workers=num_workers_dataloader,
-            batch_size=batch_size,
-        )
-        logger.info(f"Estimated class counts: {class_cnts}")
-    else:
-        class_cnts = None
-    configured_task_config = build_weighted_task_config(normalized_task_config, class_cnts)
-    missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in configured_task_config.values() for label in cfg["labels"]))
+    missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in normalized_task_config.values() for label in cfg["labels"]))
     if len(missing) > 0:
         raise ValueError(f"Task config is missing dataset classes: {missing}")
     trainer = MultiLabelTrainer(
@@ -464,7 +377,7 @@ def main():
         lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1, end_factor=1e-2, total_iters=50
         ),
-        task_config=configured_task_config,
+        task_config=normalized_task_config,
         condition_task="sleep",
         condition_labels=["n1", "n2", "n3", "rem"],
         conditioned_tasks=["breathing", "arousal", "desat"],
@@ -473,35 +386,22 @@ def main():
     )
 
     model = build_model(train_dataset)
-    summary(
-        model,
-        input_size=(1, train_dataset.get_timeseries_len(), len(train_dataset.get_input_channels())),
-        depth=6,
-        row_settings=["hide_recursive_layers"],
+    run(
+        RunCfg(
+            experiment_name=experiment_name,
+            model_name="MetaModel",
+            model=model,
+            trainer=trainer,
+            train_datasets=[train_dataset],
+            val_datasets=[],
+            test_datasets=[("test", test_dataset)],
+            batch_size=batch_size,
+            n_samples=n_samples,
+            num_workers_dataloader=num_workers_dataloader,
+            use_energy_tracker=False,
+            collate_fn=batch_collate,
+        )
     )
-
-    train_loader = build_loader(train_dataset)
-    train_dict = trainer.fit(model, train_loader)
-    if "checkpoint" in train_dict:
-        state_dict = torch.load(os.path.join(train_dict["checkpoint"], "model.pt"), map_location="cpu")
-        model.load_state_dict(state_dict)
-
-    test_loader = build_loader(test_dataset)
-    test_loss, test_cm = trainer.test(model, test_loader)
-
-    record = {
-        "test_loss": test_loss,
-        "test_cm": test_cm,
-        "train_loss": train_dict["losses"],
-        "train_cm": train_dict["outputs"],
-        "classes": trainer.classes,
-        "task_config": normalized_task_config,
-        "input_channels": train_dataset.get_input_channels(),
-    }
-    if "best_model" in train_dict:
-        record["best_model"] = train_dict["best_model"]
-    append_to_jsonl(experiment_name, record)
-    logger.end_run()
 
 
 if __name__ == "__main__":

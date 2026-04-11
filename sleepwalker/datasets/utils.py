@@ -12,20 +12,12 @@ import numpy as np
 import pandas as pd
 import torch
 import xmltodict as xtd
-from torch.utils.data import DataLoader
-from torch.utils.data import RandomSampler
-from torch.utils.data import Sampler
+from torch.utils.data import DataLoader, Sampler
 
 from sklearn.model_selection import KFold
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_collate
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.utils import logger
-
-import numpy as np
-import pandas as pd
-from collections import Counter
-from torch.utils.data import DataLoader
 from sleepwalker.utils import logger
 
 
@@ -43,61 +35,6 @@ class RepeatSampler(Sampler[int]):
 
     def __len__(self):
         return len(self.sampler) * self.n_repeat
-
-def _collect_patient_stats_one(args):
-    patient, summarize_patient = args
-    try:
-        return patient, summarize_patient(patient), None
-    except Exception as exc:
-        return patient, None, exc
-
-def collect_patient_stats(
-    patients: Sequence[str | os.PathLike],
-    summarize_patient: Callable[[str | os.PathLike], Optional[dict]],
-    num_workers: int = 0,
-    drop_failed: bool = True,
-) -> pd.DataFrame:
-    rows: list[dict] = []
-    patient_list = list(patients)
-
-    logger.progress_start(len(patient_list), desc="Collecting patient stats", leave=True)
-    if num_workers > 1:
-        with multiprocessing.Pool(num_workers) as pool:
-            results = pool.imap(_collect_patient_stats_one, [(patient, summarize_patient) for patient in patient_list])
-            for patient, row, exc in results:
-                try:
-                    if exc is not None:
-                        if not drop_failed:
-                            raise exc
-                        logger.warning(f"Failed to summarize patient {patient}: {exc}")
-                        continue
-                    if row is None:
-                        continue
-                    current_row = dict(row)
-                    current_row.setdefault("patient", patient)
-                    rows.append(current_row)
-                finally:
-                    logger.progress_advance(1)
-    else:
-        for patient in patient_list:
-            try:
-                row = summarize_patient(patient)
-                if row is None:
-                    continue
-                current_row = dict(row)
-                current_row.setdefault("patient", patient)
-                rows.append(current_row)
-            except Exception as exc:
-                if not drop_failed:
-                    raise
-                logger.warning(f"Failed to summarize patient {patient}: {exc}")
-            finally:
-                logger.progress_advance(1)
-
-    logger.progress_close()
-    logger.info(f"Collected patient stats for {len(rows)}/{len(patient_list)} patients.")
-    return pd.DataFrame(rows)
-
 
 def summarize_dataset(
     dataset_clazz,
@@ -423,29 +360,25 @@ def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str
 #     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
 #     return [pats], [[]]
 
-def estimate_class_cnts(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
-    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
-    
+def estimate_class_cnts(loader: DataLoader):
+    dataset = loader.dataset
     total_batches = len(loader)
-    class_cnts = torch.zeros(len(dataset.get_classes())) 
-    logger.progress_start(total_batches*batch_size, desc=f"Estimating class counts", leave=True)
+    batch_size = loader.batch_size or 1
+    class_cnts = torch.zeros(len(dataset.get_classes()))
+    logger.progress_start(total_batches * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         y = batch["target"]
         target = y.argmax(dim=1)
         idx, cnt = torch.unique(target, return_counts=True)
         class_cnts[idx] += cnt
-        logger.progress_advance(batch_size)
+        logger.progress_advance(len(y))
     logger.progress_close()
 
     return {
         cname:c.item() for cname,c in zip(dataset.get_classes(), class_cnts)
     }
 
-def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
-    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
-    
+def dataloader_to_numpy(loader: DataLoader):
     X = []
     Y = []
     Y_extra = []
@@ -453,7 +386,8 @@ def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 
     patients = []
 
     total_batches = len(loader)
-    logger.progress_start(total_batches*batch_size, desc=f"Converting dataset to numpy", leave=True)
+    batch_size = loader.batch_size or 1
+    logger.progress_start(total_batches * batch_size, desc="Converting dataloader to numpy", leave=True)
     for batch in loader:
         X.append(batch["data"].cpu().numpy())
         if batch["data"].shape[0] < batch_size:
@@ -463,8 +397,7 @@ def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 
         if "target_extra" in batch: Y_extra.append(batch["target_extra"].cpu().numpy())
         timestamps.extend(batch["time"])
         patients.extend(batch["patient"])
-
-        logger.progress_advance(batch_size)
+        logger.progress_advance(batch["data"].shape[0])
     logger.progress_close()
 
     X = np.vstack(X)
@@ -522,18 +455,15 @@ def save_array_chunks(out_path: Path, stem: str, array: np.ndarray, n_samples_pe
         np.save(out_path / f"{stem}.{chunk_idx:06d}.npy", array[start:stop], allow_pickle=False)
 
 
-def export_dataset_to_numpy_dir(
-    dataset,
+def export_dataloader_to_numpy_dir(
+    loader: DataLoader,
     out_dir: str | os.PathLike,
     *,
-    n_samples: Optional[int] = None,
-    num_workers: int = 8,
-    batch_size: int = 128,
     extra_keys: Optional[Sequence[str]] = None,
     n_samples_per_file: Optional[int] = None,
 ) -> Path:
     """
-    Export one realized pass over a dataset into a numpy cache directory.
+    Export one realized pass over a dataloader stream into a numpy cache directory.
 
     ``extra_keys`` is deliberately narrow: every requested key must be present
     on every exported item and must reduce to either
@@ -545,27 +475,19 @@ def export_dataset_to_numpy_dir(
     objects. This is intentional so cache contents stay predictable and can be
     loaded without pickle.
 
-    If ``n_samples_per_file`` is provided, arrays are split across multiple ``.npy``
-    files along axis 0.
+    The exported cache intentionally reflects exactly one epoch of the supplied
+    loader stream, including any sampling or dataset-side randomization that
+    happened before collation.
+
+    If ``n_samples_per_file`` is provided, arrays are split across multiple
+    ``.npy`` files along axis 0.
     """
+    dataset = loader.dataset
     if hasattr(dataset, 'initialized') and not dataset.initialized:
         raise ValueError(f"{dataset.__class__.__name__} is not initialized. Call initialize(...) before exporting.")
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-
-    sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
-    persistent_workers = num_workers > 0
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        sampler=sampler,
-        num_workers=num_workers,
-        collate_fn=partial(export_batch_collate, extra_keys=extra_keys),
-        drop_last=False,
-        persistent_workers=persistent_workers,
-    )
 
     X = []
     Y = []
@@ -574,7 +496,7 @@ def export_dataset_to_numpy_dir(
     patients = []
     extras = {key: [] for key in (extra_keys or [])}
 
-    expected = n_samples if n_samples is not None else len(dataset)
+    expected = len(loader) * (loader.batch_size or 1)
     logger.progress_start(expected, desc='Exporting dataset to numpy cache', leave=True)
     for batch in loader:
         if 'data' not in batch or 'patient' not in batch or 'time' not in batch:
@@ -621,7 +543,7 @@ def export_dataset_to_numpy_dir(
     input_channels = dataset.get_input_channels() if hasattr(dataset, 'get_input_channels') else [str(i) for i in range(data_arr.shape[-1])]
     classes = dataset.get_classes() if hasattr(dataset, 'get_classes') else []
     fallback_patients = [str(patient) for patient in np.concatenate(patients, axis=0)]
-    all_patients = getattr(dataset, 'all_patients', sorted(set(fallback_patients)))
+    all_patients = sorted(set(fallback_patients))
 
     meta = {
         'sample_frequency': float(getattr(dataset, 'sample_frequency')),
@@ -633,6 +555,7 @@ def export_dataset_to_numpy_dir(
         'all_patients': [str(p) for p in all_patients],
         'extra_keys': list(extras.keys()),
         'n_items': int(data_arr.shape[0]),
+        'stride': str(getattr(dataset, 'stride', getattr(dataset, 'target_resolution'))),
     }
     with (out_path / 'meta.json').open('w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)

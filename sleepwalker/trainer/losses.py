@@ -1,10 +1,7 @@
-from functools import partial
 from typing import Literal, Optional
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, RandomSampler
-
-from sleepwalker.datasets.Basedataset import batch_collate
+from torch.utils.data import DataLoader
 from sleepwalker.utils import logger
 
 
@@ -117,30 +114,17 @@ def build_multilabel_task_masks(
 
 
 def estimate_multilabel_class_cnts(
-    dataset,
+    loader: DataLoader,
     task_config: dict[str, dict],
     condition_task: Optional[str] = None,
     condition_labels: Optional[list[str]] = None,
     conditioned_tasks: Optional[list[str]] = None,
-    n_samples: Optional[int] = None,
-    num_workers: int = 8,
-    batch_size: int = 128,
 ):
-    sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
-    loader = DataLoader(
-        dataset = dataset,
-        batch_size = batch_size,
-        shuffle = False,
-        sampler = sampler,
-        num_workers = num_workers,
-        collate_fn = partial(batch_collate, ignore_list=["time", "patient", "data"]),
-        drop_last = False,
-    )
-
     class_cnts = {
         cfg["task"]: torch.zeros(len(cfg["labels"]), dtype=torch.float64)
         for cfg in task_config.values()
     }
+    batch_size = loader.batch_size or 1
     logger.progress_start(len(loader) * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         y = batch["target"]
@@ -160,7 +144,7 @@ def estimate_multilabel_class_cnts(
                 raise ValueError(f"Task '{cfg['task']}' contains invalid targets while estimating class counts.")
             counts = torch.bincount(y_selected.reshape(-1), minlength=len(cfg["labels"]))
             class_cnts[cfg["task"]] += counts.to(dtype=torch.float64)
-        logger.progress_advance(batch_size)
+        logger.progress_advance(y.shape[0])
     logger.progress_close()
 
     return {

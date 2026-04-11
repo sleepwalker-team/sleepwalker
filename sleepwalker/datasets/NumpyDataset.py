@@ -75,6 +75,7 @@ class NumpyDataset:
         self.resample_type = str(meta["resample_type"])
         self.total_input = pd.to_timedelta(meta["total_input"])
         self.target_resolution = pd.to_timedelta(meta["target_resolution"])
+        self.stride = pd.to_timedelta(meta.get("stride", meta["target_resolution"]))
         self.classes = list(meta.get("classes", []))
         self.label_classes = list(self.classes)
         self.input_channels = list(meta.get("input_channels", []))

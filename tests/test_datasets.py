@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 
 from sleepwalker.datasets.Basedataset import ChannelConfig, BaseDataset, EDFFile, EventIndex, batch_collate
 from sleepwalker.datasets.CAP import CAP
@@ -26,11 +27,10 @@ from sleepwalker.datasets.WSC import WSC
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
-from sleepwalker.datasets.ZarrDataset import ZarrDataset, get_zarr_files_in_repo
-from sleepwalker.datasets.utils import RepeatSampler, get_edf_files_in_repo
+from sleepwalker.datasets.NumpyDataset import NumpyDataset
+from sleepwalker.datasets.utils import RepeatSampler, export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
-
 from dotenv import load_dotenv
 
 from tests.utils import iterate_dataset
@@ -61,6 +61,17 @@ class DummyDataset(BaseDataset):
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         raise NotImplementedError
+
+
+def build_export_loader(dataset, batch_size=128):
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=export_batch_collate,
+        drop_last=False,
+    )
 
 
 def create_dummy_file() -> EDFFile:
@@ -98,10 +109,12 @@ def test_get_item_rejects_before_loading_signal():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
             target=target,
             target_extra=target_extra,
-            class_cnts=[1.0, 100.0],
+            patient=patient,
+            time=time,
+            class_cnts={"task": {"n1": 1.0, "wake": 100.0}},
             task_config=task_config,
         ),
     )
@@ -136,9 +149,11 @@ def test_get_item_loads_signal_after_label_precheck():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, **_kwargs: MultiLabelTrainer.get_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
             target=target,
             target_extra=target_extra,
+            patient=patient,
+            time=time,
             task_config=task_config,
         ),
     )
@@ -177,7 +192,8 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
         index=pd.date_range("2024-01-01", periods=30, freq="1s"),
     )
 
-    selected = dataset._select_grouped_channels(signal)
+    built = dataset.build_sample_from_window_df({"patient": "p", "time": signal.index[0]}, signal)
+    selected = pd.DataFrame(built["data"].numpy(), index=signal.index, columns=["eeg"])
 
     assert list(selected.columns) == ["eeg"]
     assert selected.shape[1] == 1
@@ -185,15 +201,66 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
 
 def test_repeat_sampler_repeats_indices():
     class FixedSampler:
+        def __init__(self):
+            self.seen_epoch = None
+
         def __iter__(self):
             return iter([0, 2, 4])
 
         def __len__(self):
             return 3
 
-    sampler = RepeatSampler(FixedSampler(), n_repeat=3)
+        def set_epoch(self, epoch):
+            self.seen_epoch = epoch
+
+    fixed = FixedSampler()
+    sampler = RepeatSampler(fixed, n_repeat=3)
+    sampler.set_epoch(7)
+
+    assert fixed.seen_epoch == 7
 
     assert list(iter(sampler)) == [0, 0, 0, 2, 2, 2, 4, 4, 4]
+
+
+def test_basedataset_retry_scope_can_stay_global():
+    class RetryDataset(DummyDataset):
+        def __init__(self):
+            super().__init__(
+                channels=[ChannelConfig(name="EEG")],
+                sample_frequency=1,
+                total_input="30s",
+                target_resolution="30s",
+                event_mapping={},
+                remove_unmapped_events=False,
+                online_max_tries=3,
+            )
+            self.calls = []
+
+        def get_item(self, file, start_date):
+            self.calls.append(file.path)
+            if len(self.calls) == 1:
+                return None
+            return {"data": torch.zeros(30, 1), "target": torch.tensor([1.0]), "patient": file.path, "time": start_date}
+
+    dataset = RetryDataset()
+    dataset.edf_files = [
+        EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+        EDFFile(channels=["EEG"], path="p2.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+    ]
+    dataset.lower_bounds = [0, 1]
+    dataset.upper_bounds = [1, 2]
+    dataset.initialized = True
+    # dataset.online_retry_scope = "global"
+
+    original_choice = np.random.choice
+    np.random.choice = lambda values: 1
+    try:
+        item = dataset[0]
+    finally:
+        np.random.choice = original_choice
+
+    assert item["patient"] == "p2.edf"
+    assert dataset.calls == ["p1.edf", "p2.edf"]
 
 
 def test_grouped_multiclass_trainer_averages_repeats():
@@ -425,19 +492,6 @@ def test_wsc_dataset():
 
     run_test(WSC, "ECG", EDF_PATH, NUM_BATCHES)
 
-def test_zarr_dataset():
-    NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
-    ZARR_PATH = os.environ.get("ZARR_PATH")
-    ZARR_PATH = "/raid/sleepwalker/zarr"
-
-    if not ZARR_PATH or not Path(ZARR_PATH).exists():
-        pytest.skip("Zarr dataset not available. ")
-    
-    zarr_files = get_zarr_files_in_repo(ZARR_PATH)
-
-    dataset = ZarrDataset(zarr_files, total_input = "630s", target_resolution = "30s", sample_frequency = 100)
-    iterate_dataset(dataset, NUM_BATCHES)
-
 def test_multi_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     CAP_PATH = os.environ.get("CAP_PATH") 
@@ -494,4 +548,203 @@ if __name__ == '__main__':
     # test_wsc_dataset() 
     # test_multi_dataset()
     # test_cap_dataset()
-    test_zarr_dataset()
+
+
+class CacheReadyDataset(DummyDataset):
+    def __init__(self):
+        super().__init__(
+            channels=[ChannelConfig(name="eeg"), ChannelConfig(name="emg")],
+            sample_frequency=2,
+            total_input="2s",
+            target_resolution="1s",
+            event_mapping=None,
+        )
+        self.classes = ['wake', 'rem']
+        self.label_classes = list(self.classes)
+        self.initialized = True
+        self.all_patients = ['patient-a', 'patient-b']
+        self._files = []
+        base_time = pd.Timestamp('2024-01-01')
+        for idx in range(3):
+            base = idx * 10
+            signal = pd.DataFrame(
+                [
+                    [base + 1, base + 2],
+                    [base + 3, base + 4],
+                    [base + 5, base + 6],
+                    [base + 7, base + 8],
+                ],
+                columns=["eeg", "emg"],
+                index=pd.date_range(base_time + pd.Timedelta(seconds=idx) - pd.Timedelta(milliseconds=500), periods=4, freq="500ms"),
+            )
+            self._files.append(
+                EDFFile(
+                    channels=["eeg", "emg"],
+                    path='patient-a' if idx < 2 else 'patient-b',
+                    start_date=base_time + pd.Timedelta(seconds=idx) - pd.Timedelta(milliseconds=500),
+                    length=1,
+                    X=signal,
+                )
+            )
+
+    def __len__(self):
+        return 3
+
+    def get_classes(self):
+        return list(self.classes)
+
+    def has_extra_target(self):
+        return True
+
+    def get_n_patients(self):
+        return 2
+
+    def get_timeseries_len(self):
+        return 4
+
+    def __getitem__(self, idx):
+        base = idx * 10
+        return {
+            'data': torch.tensor([[base + 1, base + 2], [base + 3, base + 4], [base + 5, base + 6], [base + 7, base + 8]], dtype=torch.float32),
+            'target': torch.tensor([1.0, 0.0], dtype=torch.float32) if idx % 2 == 0 else torch.tensor([0.0, 1.0], dtype=torch.float32),
+            'target_extra': torch.tensor([float(idx), float(idx + 1)], dtype=torch.float32),
+            'patient': 'patient-a' if idx < 2 else 'patient-b',
+            'time': pd.Timestamp('2024-01-01') + pd.Timedelta(seconds=idx),
+            'dataset': idx % 2,
+        }
+
+
+class GroupedCacheDataset(DummyDataset):
+    def __init__(self):
+        super().__init__(
+            channels=[
+                ChannelConfig(name="channel-a", group="eeg"),
+                ChannelConfig(name="channel-b", group="eeg"),
+            ],
+            sample_frequency=1,
+            total_input="3s",
+            target_resolution="1s",
+            event_mapping=None,
+        )
+        self.classes = ['wake']
+        self.label_classes = list(self.classes)
+        self.initialized = True
+        self.all_patients = ['patient-a']
+        self._file = EDFFile(
+            channels=["channel-a", "channel-b"],
+            path="patient-a",
+            start_date=pd.Timestamp("2023-12-31 23:59:59"),
+            length=1,
+            X=pd.DataFrame(
+                {
+                    "channel-a": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                    "channel-b": np.array([11.0, 12.0, 13.0], dtype=np.float32),
+                },
+                index=pd.date_range("2024-01-01", periods=3, freq="1s"),
+            ),
+        )
+        self.edf_files = [self._file]
+        self.lower_bounds = [0]
+        self.upper_bounds = [1]
+
+    def __len__(self):
+        return 1
+
+    def get_classes(self):
+        return list(self.classes)
+
+    def has_extra_target(self):
+        return False
+
+    def get_n_patients(self):
+        return 1
+
+    def get_timeseries_len(self):
+        return 3
+
+    def __getitem__(self, idx):
+        return super().__getitem__(idx)
+
+
+def test_numpy_dataset_export_roundtrip(tmp_path):
+    cache_dir = export_dataloader_to_numpy_dir(
+        DataLoader(
+            CacheReadyDataset(),
+            batch_size=128,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda batch: export_batch_collate(batch, extra_keys=["dataset"]),
+            drop_last=False,
+        ),
+        tmp_path / 'cache',
+        extra_keys=['dataset'],
+    )
+
+    dataset = NumpyDataset(cache_dir)
+
+    assert len(dataset) == 3
+    assert dataset.get_classes() == ['wake', 'rem']
+    assert dataset.has_extra_target() is True
+    assert dataset.get_input_channels() == ['eeg', 'emg']
+
+    item = dataset[1]
+    assert torch.equal(item['data'], torch.tensor([[11.0, 12.0], [13.0, 14.0], [15.0, 16.0], [17.0, 18.0]]))
+    assert torch.equal(item['target'], torch.tensor([0.0, 1.0]))
+    assert torch.equal(item['target_extra'], torch.tensor([1.0, 2.0]))
+    assert item['patient'] == 'patient-a'
+    assert item['time'] == pd.Timestamp('2024-01-01 00:00:01')
+    assert item['dataset'] == 1
+
+
+def test_numpy_dataset_supports_memmap(tmp_path):
+    cache_dir = export_dataloader_to_numpy_dir(build_export_loader(CacheReadyDataset()), tmp_path / 'cache')
+
+    dataset = NumpyDataset(cache_dir, in_memory=False)
+
+    assert len(dataset) == 3
+    assert dataset[0]['data'].shape == (4, 2)
+
+
+def test_numpy_cache_freezes_one_export_pass(tmp_path, monkeypatch):
+    source = GroupedCacheDataset()
+    choices = iter([1, 0, 0])
+    monkeypatch.setattr(np.random, 'choice', lambda values: next(choices))
+
+    cache_dir = export_dataloader_to_numpy_dir(build_export_loader(source), tmp_path / 'cache')
+    cached = NumpyDataset(cache_dir)
+
+    first = cached[0]['data'].clone()
+    second = cached[0]['data'].clone()
+    assert torch.equal(first, second)
+    assert torch.equal(first, torch.tensor([[11.0], [12.0], [13.0]]))
+
+    live_item = source[0]['data']
+    assert torch.equal(live_item, torch.tensor([[1.0], [2.0], [3.0]]))
+
+
+def test_numpy_dataset_chunked_roundtrip(tmp_path):
+    cache_dir = export_dataloader_to_numpy_dir(
+        DataLoader(
+            CacheReadyDataset(),
+            batch_size=128,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda batch: export_batch_collate(batch, extra_keys=["dataset"]),
+            drop_last=False,
+        ),
+        tmp_path / 'cache_chunked',
+        extra_keys=['dataset'],
+        n_samples_per_file=2,
+    )
+
+    assert (cache_dir / 'data.000000.npy').exists()
+    assert (cache_dir / 'data.000001.npy').exists()
+
+    dataset = NumpyDataset(cache_dir, in_memory=False)
+
+    assert len(dataset) == 3
+    item = dataset[2]
+    assert torch.equal(item['data'], torch.tensor([[21.0, 22.0], [23.0, 24.0], [25.0, 26.0], [27.0, 28.0]]))
+    assert torch.equal(item['target'], torch.tensor([1, 0]))
+    assert item['patient'] == 'patient-b'
+    assert item['dataset'] == 0

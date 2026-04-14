@@ -1,9 +1,19 @@
+"""Quantile-based clipping and min-max scaling preprocessor."""
+
 import torch
 
 from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 from sleepwalker.utils import logger
 
 class EmpiricalClipScaler(Preprocessor):
+    """Clip features to empirical quantile bounds and scale to `[0, 1]`.
+
+    Args:
+        q: Upper quantile used to estimate clipping bounds. The lower quantile
+            is `1 - q`.
+        scale: Additional multiplicative expansion applied to the empirical
+            bounds.
+    """
         
     def __init__(self, q=0.9, scale=1, **kwargs):
         super().__init__()
@@ -13,9 +23,11 @@ class EmpiricalClipScaler(Preprocessor):
         self.scale = scale
 
     def requires_warmup(self) -> bool:
+        """Return whether this preprocessor requires warmup."""
         return True
 
     def update(self, data: torch.Tensor):
+        """Update empirical min/max bounds from one batch."""
         x = data
         (_, _, n_features) = x.shape
         _x = x.reshape(-1, n_features)
@@ -31,6 +43,7 @@ class EmpiricalClipScaler(Preprocessor):
         self.maxs = torch.maximum(emp_maxs, self.maxs)
 
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        """Clamp and rescale a tensor using the learned bounds."""
         if self.mins is None or self.maxs is None:
             logger.warning('EmpiricalClipScaler is not fitted; Return data as-is')
             return data

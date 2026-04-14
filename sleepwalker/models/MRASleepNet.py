@@ -13,6 +13,7 @@ from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.models.preprocessors.NormalizeAlongDim import NormalizeAlongDim
 
 class CNNBlock(nn.Module):
+    """Residual convolutional block used in the MRASleepNet front-end."""
     def __init__(self,in_ch,out_ch,filter_size,stride = 2):
         super(CNNBlock,self).__init__()
         self.conv1 = nn.Conv1d(in_ch,out_ch,filter_size,stride,filter_size//2,bias=False)
@@ -36,6 +37,7 @@ class CNNBlock(nn.Module):
         return x
 
 class FE(nn.Module):
+    """Feature extractor stack used before the multi-resolution attention block."""
     def __init__(self, in_channel):
         super(FE,self).__init__()
         self.conv1 = CNNBlock(in_channel,64,49,2)
@@ -57,6 +59,7 @@ class FE(nn.Module):
         return x
 
 class MRA(nn.Module):
+    """Multi-resolution attention block."""
     def __init__(self):
         super(MRA,self).__init__()
         self.conv1 = nn.Conv1d(128,128,7,1,3)
@@ -85,6 +88,7 @@ class MRA(nn.Module):
         return x
 
 class SpatialGatingUnit(nn.Module):
+    """Spatial gating unit used by the gMLP block."""
     def __init__(self, d_ffn, seq_len):
         super().__init__()
         self.norm = nn.LayerNorm(d_ffn)
@@ -99,6 +103,7 @@ class SpatialGatingUnit(nn.Module):
         return out
 
 class gMLPBlock(nn.Module):
+    """gMLP-style block used after the attention stage."""
     def __init__(self, d_model, d_ffn, seq_len):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
@@ -128,6 +133,14 @@ class MRASleepNet(BaseModel):
     - Cohens Kappa: 0.786 / 0.743
     """
     def __init__(self, *, ts_len, n_channels=None, n_features=None, classes=None):
+        """Construct the MRASleepNet architecture.
+
+        Args:
+            ts_len: Input sequence length in samples.
+            n_channels: Number of input channels.
+            n_features: Alias for `n_channels`.
+            classes: Optional output class names.
+        """
         super().__init__(preprocessors=[NormalizeAlongDim(1)])
         self.n_channels = n_channels if n_channels is not None else n_features
         if self.n_channels is None:
@@ -162,6 +175,7 @@ class MRASleepNet(BaseModel):
             self.fc = None
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute MRASleepNet features from one input batch."""
         batch_size, T, D = x.shape 
         x = x.swapaxes(1,2) # (B, D, T)
         xt = self.bnt(self.convt(x)).view(batch_size,-1)
@@ -174,9 +188,11 @@ class MRASleepNet(BaseModel):
         return torch.cat((x,xt),1)
 
     def feature_dim(self) -> int:
+        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Map features to class predictions."""
         if self.fc is None or self.classes is None:
             raise ValueError("MRASleepNet.classifier() requires classes to be set.")
         return self.fc(x)

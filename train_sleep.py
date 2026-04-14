@@ -1,13 +1,34 @@
+"""Sleep-staging training script for the current lab workflow.
+
+This script assembles dataset adapters, model configurations, patient filters,
+and shared trainer/run utilities into a multiclass sleep-staging experiment.
+It is actively developed and should be read as an internal experiment entry
+point rather than a stable public CLI.
+"""
+
+#!/bin/env python3
+
 from __future__ import annotations
 
+import argparse
 import copy
 import inspect
 import os
+from functools import partial
+
 import pandas as pd
 import torch
+import torch.multiprocessing as mp
+
+# os.environ["OMP_NUM_THREADS"] = "2"
+# os.environ["MKL_NUM_THREADS"] = "2"
+# os.environ["OPENBLAS_NUM_THREADS"] = "2"
+# os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+# os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 from sleepwalker.datasets import ChannelConfig
 from sleepwalker.datasets import Ruhrlandklinik
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.ABC import ABC
 from sleepwalker.datasets.Apples import Apples
 from sleepwalker.datasets.CAP import CAP
@@ -22,23 +43,45 @@ from sleepwalker.datasets.augmentation.RandomPolarityFlip import RandomPolarityF
 from sleepwalker.datasets.augmentation.RandomResampleJitter import RandomResampleJitter
 from sleepwalker.datasets.augmentation.TimeShiftAndCrop import TimeShiftAndCrop
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
-from sleepwalker.datasets.utils import get_edf_files_in_repo
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import SleepTransformer
 from sleepwalker.models.AttnSleep import AttnSleep
 from sleepwalker.models.MRASleepNet import MRASleepNet
 from sleepwalker.models.SeqSleepNet import SeqSleepNet
 from sleepwalker.models.TinySleepNet import TinySleepNet
 from sleepwalker.models.USleep import USleep
+from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.NegativeGroupedChanelMulticlassTrainer import GradReverseTrainer
 from sleepwalker.trainer.losses import dice_loss
+from sleepwalker.trainer.utils.filtering import filter_patients_by_sleep_time, trim_wake
+from sleepwalker.trainer.utils.splits import combine_datasets, split_patients_train_val_test
+from sleepwalker.trainer.utils.targets import prepare_multiclass_target
+from sleepwalker.utils import logger, suppress_stdout_logging
+
+# torch.set_num_threads(2)
+# torch.set_num_interop_threads(1)
+mp.set_sharing_strategy("file_system")
 
 TARGET_CLASSES = ["wake", "n1", "n2", "n3", "rem"]
-
 TASK_DEFAULTS = {
     "sample_frequency": 100,
     "target_resolution": "30s",
 }
+
+SCORED_SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
+BATCH_SIZE = 128
+EPOCHS = 100
+N_SAMPLES = 250_000
+NUM_WORKERS_DATASET = 8
+NUM_WORKERS_DATALOADER = 8
+TEST_FRAC = 0.3
+VAL_FRAC = 0.1
+EXPERIMENT_NAME = "multiclass"
+DATASET_ROOT = "/raid/sleepwalker"
+SLEEP_PERCENTAGE = 0.5
+GROUPED_TEST_REPEATS = [1, 2, 3, 4, 5, 10]
+SLEEP_TIME_FILTER_QUANTILE = 0.05
 
 DATASET_CFG = {
     "abc": {
@@ -236,6 +279,52 @@ DATASET_CFG = {
         ],
         "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
+    "ruhrland2023": {
+        "clazz": Ruhrlandklinik,
+        "edf_path": "ruhrlandklinik/raw/train-test-2023",
+        "event_mapping": {
+            "wach": "wake",
+            "n1": "n1",
+            "n2": "n2",
+            "n3": "n3",
+            "rem": "rem",
+        },
+        "channels": [ChannelConfig("C4")],
+        "grouped_channels": [
+            ChannelConfig("F3", group="eeg"),
+            ChannelConfig("F4", group="eeg"),
+            ChannelConfig("C3", group="eeg"),
+            ChannelConfig("C4", group="eeg"),
+            ChannelConfig("O1", group="eeg"),
+            ChannelConfig("O2", group="eeg"),
+            ChannelConfig("M1", group="eeg"),
+            ChannelConfig("M2", group="eeg"),
+        ],
+        "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
+    },
+    "ruhrland2024": {
+        "clazz": Ruhrlandklinik,
+        "edf_path": "ruhrlandklinik/raw/val-2024",
+        "event_mapping": {
+            "wach": "wake",
+            "n1": "n1",
+            "n2": "n2",
+            "n3": "n3",
+            "rem": "rem",
+        },
+        "channels": [ChannelConfig("C4")],
+        "grouped_channels": [
+            ChannelConfig("F3", group="eeg"),
+            ChannelConfig("F4", group="eeg"),
+            ChannelConfig("C3", group="eeg"),
+            ChannelConfig("C4", group="eeg"),
+            ChannelConfig("O1", group="eeg"),
+            ChannelConfig("O2", group="eeg"),
+            ChannelConfig("M1", group="eeg"),
+            ChannelConfig("M2", group="eeg"),
+        ],
+        "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
+    },
     "sleepedfx": {
         "clazz": SleepEDFx,
         "edf_path": "sleep-edfx",
@@ -252,7 +341,6 @@ DATASET_CFG = {
         "grouped_rereference": [["EEG Fpz-Cz", "EEG Pz-Oz"]],
     },
 }
-
 
 MODEL_CFG = {
     "sleeptransformer": {
@@ -344,17 +432,35 @@ MODEL_CFG = {
     },
 }
 
+
 def get_dataset(
     name: str,
     model_name: str,
     patients,
-    path_root: str = "/raid/sleepwalker",
+    path_root: str = DATASET_ROOT,
     grouped: bool = False,
     prepare_patient=None,
     prepare_target=None,
     prepare_sample=None,
     total_input: str | None = None,
 ):
+    """Build one configured sleep-staging dataset instance.
+
+    Args:
+        name: Dataset configuration key from `DATASET_CFG`.
+        model_name: Model configuration key from `MODEL_CFG`.
+        patients: Optional patient list. When `None`, EDF files are discovered
+            from the configured dataset root.
+        path_root: Root directory containing dataset subfolders.
+        grouped: Whether to use grouped-channel input definitions.
+        prepare_patient: Optional patient-level callback.
+        prepare_target: Optional target-preparation callback.
+        prepare_sample: Optional sample-preparation callback.
+        total_input: Optional override for the model input duration.
+
+    Returns:
+        A configured dataset instance. The dataset is not initialized here.
+    """
     if name not in DATASET_CFG:
         raise ValueError(f"Unknown sleep staging dataset '{name}'.")
     if model_name not in MODEL_CFG:
@@ -396,14 +502,30 @@ def get_dataset(
 def get_model_and_trainer(
     name: str,
     dataset,
-    batch_size: int,
     epochs: int,
     n_samples: int,
     dry_run: bool = False,
-    grad_reversal: bool = False,
+    model_payload: dict[str, object] | None = None,
 ):
+    """Build the model and trainer for one sleep-staging experiment setup.
+
+    Args:
+        name: Model configuration key from `MODEL_CFG`.
+        dataset: Prepared training dataset or combined dataset view.
+        epochs: Requested epoch count.
+        n_samples: Requested training sample budget.
+        dry_run: Whether to reduce workload for pipeline checks.
+        model_payload: Optional flags that affect trainer selection.
+
+    Returns:
+        A `(model, trainer)` tuple.
+    """
     if name not in MODEL_CFG:
         raise ValueError(f"Unknown sleep staging model '{name}'.")
+
+    grad_reversal = bool((model_payload or {}).get("grad_reversal", False))
+    if grad_reversal and dataset.get_n_datasets() < 3:
+        raise ValueError("Gradient reversal requires more than two training datasets.")
 
     model_cfg = copy.deepcopy(MODEL_CFG[name])
     epochs = 1 if dry_run else epochs
@@ -442,6 +564,9 @@ def get_model_and_trainer(
         "loss_function": loss_function,
         "early_stopping": 10,
         "train_transform": model_cfg.get("transform", None),
+        "loss_mode": loss_mode,
+        "class_weights": class_weights,
+        "balance_batches": balance_batches,
     }
     if grad_reversal:
         trainer = GradReverseTrainer(
@@ -452,13 +577,160 @@ def get_model_and_trainer(
     else:
         trainer = MulticlassTrainer(**trainer_kwargs)
 
-    return model, trainer, {
-        "batch_size": batch_size,
-        "n_samples": n_samples,
-        "ts_len": ts_len,
-        "n_channels": len(dataset.channels),
-        "loss_function": loss_function,
-        "loss_mode": loss_mode,
-        "class_weights": class_weights,
-        "balance_batches": balance_batches,
-    }
+    return model, trainer
+
+
+def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):
+    """Trim leading and trailing wake for sleep-staging datasets."""
+    trimmed = trim_wake(data_df, label_df, label_extra_df)
+    if trimmed is None:
+        return None
+    label_df, label_extra_df = trimmed
+    return data_df, label_df, label_extra_df
+
+def list_filtered_sleep_patients(dataset_name: str, model_name: str, grouped: bool, dry_run: bool) -> list[str]:
+    """Discover patients and drop sleep-time outliers before splitting."""
+    dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
+    patients = get_edf_files_in_repo(dataset_path, recursive=True)
+    dataset = get_dataset(
+        name=dataset_name,
+        model_name=model_name,
+        patients=[],
+        path_root=DATASET_ROOT,
+        grouped=grouped,
+        prepare_patient=prepare_sleep_staging_patient,
+    )
+    with suppress_stdout_logging(logger):
+        filtered = filter_patients_by_sleep_time(
+            patients=patients,
+            dataset=dataset,
+            sleep_labels=SCORED_SLEEP_LABELS,
+            quantile=SLEEP_TIME_FILTER_QUANTILE,
+            num_workers=NUM_WORKERS_DATASET,
+            label=dataset_name,
+        )
+    
+    logger.info(
+        f"Filtered sleep-time outliers: kept {len(filtered)}/{len(patients)} patients"
+    )
+    return filtered
+
+def load_split_with_logging(
+    dataset_name: str,
+    purpose: str,
+    model_name: str,
+    grouped: bool,
+    patients: list[str],
+):
+    """Initialize one dataset split while preserving readable logging."""
+    with suppress_stdout_logging(logger):
+        logger.context(purpose.upper())
+        try:
+            total_input = None
+            if purpose == "test":
+                total_input = MODEL_CFG[model_name].get("total_input_model", MODEL_CFG[model_name]["total_input"])
+
+            dataset = get_dataset(
+                name=dataset_name,
+                model_name=model_name,
+                patients=patients,
+                path_root=DATASET_ROOT,
+                grouped=grouped,
+                prepare_patient=prepare_sleep_staging_patient,
+                prepare_target=partial(prepare_multiclass_target, target_classes=TARGET_CLASSES),
+                prepare_sample=None,
+                total_input=total_input,
+            )
+            dataset.initialize(patients, NUM_WORKERS_DATASET)
+            return dataset
+        finally:
+            logger.uncontext()
+
+
+def build_splits_for_dataset(dataset_name: str, args):
+    """Build train/validation/test splits for one configured dataset."""
+    patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
+    if args.test is not None:
+        train_patients, val_patients = random_split(patients, test_frac=VAL_FRAC)
+        train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients)
+        val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients)
+        return train_ds, val_ds, None
+
+    train_patients, val_patients, test_patients = split_patients_train_val_test(patients, TEST_FRAC, VAL_FRAC)
+    train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients)
+    val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients)
+    test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, test_patients)
+    return train_ds, val_ds, test_ds
+
+
+def main():
+    """Parse arguments, build splits, and launch one sleep-staging run."""
+    parser = argparse.ArgumentParser(description="Train and evaluate a sleep-staging model.")
+    parser.add_argument("--model", required=False, default="sleeptransformer", type=str)
+    parser.add_argument("--train", required=False, nargs="+", default=["sleepedfx"], type=str)
+    parser.add_argument("--test", required=False, nargs="*", default=None, type=str)
+    parser.add_argument("--grouped", action="store_true")
+    parser.add_argument("--gradrev", action="store_true")
+    parser.add_argument("--dry", action="store_true")
+    args = parser.parse_args()
+
+    train_parts = []
+    val_parts = []
+    test_parts = []
+
+    if args.test is not None:
+        for dataset_name in args.train:
+            train_ds, val_ds, _ = build_splits_for_dataset(dataset_name, args)
+            train_parts.append(train_ds)
+            val_parts.append(val_ds)
+
+        for dataset_name in args.test:
+            patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
+            test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, patients)
+            test_parts.append((dataset_name, test_ds))
+    else:
+        for dataset_name in args.train:
+            train_ds, val_ds, test_ds = build_splits_for_dataset(dataset_name, args)
+            train_parts.append(train_ds)
+            val_parts.append(val_ds)
+            test_parts.append((dataset_name, test_ds))
+
+    train_dataset = combine_datasets(train_parts)
+    model, trainer = get_model_and_trainer(
+        args.model,
+        train_dataset,
+        EPOCHS,
+        N_SAMPLES,
+        args.dry,
+        {"grad_reversal": args.gradrev},
+    )
+    experiment_name = f"{EXPERIMENT_NAME}-grouped" if args.grouped else EXPERIMENT_NAME
+    if args.gradrev:
+        experiment_name += "-gradrev"
+    if args.dry:
+        logger.info("Performing dry run to test pipeline!")
+        experiment_name += "-dev"
+
+    collate_ignore = ["time", "patient", "dataset"] if hasattr(train_dataset, "datasets") else ["time", "patient"]
+    run(
+        RunCfg(
+            experiment_name=experiment_name,
+            model_name=f"{args.model}{'_GradReversal' if args.gradrev else ''}",
+            model=model,
+            trainer=trainer,
+            train_datasets=train_parts,
+            val_datasets=val_parts,
+            test_datasets=test_parts,
+            batch_size=BATCH_SIZE,
+            n_samples=1_000 if args.dry else N_SAMPLES,
+            num_workers_dataloader=NUM_WORKERS_DATALOADER,
+            test_repeats=GROUPED_TEST_REPEATS if args.grouped else [1],
+            use_energy_tracker=False, #not args.dry,
+            tags={"model": args.model, **({"trainer": "gradrev"} if args.gradrev else {})},
+            collate_fn=partial(batch_collate, ignore_list=collate_ignore),
+        ),
+    )
+
+
+if __name__ == "__main__":
+    main()

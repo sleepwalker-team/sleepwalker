@@ -9,7 +9,7 @@ def fix_edf_headers_no_out(e):
     with suppress_stdout_logging(logger):
         fix_edf_header(e)
 
-edf_files = get_edf_files_in_repo("/cephfs_projects/sleepwalker/nchsdb", recursive=True)
+edf_files = get_edf_files_in_repo("/raid/sleepwalker/ruhrlandklinik/raw", recursive=True)
 print(f"Found {len(edf_files)} files")
 
 num_workers = 16

@@ -1,9 +1,22 @@
+"""Short-time Fourier transform preprocessor."""
+
 import torch
 import torch.nn.functional as F
 
 from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Spectrogram(Preprocessor):
+    """Convert time-domain inputs into log-magnitude spectrograms.
+
+    Args:
+        n_fft: FFT size passed to `torch.stft`.
+        hop_length: Hop length between analysis windows.
+        win_length: Window length used for the Hamming window. Defaults to
+            `n_fft`.
+        epoch_len_samples: Optional epoch length that splits one input sequence
+            into several shorter spectrogram examples.
+    """
+
     def __init__(self, n_fft=256, hop_length=64, win_length=None, epoch_len_samples=None):
         super().__init__()
         self.n_fft = n_fft
@@ -16,17 +29,23 @@ class Spectrogram(Preprocessor):
         self.register_buffer("window", window)
  
     def update(self, data: torch.Tensor):
+        """No-op warmup hook because spectrogram extraction is stateless."""
         pass
 
     def requires_warmup(self) -> bool:
+        """Return whether this preprocessor requires warmup."""
         return False
 
     @torch.inference_mode()
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
-        """
-        Vectorized replacement for per-channel torch.stft loop.
-        Input : (B, T, D)
-        Output: (B_eff, F, T', D)
+        """Convert batched signals into batched spectrogram tensors.
+
+        Args:
+            data: Input tensor shaped `(B, T, D)`.
+
+        Returns:
+            A tensor shaped `(B_eff, F, T', D)`, where `B_eff` may be larger
+            than `B` when `epoch_len_samples` is used.
         """
         x = data
         B, T, D = x.shape

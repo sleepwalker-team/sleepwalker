@@ -1,3 +1,10 @@
+"""APPLES dataset adapter.
+
+This adapter reads APPLES EDF files together with tab-delimited ``.annot``
+sidecars. It is used by the repository's sleep-staging workflow and exposes the
+annotation labels largely as stored in the source files.
+"""
+
 from __future__ import annotations
 from datetime import datetime, timedelta
 
@@ -5,6 +12,7 @@ import pandas as pd
 from .Basedataset import BaseDataset  
 
 def convert_to_datetime(row, start_date):
+    """Convert APPLES time strings into absolute datetimes."""
     fmt = "%H:%M:%S.%f" if "." in row else "%H:%M:%S"
     row_ts = datetime.strptime(row, fmt)
     # try:
@@ -106,9 +114,24 @@ class Apples(BaseDataset):
             - snoring
         """
     def __init__(self, **kwargs):
+        """Initialize the APPLES adapter.
+
+        Args:
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         super().__init__(**kwargs)
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Load one APPLES ``.annot`` sidecar into event-table form.
+
+        Args:
+            edf_path: Path to the EDF recording.
+            start_datetime: Recording start timestamp from the EDF header.
+
+        Returns:
+            A dataframe with labels, absolute start and end times, and a
+            computed duration column.
+        """
         annot_path = f"{edf_path.split('.edf')[0]}.annot"
 
         df = pd.read_csv(annot_path, sep="\t", dtype={"class":str, "instance":str, "channel":str, "meta":str})
@@ -120,4 +143,3 @@ class Apples(BaseDataset):
         df["Duration"] = df["Endtime"] - df["Starttime"]
 
         return df[["Label", "Starttime", "Endtime", "Duration"]]
-

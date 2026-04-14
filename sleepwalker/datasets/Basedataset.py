@@ -1,3 +1,16 @@
+"""Core dataset abstractions for EDF-backed Sleepwalker workflows.
+
+This module defines the base dataset lifecycle used throughout the repository:
+configure channels and label mappings, prepare patient-level metadata, build a
+sliding-window index, and lazily materialize model-ready samples on demand.
+
+The code is used by dataset adapters under :mod:`sleepwalker.datasets`, by
+training scripts, and by deployment code that exports unlabelled dataset
+templates for later inference. Tests in ``tests/test_datasets.py`` and
+``tests/test_deployment.py`` exercise the window-building, lazy loading, and
+export-related behavior documented here.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -23,12 +36,34 @@ import multiprocessing
 
 @dataclass
 class ChannelConfig:
+    """Describe one requested signal channel for dataset loading.
+
+    Args:
+        name: Channel name expected in the EDF file.
+        normalizer: Optional normalizer fitted per patient and applied when the
+            corresponding signal is loaded.
+        group: Optional conceptual group name. When multiple configured
+            channels share a group, one available channel is sampled per item
+            and renamed to the group name.
+        quality_name: Optional companion channel used as per-window quality
+            metadata. When present and selected, it is passed to
+            ``prepare_sample`` as ``quality_data``.
+    """
+
     name: str
     normalizer: Optional[Normalizer] = None  
     group: Optional[str] = None
+    quality_name: Optional[str] = None
 
 @dataclass
 class EDFFile: 
+    """Prepared patient descriptor used after dataset initialization.
+
+    The object stores lightweight metadata plus lazily queried label indices.
+    Signal values are normally re-read from disk in :meth:`get_x` rather than
+    kept resident after initialization.
+    """
+
     channels: List[str]
     path: str
     start_date: pd.Timestamp
@@ -41,8 +76,22 @@ class EDFFile:
     normalizers: Optional[dict[str, Normalizer]] = None
 
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
+        """Load one signal window for the prepared patient.
+
+        Args:
+            start_date: Inclusive window start.
+            end_date: Inclusive or near-inclusive window end as passed to
+                ``edf_to_df``.
+            sample_frequency: Requested resampling frequency in Hz.
+            resample_type: Resampling mode forwarded to ``edf_to_df``.
+
+        Returns:
+            A DataFrame indexed by timestamps and containing the configured
+            signal columns. If patient-level normalizers were fitted during
+            preparation, they are applied column-wise before returning.
+        """
         if self.X is None:
-            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type)
+            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type, True)
             # TODO allow normalization after augmentation?  
             if self.normalizers:
                 for col, norm in self.normalizers.items():
@@ -55,6 +104,7 @@ class EDFFile:
             return self.X.loc[start_date:end_date]
     
     def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
+        """Sample the optional secondary target timeline for one window."""
         if self.labels_extra:
             freq = pd.to_timedelta(1.0 / sample_frequency, unit="s")
             return self.labels_extra.query(start_date, end_date, freq=freq, sparse=False, labels=classes)
@@ -62,6 +112,7 @@ class EDFFile:
             return None
 
     def get_y(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
+        """Sample the primary target timeline for one window."""
         if self.labels:
             freq = pd.to_timedelta(1.0 / sample_frequency, unit="s")
             return self.labels.query(start_date, end_date, freq=freq, sparse=False, labels=classes)
@@ -69,6 +120,18 @@ class EDFFile:
             return None
 
 def batch_collate(batch, ignore_list = ["time", "patient"]):
+    """Stack tensor-like batch fields while preserving metadata lists.
+
+    Args:
+        batch: Sequence of per-item dictionaries returned by the dataset.
+        ignore_list: Keys that should stay as Python lists instead of being
+            stacked with ``torch.stack``.
+
+    Returns:
+        A dictionary with one entry per observed key. Tensor-valued fields are
+        stacked, while metadata such as ``time`` and ``patient`` remains a
+        list.
+    """
     final_dict = defaultdict(list)
 
     for b in batch:
@@ -117,9 +180,24 @@ class EventIndex:
         sparse: bool = False,
         labels: list = []
     ) -> pd.DataFrame:
-        """
-        Return a time-indexed DataFrame sampled at `freq`
-        with one column per label (1 if any event of that label is active, else 0).
+        """Sample active labels on a regular time grid.
+
+        Args:
+            start: Window start timestamp.
+            end: Window end timestamp.
+            freq: Sampling frequency expressed as a pandas offset or timedelta.
+            dtype: Output dtype for dense arrays.
+            sparse: Whether to use pandas sparse arrays for the result.
+            labels: Labels to materialize as output columns.
+
+        Returns:
+            A time-indexed DataFrame with one column per requested label. Each
+            value is ``1`` when any interval with that label is active at the
+            sample time and ``0`` otherwise.
+
+        Notes:
+            Interval semantics are left-closed and right-open:
+            ``start <= t < end``.
         """
         # left-closed, right-open grid to match interval semantics
         idx = pd.date_range(start, end, freq=freq, inclusive="left")
@@ -298,6 +376,12 @@ class BaseDataset(Dataset, ABC):
         Length of the target interval associated with each item. In sleep
         staging this is often `"30s"`.
 
+    stride
+        Time between consecutive sampled windows. Defaults to
+        `target_resolution`, which preserves the previous behavior. Set
+        `stride < total_input` to sample overlapping windows while keeping the
+        target interval length unchanged.
+
     event_mapping
         Mapping from raw dataset-specific event labels to the labels used by
         your task, e.g. `{"Sleep stage W": "wake"}`.
@@ -308,7 +392,7 @@ class BaseDataset(Dataset, ABC):
 
     prepare_patient
         Optional callback for whole-patient preparation. It receives
-        `data_df`, `label_df`, `label_extra_df`, `patient`, `start`, and `end`.
+        `data_df`, `label_df`, `label_extra_df`, and `patient`.
         It should return `(data_df, label_df, label_extra_df)` or `None`.
 
     prepare_target
@@ -344,7 +428,7 @@ class BaseDataset(Dataset, ABC):
     Trim wake once per patient:
 
     ```python
-    def prepare_patient(data_df, label_df, label_extra_df, **_kwargs):
+    def prepare_patient(data_df, label_df, label_extra_df, patient=None):
         trimmed = trim_wake(data_df, label_df, label_extra_df)
         if trimmed is None:
             return None
@@ -355,23 +439,30 @@ class BaseDataset(Dataset, ABC):
     Build a multiclass target and reject low-sleep windows cheaply:
 
     ```python
-    def prepare_target(target, target_extra=None, **_kwargs):
-        if target is None:
-            return None
-        sleep_fraction = target[["n1", "n2", "n3", "rem"]].any(axis=1).mean()
-        if sleep_fraction < 0.5:
-            return None
-        return {"target": get_target_as_multiclass(target, target_extra)}
+    from functools import partial
+    from sleepwalker.trainer.utils.targets import prepare_multiclass_target
+
+    prepare_target = partial(
+        prepare_multiclass_target,
+        target_classes=["wake", "n1", "n2", "n3", "rem"],
+        filters=[{"columns": ["n1", "n2", "n3", "rem"], "percentage": 0.5, "mode": "min"}],
+    )
     ```
 
     Convert signals to tensors and reject bad windows:
 
     ```python
-    def prepare_sample(data, target, **item):
+    def prepare_sample(data, target, target_extra=None, patient=None, time=None):
         if data.isna().mean().mean() > 0.1:
             return None
-        item["data"] = torch.from_numpy(data.values).float()
-        item["target"] = target
+        item = {
+            "data": torch.from_numpy(data.values).float(),
+            "target": target,
+            "patient": patient,
+            "time": time,
+        }
+        if target_extra is not None:
+            item["target_extra"] = target_extra
         return item
     ```
     """
@@ -383,6 +474,7 @@ class BaseDataset(Dataset, ABC):
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
         target_resolution: str | pd.Timedelta = "30s",
+        stride: Optional[str | pd.Timedelta] = None,
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
         prepare_patient: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
@@ -402,11 +494,17 @@ class BaseDataset(Dataset, ABC):
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
         self.target_resolution = pd.to_timedelta(target_resolution)
+        self.stride = pd.to_timedelta(stride) if stride is not None else self.target_resolution
+        if self.stride <= pd.Timedelta(0):
+            raise ValueError("stride must be positive.")
+        if self.stride > self.total_input:
+            raise ValueError("stride must be smaller than or equal to total_input.")
         self.prepare_target_callback = prepare_target
         self.prepare_sample_callback = prepare_sample
         self.prepare_patient_callback = prepare_patient
         self.all_patients: list[str | os.PathLike] = []
         self.online_max_tries = online_max_tries
+        # self.online_retry_scope = "global"
         self.initialized = False
         self.force_one_day = force_one_day
         self.rereference = rereference
@@ -414,11 +512,16 @@ class BaseDataset(Dataset, ABC):
         self.lower_bounds: list[int] = []
         self.upper_bounds: list[int] = []
         self.channel_groups: Dict[str, list[str]] = defaultdict(list)
+        self.channel_configs_by_name: Dict[str, ChannelConfig] = {}
+        self.channel_configs_by_group: Dict[str, list[ChannelConfig]] = defaultdict(list)
         for cfg in self.channels:
+            self.channel_configs_by_name[cfg.name] = cfg
             if cfg.group is not None:
                 self.channel_groups[cfg.group].append(cfg.name)
+                self.channel_configs_by_group[cfg.group].append(cfg)
             else:
                 self.channel_groups[cfg.name].append(cfg.name)
+                self.channel_configs_by_group[cfg.name].append(cfg)
 
         # Events/classes
         if event_mapping is not None:
@@ -435,34 +538,88 @@ class BaseDataset(Dataset, ABC):
 
     @abstractmethod
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Return raw event intervals for one patient recording.
+
+        Args:
+            edf_path: Path to the patient EDF file.
+            start_datetime: Recording start time inferred from EDF metadata.
+
+        Returns:
+            A DataFrame containing at least ``Starttime``, ``Endtime``, and
+            ``Label`` columns.
+
+        Notes:
+            Concrete dataset adapters must implement this method.
+        """
         ...
 
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Return optional secondary event intervals.
+
+        Notes:
+            The default implementation signals that extra targets are not
+            supported for this dataset.
+        """
         raise ValueError(f"This function should not be called")
 
     def has_extra_target(self) -> bool:
+        """Report whether this dataset exposes a secondary target timeline."""
         return False
 
     def get_classes(self) -> list[str]:
+        """Return the canonical class labels currently known to the dataset."""
         return self.classes
 
     def get_timeseries_len(self) -> int:
+        """Return the expected number of signal samples per item."""
         freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
         return int(self.total_input.total_seconds() / freq.total_seconds())
 
     def get_n_patients(self) -> int:
+        """Return the number of prepared patient recordings."""
         return len(self.edf_files)
+
+    def get_input_channels(self) -> list[str]:
+        """Return the effective model input channel names after grouping."""
+        return list(self.channel_groups.keys())
+
+    def to_unlabelled(self):
+        """Build an inference-time dataset template without labels.
+
+        Returns:
+            An ``UnlabelledDataset`` configured with the same signal-loading and
+            sample-building settings as this dataset.
+        """
+        from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+
+        return UnlabelledDataset(
+            channels=self.channels,
+            sample_frequency=self.sample_frequency,
+            resample_type=self.resample_type,
+            total_input=self.total_input,
+            stride=self.stride,
+            prepare_patient=self.prepare_patient_callback,
+            prepare_sample=self.prepare_sample_callback,
+            online_max_tries=self.online_max_tries,
+            force_one_day=self.force_one_day,
+            rereference=self.rereference,
+        )
 
     def __len__(self):
         return sum([f.length for f in self.edf_files])
 
     def _prepare_patient_artifacts(self, edf_path):
-        channel_names = [c.name for c in self.channels]
+        channel_names = []
+        for cfg in self.channels:
+            channel_names.append(cfg.name)
+            if cfg.quality_name is not None:
+                channel_names.append(cfg.quality_name)
+        channel_names = list(dict.fromkeys(channel_names))
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
         classes = set()
         extra_classes = set()
-        data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type)
+        data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type, verbose=True)
         if data_df is None or len(data_df) == 0:
             raise ValueError("Found empty EDF file")
 
@@ -514,8 +671,6 @@ class BaseDataset(Dataset, ABC):
                     label_df=df,
                     label_extra_df=df_additional,
                     patient=edf_path,
-                    start=start,
-                    end=end,
                 )
                 if prepared is None:
                     return None
@@ -544,12 +699,26 @@ class BaseDataset(Dataset, ABC):
         }
 
     def prepare_patient(self, edf_path) -> Optional[EDFFile]:
+        """Prepare one patient recording for lazy window sampling.
+
+        Args:
+            edf_path: Path to an EDF file.
+
+        Returns:
+            An :class:`EDFFile` descriptor with fitted normalizers, event
+            indices, and a precomputed window count, or ``None`` if patient
+            preparation rejects the file.
+
+        Raises:
+            ValueError: If the file cannot produce at least one valid window or
+                appears inconsistent with the configured assumptions.
+        """
         try:
             artifacts = self._prepare_patient_artifacts(edf_path)
             if artifacts is None:
                 return None
 
-            n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.target_resolution)
+            n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.stride)
 
             if n_items <= 0:
                 raise ValueError(
@@ -576,6 +745,22 @@ class BaseDataset(Dataset, ABC):
             return None #EDFFile(path=edf_path, classes=classes.union(extra_classes))
 
     def get_patient_stats(self, patients: Sequence[str | os.PathLike], summarize_patient: Callable, num_workers: int = 4) -> pd.DataFrame:
+        """Compute per-patient summary rows before dataset initialization.
+
+        Args:
+            patients: Patient EDF paths to inspect.
+            summarize_patient: Callback receiving ``patient``, ``data_df``,
+                ``label_df``, and ``label_extra_df``. It should return a row
+                dictionary or ``None``.
+            num_workers: Worker count used for parallel summarization.
+
+        Returns:
+            A DataFrame built from the rows returned by ``summarize_patient``.
+
+        Notes:
+            This helper is intended for cohort-level filtering before
+            :meth:`initialize`.
+        """
         worker_count = num_workers
         rows: list[dict] = []
         patient_list = list(patients)
@@ -613,8 +798,6 @@ class BaseDataset(Dataset, ABC):
                 data_df=artifacts["data_df"],
                 label_df=artifacts["label_df"],
                 label_extra_df=artifacts["label_extra_df"],
-                start=artifacts["start"],
-                end=artifacts["end"],
             )
             if row is None:
                 return None
@@ -626,9 +809,18 @@ class BaseDataset(Dataset, ABC):
             return None
 
     def initialize(self, patients: Sequence[str | os.PathLike], num_workers: int = 4) -> None:
-        """
-        Initialize dataset by preparing EDF files for all (or some) patients.
-        Supports parallel loading via multiprocessing.Pool with true early stop.
+        """Prepare patient metadata and build the sliding-window index.
+
+        Args:
+            patients: EDF paths to include in the dataset.
+            num_workers: Worker count used while calling
+                :meth:`prepare_patient`.
+
+        Notes:
+            Initialization is intentionally explicit because it can be
+            expensive. Training scripts often call :meth:`get_patient_stats`
+            first to filter patients before paying the full initialization
+            cost.
         """
         self.all_patients = list(patients)
         self.initialized = False
@@ -680,27 +872,40 @@ class BaseDataset(Dataset, ABC):
         self.initialized = True
 
     def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """Finalize one loaded signal window into a training or inference item."""
+        quality_df = None
         if len(self.channel_groups) > 0:
             available_columns = list(x_df.columns)
             selected_columns = []
-            renamed_columns = self.channel_groups.keys()
+            renamed_columns = list(self.channel_groups.keys())
+            selected_quality = {}
 
             # Emit one sampled representative per configured group and rename the
             # result to the conceptual group name so downstream code sees stable columns.
-            for group, group_channels in self.channel_groups.items():
-                available = [col for col in available_columns if col in set(group_channels)]
+            for group, group_cfgs in self.channel_configs_by_group.items():
+                available = [cfg for cfg in group_cfgs if cfg.name in set(available_columns)]
                 if len(available) == 0:
                     raise ValueError(f"No available channels found for group '{group}'.")
 
-                selected_columns.append(str(np.random.choice(available)))
+                selected_cfg = available[int(np.random.choice(len(available)))]
+                selected_columns.append(selected_cfg.name)
+                if selected_cfg.quality_name is not None:
+                    if selected_cfg.quality_name not in x_df.columns:
+                        raise ValueError(
+                            f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
+                        )
+                    selected_quality[group] = x_df[selected_cfg.quality_name].copy()
 
             x_selected = x_df.loc[:, selected_columns].copy()
             x_selected.columns = renamed_columns
             x_df = x_selected
+            if len(selected_quality) > 0:
+                quality_df = pd.DataFrame(selected_quality, index=x_df.index)
 
         if self.prepare_sample_callback is not None:
             return self.prepare_sample_callback(
                 data=x_df,
+                quality_data=quality_df,
                 target=item.get("target"),
                 target_extra=item.get("target_extra"),
                 patient=item.get("patient"),
@@ -708,9 +913,24 @@ class BaseDataset(Dataset, ABC):
                 **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
             )
         else:
-            return {"data": torch.from_numpy(x_df.values).float()}
+            item["data"] = torch.from_numpy(x_df.values).float()
+            return item
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
+        """Build one candidate item from a prepared patient and start time.
+
+        Args:
+            file: Prepared patient descriptor.
+            start_date: Signal-window start timestamp.
+
+        Returns:
+            A sample dictionary or ``None`` when ``prepare_target`` or
+            ``prepare_sample`` rejects the candidate.
+
+        Notes:
+            Label filtering happens before signal loading when possible, as
+            confirmed by ``tests/test_datasets.py``.
+        """
         end_date = start_date + self.total_input
         t_center = start_date + (self.total_input // 2 - self.target_resolution // 2)
         item: Dict[str, Any] = {"patient": file.path, "time": t_center}
@@ -768,6 +988,18 @@ class BaseDataset(Dataset, ABC):
         return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Return one sample, retrying alternate windows when necessary.
+
+        Args:
+            idx: Global window index into the prepared patient list.
+
+        Returns:
+            A sample dictionary produced by :meth:`get_item`.
+
+        Raises:
+            ValueError: If the dataset was not initialized or if repeated
+                rejection exceeds ``online_max_tries``.
+        """
         if not self.initialized:
             raise ValueError(f"{self.__class__.__name__} is not initialized. Call initialize(...) before using __getitem__.")
         cnt = 0
@@ -778,7 +1010,7 @@ class BaseDataset(Dataset, ABC):
             file = self.edf_files[pidx]
 
             new_idx = idx - self.lower_bounds[pidx] 
-            cur_date = file.start_date + self.target_resolution * new_idx 
+            cur_date = file.start_date + self.stride * new_idx 
             
             try:
                 item = self.get_item(file, cur_date)
@@ -789,7 +1021,7 @@ class BaseDataset(Dataset, ABC):
                     break
                 
                 cnt += 1
-                idx = np.random.choice(range(len(self)))
+                idx = int(np.random.randint(self.lower_bounds[pidx], self.upper_bounds[pidx]))
         
         if self.online_max_tries == 0 or cnt <= self.online_max_tries:
             return item

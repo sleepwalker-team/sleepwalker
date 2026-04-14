@@ -9,6 +9,7 @@ from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.utils import logger
 
 class ConvBlock(nn.Module):
+    """Two-layer convolutional block used in the U-shaped encoder/decoder."""
     def __init__(self, in_channels, out_channels, kernel_size, activation, dilation, padding):
         super().__init__()
 
@@ -63,6 +64,21 @@ class USleep(BaseModel):
         output_strategy='mean', 
         activation="relu",
         ):
+        """Construct the current USleep variant used in this repository.
+
+        Args:
+            ts_len: Input sequence length in samples.
+            n_channels: Number of input channels.
+            classes: Optional output class names.
+            sampling_frequency: Sampling frequency in Hz.
+            depth: Encoder/decoder depth. Current code caps this at 4.
+            init_filters: Initial number of convolutional filters.
+            kernel_size: Convolution kernel size.
+            dilation: Convolution dilation.
+            epoch_len: Epoch duration used for temporal segmentation.
+            output_strategy: Temporal reduction mode.
+            activation: Activation function name.
+        """
         super().__init__(preprocessors=[RobustScaler()])
 
         self.classes = list(classes) if classes is not None else None
@@ -127,6 +143,7 @@ class USleep(BaseModel):
             self.fc = None
 
     def _features(self, x: torch.Tensor) -> torch.Tensor: 
+        """Compute USleep features from one input batch."""
         B, T, D = x.shape
         if T % self.samples_per_epoch != 0:
             raise ValueError(f"Input time axis T={T} is not divisible by samples_per_epoch={self.samples_per_epoch}. Ensure input length matches the expected epoch segmentation.")
@@ -175,9 +192,11 @@ class USleep(BaseModel):
         return x
 
     def feature_dim(self) -> int:
+        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Map features to class logits or sequence outputs."""
         if self.classes is None:
             raise ValueError("USleep.classifier() requires classes to be set.")
         if self.output_strategy == "flatten":

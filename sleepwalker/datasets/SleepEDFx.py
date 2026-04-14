@@ -1,3 +1,11 @@
+"""Sleep-EDF dataset adapter and downloader helpers.
+
+The module wraps the Sleep-EDF PSG and hypnogram layout used by the
+repository's sleep-staging workflow. Besides the adapter itself, it contains
+download helpers and published checksum tables for the original PhysioNet
+files.
+"""
+
 import argparse
 import hashlib
 import os
@@ -414,6 +422,7 @@ ST_FILES = {
 }
 
 def validate_sha256(local_path, sha256):
+    """Return whether a local file matches its expected SHA256 checksum."""
     file_hash = hashlib.sha256()
     with open(local_path, "rb") as in_f:
         for chunk in iter(lambda: in_f.read(512 * file_hash.block_size), b''):
@@ -421,6 +430,7 @@ def validate_sha256(local_path, sha256):
     return file_hash.hexdigest() == sha256
 
 def download_and_validate(download_url, sha256, out_path, prefix=""):
+    """Download a file and verify its SHA256 checksum."""
     if os.path.exists(out_path):
         if validate_sha256(out_path, sha256):
             logger.info("... skipping (already downloaded with valid sha256)")
@@ -449,6 +459,7 @@ def download_and_validate(download_url, sha256, out_path, prefix=""):
         raise ValueError(f"Invalid sha256 for file at {download_url} (please restart download)")
 
 def download_dataset(out_folder, server_url, file_names):
+    """Download a named Sleep-EDF split into a local folder."""
     if not os.path.exists(out_folder):
         os.mkdir(out_folder) 
 
@@ -458,7 +469,13 @@ def download_dataset(out_folder, server_url, file_names):
         download_and_validate(download_url, sha256, out_file_path, prefix=f"[{i+1}/{len(file_names)}] ")
 
 class SleepEDFx(BaseDataset):
-    """Dataset Summary
+    """Read Sleep-EDF PSG recordings and hypnogram annotations.
+
+    This adapter pairs each ``*-PSG.edf`` file with its matching
+    ``*-Hypnogram.edf`` annotation file and converts the annotation durations
+    into the repository's ``Label``/``Starttime``/``Endtime`` table format.
+
+    Dataset Summary
         Summary of core statistics for this dataset.
 
         n_patients: 190 
@@ -496,6 +513,19 @@ class SleepEDFx(BaseDataset):
         super().__init__(**kwargs)
 
     def get_event_df(self, fpath, start_date):
+        """Load the hypnogram annotations corresponding to one PSG file.
+
+        Args:
+            fpath: Path to a PSG EDF file.
+            start_date: Recording start timestamp from the EDF header.
+
+        Returns:
+            A dataframe with label intervals derived from the hypnogram EDF.
+
+        Raises:
+            ValueError: If the matching subject identifier or hypnogram file
+                cannot be resolved unambiguously.
+        """
         pattern = r"SC4(\d{3}[EGF])"
         match = re.search(pattern, fpath)
         if match:

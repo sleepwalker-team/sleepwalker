@@ -1,15 +1,15 @@
-"""This is a re-implementation of the UTime Network. 
-The original implementation is available in Tensorflow under [1]. 
-This is an _attempted_ and _unstable_ port to PyTorch based on [2]. 
-There are significant changes to [1] and [2] at the moment:
-- MaxPooling is reduced
-- segment_classifier and final_fc work different form the original (I assume, I did not understand the original)
-- padding works different form the original and kernel sizes are variable
-- we introduced ChannelWiseNormalization
-- the network architecture can be configured through multiple parameters and this implementation reflects a model family at this point
+"""U-Time style architectures used by the repository's event-detection scripts.
 
-[1] https://github.com/perslev/U-Time
-[2] https://github.com/wangjinzhuo/wearables/tree/master/utime
+This module contains an explicitly non-final PyTorch port of U-Time-inspired
+models. The implementation is used by several current ``train_*.py`` scripts
+for tasks such as arousal, desaturation, limb-movement, and body-position
+prediction. The file also defines local normalization and convolution blocks
+used only by this architecture family.
+
+Notes:
+    The original source already notes that this is an approximate port with
+    several deviations from the cited implementations. The docstrings below
+    therefore describe repository behavior, not paper equivalence.
 """
 
 import random
@@ -24,6 +24,8 @@ from sleepwalker.utils import logger
 from sleepwalker.models.Basemodel import BaseModel
 
 class ChannelWiseNormalization(nn.Module):
+    """Normalize each channel independently across the time axis."""
+
     def __init__(self, num_channels, eps=1e-5):
         super(ChannelWiseNormalization, self).__init__()
         self.eps = eps
@@ -39,6 +41,8 @@ class ChannelWiseNormalization(nn.Module):
         return x_scaled
 
 class Conv1dLayerNorm(nn.Module):
+    """Apply ``LayerNorm`` to a ``Conv1d`` tensor by permuting dimensions."""
+
     def __init__(self, num_channels):
         super(Conv1dLayerNorm, self).__init__()
         self.layer_norm = nn.LayerNorm(num_channels)
@@ -52,6 +56,8 @@ class Conv1dLayerNorm(nn.Module):
         return x
 
 class DepthwiseSeparableConv1d(nn.Module):
+    """Implement a depthwise-separable 1D convolution."""
+
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
         super().__init__()
 
@@ -81,6 +87,8 @@ class DepthwiseSeparableConv1d(nn.Module):
         return x
 
 class ConvBlock(nn.Module):
+    """Stack two 1D convolutions with optional normalization and dropout."""
+
     def __init__(self, in_channels, out_channels, activation, norm, dropout_p, kernel_size, conv):
         super(ConvBlock, self).__init__()
         if activation == "relu":
@@ -133,6 +141,8 @@ class ConvBlock(nn.Module):
         return x
 
 class Encoder(nn.Module):
+    """Encode a sequence while storing skip connections for the decoder."""
+
     def __init__(self, in_channels, n_channels, maxpool, activation, norm, dropout_p, kernel_size, conv):
         super(Encoder, self).__init__()
         layers = []
@@ -158,6 +168,8 @@ class Encoder(nn.Module):
         return x, connections
 
 class Decoder(nn.Module):
+    """Decode bottleneck features back to the input resolution."""
+
     def __init__(self, n_channels, upsample, activation, norm, dropout_p, kernel_size, conv):
         super(Decoder, self).__init__()
         self.upsample = nn.ModuleList()
@@ -191,6 +203,32 @@ class Decoder(nn.Module):
         return x
 
 class UTime(BaseModel):
+    """Build a configurable U-Time style model.
+
+    This implementation supports both pooled classification and per-epoch
+    sequence output depending on whether ``epoch_len`` is configured. Current
+    training scripts use it as a flexible architecture family rather than as a
+    strict reproduction of a single published configuration.
+
+    Args:
+        ts_len: Expected input length in samples.
+        n_channels: Number of input channels in each window.
+        sampling_frequency: Sampling interval or frequency value accepted by
+            ``pandas.to_timedelta`` in current callers.
+        classes: Optional class labels. When omitted, the model exposes
+            features only.
+        activation: Activation used inside convolution blocks.
+        norm: Normalization mode for convolution blocks.
+        channel: Base channel count or explicit per-layer channel sizes.
+        n_layers: Number of encoder/decoder levels when ``channel`` is not
+            passed as a list.
+        maxpool: Pooling factor per level or a scalar repeated across levels.
+        dropout_p: Dropout probability for convolution blocks.
+        kernel: Kernel size per level or a scalar repeated across levels.
+        mlp_size: Output feature size for pooled classification mode.
+        conv: Convolution implementation variant.
+        epoch_len: Optional epoch size for sequence-style outputs.
+    """
     def __init__(self, 
         ts_len, 
         n_channels, 
@@ -262,6 +300,18 @@ class UTime(BaseModel):
                 raise ValueError("UTime requires ts_len aligned with samples_per_epoch to expose feature_dim().")
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute pooled or sequence-aligned features from raw windows.
+
+        Args:
+            x: Input tensor shaped ``[batch, time, channels]``.
+
+        Returns:
+            A pooled feature tensor for classification mode or a flattened
+            sequence representation when ``epoch_len`` is configured.
+
+        Raises:
+            ValueError: If the time axis cannot be segmented into epochs.
+        """
         B, T, D = x.shape
         if self.samples_per_epoch is not None:
             if T % self.samples_per_epoch != 0:
@@ -288,9 +338,24 @@ class UTime(BaseModel):
         return x
 
     def feature_dim(self) -> int:
+        """Return the feature size exposed by :meth:`_features`."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Project features into class logits.
+
+        Args:
+            x: Feature tensor returned by :meth:`_features`.
+
+        Returns:
+            Class logits shaped either ``[batch, classes]`` or
+            ``[batch, steps, classes]`` depending on the configured output
+            mode.
+
+        Raises:
+            ValueError: If the model was created without classes or if flattened
+                sequence features do not align with the class dimension.
+        """
         if self.classes is None:
             raise ValueError("UTime.classifier() requires classes to be set.")
         if self.samples_per_epoch is not None:

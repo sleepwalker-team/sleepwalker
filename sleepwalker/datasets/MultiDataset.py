@@ -1,3 +1,9 @@
+"""Dataset wrapper that concatenates several initialized datasets.
+
+`MultiDataset` is used when training should sample from several prepared
+datasets while preserving dataset identity in each returned item.
+"""
+
 from __future__ import annotations
 
 import bisect
@@ -7,6 +13,16 @@ from torch.utils.data import Dataset
 from sleepwalker.datasets.Basedataset import BaseDataset
 
 class MultiDataset(Dataset):
+    """Concatenate several initialized datasets into one dataset-like object.
+
+    Args:
+        datasets: Initialized datasets with matching timing and class
+            definitions.
+
+    Notes:
+        Current code enforces matching `sample_frequency`, `target_resolution`,
+        `total_input`, `stride`, and class sets across all parts.
+    """
     def __init__(self, 
             datasets: list[BaseDataset]
         ): 
@@ -29,6 +45,10 @@ class MultiDataset(Dataset):
         total_input = [d.total_input for d in datasets]
         if len(set(total_input)) > 1:
             raise ValueError(f"All datasets must have the same total_input")
+
+        strides = [getattr(d, "stride", d.target_resolution) for d in datasets]
+        if len(set(strides)) > 1:
+            raise ValueError(f"All datasets must have the same stride")
         
         classes = [set(d.classes) for d in datasets]
         if not all(set(lst) == set(classes[0]) for lst in classes):
@@ -51,29 +71,36 @@ class MultiDataset(Dataset):
         self.sample_frequency = datasets[0].sample_frequency
         self.target_resolution = datasets[0].target_resolution
         self.total_input = datasets[0].total_input
+        self.stride = getattr(datasets[0], "stride", datasets[0].target_resolution)
         self.channels = datasets[0].channels
 
     def get_n_datasets(self):
+        """Return the number of component datasets."""
         return len(self.datasets)
     
     def get_classes(self):
+        """Return the shared class list."""
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_classes()
 
     def get_timeseries_len(self):
+        """Return the shared timeseries length."""
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_timeseries_len()
 
     def has_extra_target(self):
+        """Return whether every component dataset exposes `target_extra`."""
         return self.extra_target 
 
     def get_n_patients(self):
+        """Return the total number of patients across all component datasets."""
         return sum([d.get_n_patients() for d in self.datasets])
 
     def __len__(self):
         return self.len
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Return one item plus its originating dataset index."""
         d_idx = bisect.bisect_right(self.upper_bound, idx)
         new_idx = idx - self.lower_bound[d_idx]
 

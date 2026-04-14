@@ -10,7 +10,6 @@ import torch
 
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
@@ -289,12 +288,7 @@ def list_split_patients(purpose: str, dry_run: bool) -> list[str]:
     return patients[:2] if dry_run else patients
 
 
-def load_split_dataset(purpose: str, enable_cache: bool, cache_path: str, dry_run: bool):
-    split_cache_path = os.path.join(cache_path, purpose)
-    if enable_cache:
-        logger.info(f"Loading frozen sample cache from {split_cache_path}")
-        return NumpyDataset(split_cache_path, in_memory=False)
-
+def load_split_dataset(purpose: str, dry_run: bool):
     patients = list_split_patients(purpose, dry_run)
     return initialize_dataset(build_dataset(), patients)
 
@@ -343,16 +337,6 @@ def build_model(dataset):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--enable-cache",
-        action="store_true",
-        help="Load numpy-backed dataset caches. Cache creation/refresh is handled outside this script.",
-    )
-    parser.add_argument(
-        "--cache-path",
-        default=os.path.join("cache", "train_multilabel"),
-        help="Optional base directory for the train/test numpy caches. Defaults to ./cache/train_multilabel when --enable-cache is set.",
-    )
     args = parser.parse_args()
 
     if os.path.exists("sleepwalker.log"):
@@ -361,11 +345,11 @@ def main():
     logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
 
     logger.context("Train")
-    train_dataset = load_split_dataset("train", args.enable_cache, args.cache_path, dry_run=False)
+    train_dataset = load_split_dataset("train", dry_run=False)
     logger.uncontext()
 
     logger.context("Test")
-    test_dataset = load_split_dataset("test", args.enable_cache, args.cache_path, dry_run=False)
+    test_dataset = load_split_dataset("test", dry_run=False)
     logger.uncontext()
 
     missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in normalized_task_config.values() for label in cfg["labels"]))

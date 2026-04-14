@@ -14,7 +14,6 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 import torch
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader, RandomSampler
 
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
@@ -23,12 +22,11 @@ from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormali
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
-from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo, random_split
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
-from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
@@ -175,33 +173,9 @@ def list_patients(source_root: str, grouped: bool, dry_run: bool) -> list[str]:
 
 def load_split_dataset(
     patients: list[str],
-    enable_cache: bool,
     grouped: bool,
     impedance_cutoff_ohm: float,
-    n_samples: int | None = None,
-    cache_path: str | None = None,
 ):
-    if enable_cache:
-        if cache_path is None:
-            raise ValueError("cache_path must be provided when enable_cache is set.")
-        dataset = build_dataset(patients, grouped, impedance_cutoff_ohm)
-        sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
-        export_loader = DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            sampler=sampler,
-            num_workers=NUM_WORKERS_DATALOADER,
-            collate_fn=export_batch_collate,
-            drop_last=False,
-            persistent_workers=NUM_WORKERS_DATALOADER > 0,
-        )
-        return load_or_build_numpy_cache(
-            export_loader,
-            cache_path,
-            in_memory=False,
-        )
-
     return build_dataset(patients, grouped, impedance_cutoff_ohm)
 
 
@@ -252,8 +226,6 @@ def build_model_and_trainer(train_dataset):
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate a noisy-window model.")
-    parser.add_argument("--enable-cache", action="store_true", help="Load or build numpy-backed cached splits.")
-    parser.add_argument("--cache-path", default=os.path.join("cache", "train_noisy"), help="Base directory for train/test caches.")
     parser.add_argument("--grouped", action="store_true", help="Randomly sample one available EEG/EOG channel into a grouped EEG input.")
     parser.add_argument(
         "--impedance-cutoff-ohm",
@@ -265,9 +237,6 @@ def main():
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
-    train_cache_path = os.path.join(args.cache_path, "train")
-    val_cache_path = os.path.join(args.cache_path, "val")
-    test_cache_path = os.path.join(args.cache_path, "test")
     train_patients = list_patients(TRAIN_ROOT, args.grouped, args.dry)
     test_patients = list_patients(TEST_ROOT, args.grouped, args.dry)
 
@@ -281,32 +250,23 @@ def main():
         logger.context("TRAIN")
         train_dataset = load_split_dataset(
             train_patients,
-            args.enable_cache,
             args.grouped,
             args.impedance_cutoff_ohm,
-            1_000 if args.dry else N_SAMPLES,
-            train_cache_path,
         )
         logger.uncontext()
         if len(val_patients) > 0:
             logger.context("VAL")
             val_dataset = load_split_dataset(
                 val_patients,
-                args.enable_cache,
                 args.grouped,
                 args.impedance_cutoff_ohm,
-                None,
-                val_cache_path,
             )
             logger.uncontext()
         logger.context("TEST")
         test_dataset = load_split_dataset(
             test_patients,
-            args.enable_cache,
             args.grouped,
             args.impedance_cutoff_ohm,
-            None,
-            test_cache_path,
         )
         logger.uncontext()
 

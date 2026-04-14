@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader, RandomSampler
 from torchinfo import summary
 
 from sleepwalker.deployment import export_prediction_package
-from sleepwalker.datasets.utils import ActivePatientSampler
 from sleepwalker.trainer.utils.disk import append_to_jsonl
 from sleepwalker.trainer.utils.splits import combine_datasets
 from sleepwalker.utils import logger
@@ -43,7 +42,6 @@ class RunCfg:
     export_package_unlabelled_dataset: Any = None
     export_package_model_card_md: str = ""
     export_package_metadata: dict[str, Any] = field(default_factory=dict)
-    train_patients_per_epoch: int | None = None
 
 
 @dataclass
@@ -79,25 +77,8 @@ def build_loader(
     n_samples: int | None,
     collate_fn,
     shuffle_default: bool,
-    train_patients_per_epoch: int | None = None,
 ):
-    # def _set_retry_scope(ds, scope: str):
-    #     if hasattr(ds, "datasets"):
-    #         for child in ds.datasets:
-    #             _set_retry_scope(child, scope)
-    #     elif hasattr(ds, "online_retry_scope"):
-    #         ds.online_retry_scope = scope
-
-    # _set_retry_scope(dataset, "patient" if train_patients_per_epoch is not None else "global")
-
-    if train_patients_per_epoch is not None:
-        sampler = ActivePatientSampler(
-            dataset,
-            n_patients_per_epoch=train_patients_per_epoch,
-            num_samples=n_samples,
-            shuffle=shuffle_default,
-        )
-    elif n_samples is not None and len(dataset) > n_samples:
+    if n_samples is not None and len(dataset) > n_samples:
         sampler = RandomSampler(dataset, num_samples=n_samples)
     else:
         sampler = None
@@ -171,7 +152,6 @@ def run(cfg: RunCfg) -> RunResult:
         n_samples=cfg.n_samples,
         collate_fn=cfg.collate_fn,
         shuffle_default=True,
-        train_patients_per_epoch=cfg.train_patients_per_epoch,
     )
     val_loader = None
     if val_dataset is not None:

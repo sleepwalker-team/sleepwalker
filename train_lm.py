@@ -14,17 +14,14 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 import torch
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader, RandomSampler
 
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
-from sleepwalker.datasets.utils import ActivePatientSampler, export_batch_collate, get_edf_files_in_repo, random_split
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.filtering import trim_wake
-from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger
 
@@ -48,7 +45,6 @@ SLEEP_PERCENTAGE = 0.5
 PATIENT_FILTER_QUANTILE = 0.05
 TARGET_CLASSES = ["lm", "no lm"]
 SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
-TRAIN_PATIENTS_PER_EPOCH: int | None = None
 
 EVENT_MAPPING = {
     "wach": "wake",
@@ -78,15 +74,30 @@ prepare_lm_target = partial(
 def build_channels():
     return [
         ChannelConfig(
-            name="Left Leg",
+            name="X Axis",
             #normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=5.0, highcut=30.0, notch_freq=50.0),
             group=None,
         ),
         ChannelConfig(
-            name="Right Leg",
+            name="Y Axis",
             #normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=5.0, highcut=30.0, notch_freq=50.0),
             group=None,
         ),
+        ChannelConfig(
+            name="Z Axis",
+            #normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=5.0, highcut=30.0, notch_freq=50.0),
+            group=None,
+        ),
+        # ChannelConfig(
+        #     name="Left Leg",
+        #     #normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=5.0, highcut=30.0, notch_freq=50.0),
+        #     group=None,
+        # ),
+        # ChannelConfig(
+        #     name="Right Leg",
+        #     #normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=5.0, highcut=30.0, notch_freq=50.0),
+        #     group=None,
+        # ),
         #ChannelConfig(name="Activity", normalizer=None, group=None),
     ]
 
@@ -168,48 +179,6 @@ def build_dataset(patients: list[str]):
     dataset.initialize(patients, NUM_WORKERS_DATASET)
     return dataset
 
-def load_split_dataset(
-    patients: list[str],
-    enable_cache: bool,
-    n_samples: int | None = None,
-    n_patients_per_epoch: int | None = None,
-    cache_path: str | None = None,
-):
-    if enable_cache:
-        if cache_path is None:
-            raise ValueError("cache_path must be provided when enable_cache is set.")
-        dataset = build_dataset(patients)
-        # dataset.online_retry_scope = "patient" if n_patients_per_epoch is not None else "global"
-        if n_patients_per_epoch is not None:
-            sampler = ActivePatientSampler(
-                dataset,
-                n_patients_per_epoch=n_patients_per_epoch,
-                num_samples=n_samples,
-                shuffle=True,
-            )
-        else:
-            sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
-        export_loader = DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            sampler=sampler,
-            num_workers=NUM_WORKERS_DATALOADER,
-            collate_fn=export_batch_collate,
-            drop_last=False,
-            persistent_workers=NUM_WORKERS_DATALOADER > 0,
-        )
-        return load_or_build_numpy_cache(
-            export_loader,
-            cache_path,
-            in_memory=False,
-        )
-
-    dataset = build_dataset(patients)
-    # dataset.online_retry_scope = "global"
-    return dataset
-
-
 def build_model_and_trainer(train_dataset):
     model = UTime(
         ts_len=train_dataset.get_timeseries_len(),
@@ -240,21 +209,10 @@ def build_model_and_trainer(train_dataset):
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate a LM model.")
-    parser.add_argument("--enable-cache", action="store_true", help="Load or build numpy-backed cached splits.")
-    parser.add_argument("--cache-path", default=os.path.join("cache", "train_lm"), help="Base directory for train/test caches.")
     parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
-    parser.add_argument(
-        "--train-patients-per-epoch",
-        type=int,
-        default=TRAIN_PATIENTS_PER_EPOCH,
-        help="Restrict each live training epoch to this many patients. Cache-backed training ignores this at runtime.",
-    )
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
-    train_cache_path = os.path.join(args.cache_path, "train")
-    val_cache_path = os.path.join(args.cache_path, "val")
-    test_cache_path = os.path.join(args.cache_path, "test")
     train_patients = get_edf_files_in_repo(TRAIN_ROOT, recursive=True)
     test_patients = get_edf_files_in_repo(TEST_ROOT, recursive=True)
     if args.dry:
@@ -272,49 +230,17 @@ def main():
 
     # with suppress_stdout_logging(logger):
     logger.context("TRAIN")
-    train_dataset = load_split_dataset(
-        train_patients,
-        args.enable_cache,
-        N_SAMPLES,
-        args.train_patients_per_epoch,
-        train_cache_path,
-    )
+    train_dataset = build_dataset(train_patients)
     logger.uncontext()
     if len(val_patients) > 0:
         logger.context("VAL")
-        val_dataset = load_split_dataset(
-            val_patients,
-            args.enable_cache,
-            N_SAMPLES,
-            None,
-            val_cache_path,
-        )
+        val_dataset = build_dataset(val_patients)
         logger.uncontext()
     logger.context("TEST")
-    test_dataset = load_split_dataset(
-        test_patients,
-        False, #args.enable_cache,
-        None,
-        None,
-        test_cache_path,
-    )
+    test_dataset = build_dataset(test_patients)
     logger.uncontext()
 
     model, trainer = build_model_and_trainer(train_dataset)
-    train_n_samples = N_SAMPLES
-    train_patients_per_epoch = args.train_patients_per_epoch
-    if isinstance(train_dataset, NumpyDataset):
-        if train_n_samples is not None:
-            logger.warning("Cache-backed training ignores RunCfg.n_samples; the cached export already defines the sampled training set.")
-        if train_patients_per_epoch is not None:
-            logger.warning(
-                "Cache-backed training ignores RunCfg.train_patients_per_epoch; the cached export already defines the patient subset."
-            )
-        if trainer.balance_batches:
-            logger.warning("Disabling balance_batches for cache-backed training.")
-            trainer.balance_batches = False
-        train_n_samples = None
-        train_patients_per_epoch = None
 
     experiment_name = f"{EXPERIMENT_NAME}" 
     if args.dry:
@@ -331,13 +257,12 @@ def main():
             val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
-            n_samples=train_n_samples,
+            n_samples=N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
             test_repeats=[1],
             use_energy_tracker=False,
             tags={"model": "UTime"},
             collate_fn=batch_collate,
-            train_patients_per_epoch=train_patients_per_epoch,
         )
     )
 

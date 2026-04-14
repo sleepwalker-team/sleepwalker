@@ -75,15 +75,6 @@ class MultiDataset(Dataset):
     def get_n_patients(self):
         return sum([d.get_n_patients() for d in self.datasets])
 
-    def get_patient_index_spans(self) -> list[tuple[int, int]]:
-        spans = []
-        dataset_offset = 0
-        for dataset in self.datasets:
-            for lower, upper in dataset.get_patient_index_spans():
-                spans.append((dataset_offset + lower, dataset_offset + upper))
-            dataset_offset += len(dataset)
-        return spans
-
     def __len__(self):
         return self.len
     

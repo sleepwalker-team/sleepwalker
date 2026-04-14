@@ -21,7 +21,6 @@ import torch.multiprocessing as mp
 from sleepwalker.datasets import ChannelConfig
 from sleepwalker.datasets import Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.ABC import ABC
 from sleepwalker.datasets.Apples import Apples
 from sleepwalker.datasets.CAP import CAP
@@ -582,56 +581,43 @@ def load_split_with_logging(
     model_name: str,
     grouped: bool,
     patients: list[str],
-    enable_cache: bool,
-    cache_path: str,
 ):
     with suppress_stdout_logging(logger):
         logger.context(purpose.upper())
         try:
-            if not enable_cache:
-                total_input = None
-                if purpose == "test":
-                    total_input = MODEL_CFG[model_name].get("total_input_model", MODEL_CFG[model_name]["total_input"])
+            total_input = None
+            if purpose == "test":
+                total_input = MODEL_CFG[model_name].get("total_input_model", MODEL_CFG[model_name]["total_input"])
 
-                dataset = get_dataset(
-                    name=dataset_name,
-                    model_name=model_name,
-                    patients=patients,
-                    path_root=DATASET_ROOT,
-                    grouped=grouped,
-                    prepare_patient=prepare_sleep_staging_patient,
-                    prepare_target=partial(prepare_multiclass_target, target_classes=TARGET_CLASSES),
-                    prepare_sample=None,
-                    total_input=total_input,
-                )
-                dataset.initialize(patients, NUM_WORKERS_DATASET)
-                return dataset
-
-            split_cache_path = os.path.join(cache_path, dataset_name, purpose)
-            logger.info(f"Loading frozen sample cache from {split_cache_path}")
-            return NumpyDataset(split_cache_path, in_memory=False)
+            dataset = get_dataset(
+                name=dataset_name,
+                model_name=model_name,
+                patients=patients,
+                path_root=DATASET_ROOT,
+                grouped=grouped,
+                prepare_patient=prepare_sleep_staging_patient,
+                prepare_target=partial(prepare_multiclass_target, target_classes=TARGET_CLASSES),
+                prepare_sample=None,
+                total_input=total_input,
+            )
+            dataset.initialize(patients, NUM_WORKERS_DATASET)
+            return dataset
         finally:
             logger.uncontext()
 
 
 def build_splits_for_dataset(dataset_name: str, args):
-    if args.enable_cache:
-        train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, [], True, args.cache_path)
-        val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, [], True, args.cache_path)
-        test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, [], True, args.cache_path)
-        return train_ds, val_ds, test_ds
-
     patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
     if args.test is not None:
         train_patients, val_patients = random_split(patients, test_frac=VAL_FRAC)
-        train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients, False, args.cache_path)
-        val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients, False, args.cache_path)
+        train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients)
+        val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients)
         return train_ds, val_ds, None
 
     train_patients, val_patients, test_patients = split_patients_train_val_test(patients, TEST_FRAC, VAL_FRAC)
-    train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients, False, args.cache_path)
-    val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients, False, args.cache_path)
-    test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, test_patients, False, args.cache_path)
+    train_ds = load_split_with_logging(dataset_name, "train", args.model, args.grouped, train_patients)
+    val_ds = load_split_with_logging(dataset_name, "val", args.model, args.grouped, val_patients)
+    test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, test_patients)
     return train_ds, val_ds, test_ds
 
 
@@ -640,16 +626,6 @@ def main():
     parser.add_argument("--model", required=False, default="sleeptransformer", type=str)
     parser.add_argument("--train", required=False, nargs="+", default=["sleepedfx"], type=str)
     parser.add_argument("--test", required=False, nargs="*", default=None, type=str)
-    parser.add_argument(
-        "--enable-cache",
-        action="store_true",
-        help="Load numpy-backed cached splits. Cache creation/refresh is handled outside this script.",
-    )
-    parser.add_argument(
-        "--cache-path",
-        default=os.path.join("cache", "train_sleep"),
-        help="Base directory for split caches when --enable-cache is set.",
-    )
     parser.add_argument("--grouped", action="store_true")
     parser.add_argument("--gradrev", action="store_true")
     parser.add_argument("--dry", action="store_true")
@@ -666,11 +642,8 @@ def main():
             val_parts.append(val_ds)
 
         for dataset_name in args.test:
-            if args.enable_cache:
-                test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, [], True, args.cache_path)
-            else:
-                patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
-                test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, patients, False, args.cache_path)
+            patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
+            test_ds = load_split_with_logging(dataset_name, "test", args.model, args.grouped, patients)
             test_parts.append((dataset_name, test_ds))
     else:
         for dataset_name in args.train:

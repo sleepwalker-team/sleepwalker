@@ -1,3 +1,11 @@
+"""Concrete trainer for multi-task, multi-resolution classification.
+
+The repository uses this trainer for experiments where one input window
+produces several task-specific categorical predictions, potentially at
+different temporal resolutions. The canonical example in the current tree is
+``train_multilabel.py`` together with ``MetaModel``.
+"""
+
 from functools import partial
 import random
 from collections import OrderedDict
@@ -18,17 +26,35 @@ from sleepwalker.utils import logger
 
 class MultiLabelTrainer(BaseTrainer):
     """
-    Multi-task classification with one softmax head per task and optional
-    multiple resolution steps per task inside the dataset target window.
+    Train a ``MetaModel`` with one categorical head per configured task.
 
-    task_config structure:
-        {
-            "sleep staging": {"labels": ["wake", "n1", "n2", "n3", "rem"], "default": None, "percentage": 0.5, "target_resolution": "30s"},
-            "breathing": {"labels": ["apnea", "hypopnea", "regular breathing"], "default": "regular breathing", "percentage": 0.5, "target_resolution": "10s"},
-        }
+    Each task contributes its own label set and target resolution. Smaller
+    target resolutions are expanded into multiple steps inside the largest
+    dataset target window.
 
-    `default` is mandatory and may be None.
-    `percentage` is optional and defaults to 0.5.
+    Args:
+        epochs: Number of training epochs.
+        optimizer: Factory that builds an optimizer for the model.
+        task_config: Normalized task specification mapping task names to label
+            sets, target resolutions, and loss settings.
+        condition_task: Optional task whose labels gate the loss for other
+            tasks.
+        condition_labels: Labels within ``condition_task`` that activate the
+            conditioned tasks.
+        conditioned_tasks: Tasks whose losses should be masked by
+            ``condition_task``.
+        device: Torch device used for training and inference.
+        warmup_device: Device used during preprocessor warmup.
+        save_every: Checkpoint cadence in epochs.
+        lr_scheduler: Optional scheduler factory.
+        early_stopping: Optional validation patience.
+        log_batches: Whether to emit batch-level metric logs.
+        n_repeat_train: Number of repeated views per training sample.
+        n_repeat_test: Number of repeated views per evaluation sample.
+
+    Notes:
+        ``task_config`` must already be normalized before construction. The
+        repository typically does this with :meth:`normalize_task_config`.
     """
 
     def __init__(
@@ -123,6 +149,7 @@ class MultiLabelTrainer(BaseTrainer):
             self.task_loss_weights[task] = float(cfg["task_weight"])
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
+        """Estimate per-task class counts and configure weighted losses."""
         needs_counts = any((cfg.get("loss_mode", "none") or "none") != "none" for cfg in self.task_config.values())
         if not needs_counts:
             return
@@ -164,6 +191,7 @@ class MultiLabelTrainer(BaseTrainer):
                 self.task_loss_functions[task] = loss_function
 
     def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
+        """Convert multitask logits into the repository's wide prediction table."""
         rows = []
         batch_size = len(batch.get("time", []))
         largest_resolution = pd.to_timedelta(self.largest_task_resolution)
@@ -192,6 +220,19 @@ class MultiLabelTrainer(BaseTrainer):
 
     @staticmethod
     def normalize_task_config(task_config: dict[str, dict]):
+        """Validate and normalize a raw multitask configuration.
+
+        Args:
+            task_config: User-provided task configuration keyed by task name.
+
+        Returns:
+            An ``OrderedDict`` whose values include normalized pandas
+            timedeltas, inferred ``n_steps``, and defaulted loss settings.
+
+        Raises:
+            ValueError: If labels are duplicated across tasks, defaults are
+                invalid, or task resolutions are incompatible.
+        """
         normalized = OrderedDict()
         used_classes = set()
         for task, cfg in task_config.items():
@@ -243,6 +284,19 @@ class MultiLabelTrainer(BaseTrainer):
 
     @staticmethod
     def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], raise_error=True):
+        """Convert label indicator timelines into integer task targets.
+
+        Args:
+            targets: Time-indexed indicator DataFrame for one dataset target
+                window.
+            task_config: Normalized task configuration.
+            raise_error: Whether ambiguous or invalid windows should raise
+                ``ValueError`` instead of returning ``None``.
+
+        Returns:
+            A tensor shaped ``[n_tasks, max_task_steps]`` containing per-step
+            class indices, with ``-1`` reserved for unresolved steps.
+        """
         task_specs = list(task_config.values())
         max_task_steps = max(cfg["n_steps"] for cfg in task_specs)
         out = torch.full((len(task_config), max_task_steps), -1, dtype=torch.long)
@@ -288,6 +342,23 @@ class MultiLabelTrainer(BaseTrainer):
         class_cnts: Optional[dict[str, dict[str, float]]] = None,
         task_config: Optional[dict[str, dict]] = None,
     ):
+        """Prepare one dataset target payload for multitask training.
+
+        Args:
+            target: Primary target indicator DataFrame.
+            target_extra: Optional secondary target indicator DataFrame.
+            patient: Patient identifier, currently passed through for callback
+                compatibility.
+            time: Window timestamp, currently passed through for callback
+                compatibility.
+            class_cnts: Optional per-task class counts used for rejection-based
+                balancing.
+            task_config: Normalized task configuration.
+
+        Returns:
+            A dictionary containing ``target`` and optionally ``target_extra``,
+            or ``None`` when the window should be rejected.
+        """
         if task_config is None:
             raise ValueError("task_config must not be None.")
 
@@ -362,6 +433,22 @@ class MultiLabelTrainer(BaseTrainer):
             logger.info(render_confusion_table_grid(blocks, header=f"{mode.upper()} confusion matrices"))
 
     def run_epoch(self, loader, opt, model, prefix=""):
+        """Run one train, validation, or test epoch for a ``MetaModel``.
+
+        Args:
+            loader: Dataloader producing ``data`` and integer multitask targets.
+            opt: Optimizer for training epochs, or ``None`` during evaluation.
+            model: Expected to be an instance of ``MetaModel``.
+            prefix: Progress-label prefix used to infer the logging mode.
+
+        Returns:
+            A tuple ``(epoch_loss, task_confusion_matrices)`` where the second
+            element is a mapping from task name to NumPy confusion matrix.
+
+        Raises:
+            ValueError: If the model type, dataset resolution, logits, or
+                targets do not match the configured task layout.
+        """
         if not isinstance(model, MetaModel):
             raise ValueError("MultiLabelTrainer requires a MetaModel.")
         dataset_resolution = getattr(loader.dataset, "target_resolution", None)

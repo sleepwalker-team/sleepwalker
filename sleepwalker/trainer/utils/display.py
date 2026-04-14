@@ -1,3 +1,5 @@
+"""Formatting helpers for confusion-matrix logging."""
+
 import numpy as np
 import pandas as pd
 
@@ -5,6 +7,16 @@ from .metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_
 
 
 def format_confusion_table(labels, confusion_matrix, title: str | None = None) -> list[str]:
+    """Render one confusion matrix and summary metrics as aligned text lines.
+
+    Args:
+        labels: Class labels shown on rows and columns.
+        confusion_matrix: Square confusion matrix.
+        title: Optional block title.
+
+    Returns:
+        A list of equal-width strings suitable for side-by-side rendering.
+    """
     short_labels = [str(label)[:5] for label in labels]
     df = pd.DataFrame(confusion_matrix, index=short_labels, columns=short_labels)
     table_lines = df.to_string().splitlines()
@@ -31,6 +43,7 @@ def format_confusion_table(labels, confusion_matrix, title: str | None = None) -
 
 
 def render_confusion_table_grid(blocks, header: str, n_cols: int = 3) -> str:
+    """Lay out several formatted confusion tables in a text grid."""
     if len(blocks) == 0:
         return ""
 

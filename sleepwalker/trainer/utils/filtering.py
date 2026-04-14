@@ -1,3 +1,10 @@
+"""Patient- and label-window filtering helpers for training scripts.
+
+These helpers are small but widely reused. Current call sites show two main
+uses: trimming leading/trailing wake from event sequences and dropping patient
+outliers based on total sleep time before dataset initialization.
+"""
+
 from __future__ import annotations
 
 from functools import partial
@@ -15,6 +22,20 @@ def trim_wake(
     label_extra_df: Optional[pd.DataFrame],
     wake_label: str = "wake",
 ) -> Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]:
+    """Trim leading and trailing wake intervals from label tables.
+
+    Args:
+        data_df: Currently unused by this helper; kept for compatibility with
+            patient-preparation callbacks.
+        label_df: Primary event table.
+        label_extra_df: Optional secondary event table that should be clipped to
+            the retained interval.
+        wake_label: Label treated as wake.
+
+    Returns:
+        A tuple `(trimmed_label_df, trimmed_label_extra_df)` or `None` when the
+        patient contains no non-wake interval.
+    """
     if label_df is None or len(label_df) == 0:
         return None
 
@@ -52,6 +73,7 @@ def summarize_patient_sleep_time(
     sleep_labels: Sequence[str],
     **_kwargs,
 ) -> dict[str, float | str] | None:
+    """Summarize one patient by total duration of selected sleep labels."""
     if label_df is None or len(label_df) == 0:
         return None
 
@@ -69,6 +91,20 @@ def filter_patients_by_sleep_time(
     num_workers: int,
     label: str,
 ) -> list[str]:
+    """Drop low- and high-sleep outliers using quantile thresholds.
+
+    Args:
+        patients: Patient identifiers or EDF paths.
+        dataset: Dataset-like object exposing `get_patient_stats(...)`.
+        sleep_labels: Labels counted as sleep.
+        quantile: Lower and upper quantile dropped symmetrically.
+        num_workers: Worker count forwarded to `get_patient_stats(...)`.
+        label: Human-readable label used in logging.
+
+    Returns:
+        The filtered patient list. Tests in `tests/test_run_utils.py` confirm
+        the current symmetric outlier-dropping behavior.
+    """
     if len(patients) < 3:
         return patients
 

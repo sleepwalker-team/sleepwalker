@@ -1,3 +1,10 @@
+"""ISRUC dataset adapter and download helpers.
+
+The repository uses this module to ingest ISRUC EDF recordings together with
+annotator-specific Excel label files. It also contains an internal downloader
+for the published RAR archives.
+"""
+
 from __future__ import annotations
 import argparse
 import os
@@ -138,6 +145,7 @@ files = [
 ISRUC_URL = "http://dataset.isr.uc.pt/ISRUC_Sleep"
 
 def download_and_extract(download_url, out_path, prefix=""):
+    """Download one ISRUC archive and extract its contents next to the archive."""
     response = requests.get(download_url, allow_redirects=True, stream=True)
 
     total_size = int(response.headers.get("content-length", 0))
@@ -168,6 +176,7 @@ def download_and_extract(download_url, out_path, prefix=""):
                     shutil.move(file_path, new_file_path)
 
 def download_dataset(out_folder, server_url, file_names):
+    """Download the configured ISRUC archives into a local folder."""
     os.makedirs(out_folder, exist_ok=True)
 
     for i, file_name in enumerate(file_names):
@@ -188,6 +197,18 @@ def download_dataset(out_folder, server_url, file_names):
         download_and_extract(download_url, out_file_path, prefix=f"[{i+1}/{len(file_names)}] ")
 
 def load_dataframe(fpath: str, event_mapping, annotator = "s1", start_date: pd.Timestamp = None):
+    """Load one annotator spreadsheet into the repository event-table format.
+
+    Args:
+        fpath: EDF path whose sidecar spreadsheet should be read.
+        event_mapping: Unused by the current implementation, but retained for
+            compatibility with adapter call sites.
+        annotator: Annotator suffix used in ISRUC sidecar filenames.
+        start_date: Recording start timestamp used to construct absolute times.
+
+    Returns:
+        A dataframe containing ``Label``, ``Starttime``, and ``Endtime``.
+    """
     try:
         name = os.path.basename(fpath).split(".edf")[0]
         dfs = []
@@ -302,7 +323,14 @@ class ISRUC(BaseDataset):
             merge = True, 
             **kwargs
         ): 
-        
+        """Configure the ISRUC adapter.
+
+        Args:
+            annotator: Annotator ids to read from sidecar spreadsheets.
+            merge: Whether to intersect annotations when more than one
+                annotator is configured.
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         if not isinstance(annotator, list):
             annotator = [annotator]
         
@@ -315,15 +343,22 @@ class ISRUC(BaseDataset):
         super().__init__(**kwargs)
 
     def has_extra_target(self):
+        """Return whether a second annotator is exposed as ``target_extra``."""
         return len(self.annotator) > 1 and not self.merge
 
     def get_extra_event_df(self, fpath: str, start_date: pd.Timestamp) -> pd.DataFrame:
+        """Load the secondary annotator table when ``merge`` is disabled."""
         if len(self.annotator) <= 1 or self.merge:
             raise ValueError(f"This function should not have been called.")
         else:
             return load_dataframe(fpath, self.event_mapping, self.annotator[1], start_date)
 
     def get_event_df(self, fpath, start_date):
+        """Load the primary ISRUC annotation table for one EDF recording.
+
+        When multiple annotators are configured and ``merge`` is enabled, the
+        adapter keeps only intervals that match across both annotators.
+        """
         if len(self.annotator) > 1 and self.merge:
             df0 = load_dataframe(fpath, self.event_mapping, self.annotator[0], start_date)
             df1 = load_dataframe(fpath, self.event_mapping, self.annotator[1], start_date)

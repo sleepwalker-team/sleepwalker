@@ -1,3 +1,11 @@
+"""Shared experiment runner used by task-specific training scripts.
+
+The training scripts in the repository prepare datasets, models, trainers, and
+experiment metadata, then hand the assembled configuration to ``run(...)``.
+This module centralizes loader construction, training invocation, optional
+prediction-package export, and jsonl logging of test results.
+"""
+
 from __future__ import annotations
 
 import os
@@ -17,11 +25,34 @@ from sleepwalker.utils import logger
 @dataclass
 class RunCfg:
     """
-    Fully prepared run configuration consumed by `run(...)`.
+    Describe one fully prepared experiment invocation.
 
-    The training script is expected to prepare the semantic parts of the run:
-    dataset splits, model, trainer, experiment naming, and any task-specific
-    behavior. `run(...)` only executes the shared training mechanics.
+    The caller is responsible for assembling dataset splits, model, trainer,
+    experiment naming, and task-specific behavior. :func:`run` only executes
+    the shared mechanics.
+
+    Attributes:
+        experiment_name: Name used for logging and jsonl artifacts.
+        model_name: Human-readable model identifier stored in test records.
+        model: Model instance to fit and evaluate.
+        trainer: Trainer instance implementing ``fit(...)`` and ``test(...)``.
+        train_datasets: Training dataset parts that will be combined.
+        val_datasets: Validation dataset parts that will be combined.
+        test_datasets: Named test dataset pairs evaluated after training.
+        batch_size: Batch size for train, validation, and test loaders.
+        n_samples: Optional cap for random training/validation sampling.
+        num_workers_dataloader: Worker count for all loaders built here.
+        test_repeats: Repeat counts passed into trainer-side test evaluation.
+        use_energy_tracker: Whether to enable the optional Lamarr energy
+            tracker.
+        tags: Logging tags forwarded to the repository logger.
+        collate_fn: Required collate function used for all loaders.
+        export_package_path: Optional ``.swmodel`` export path.
+        export_package_unlabelled_dataset: Optional explicit dataset template to
+            export for inference.
+        export_package_model_card_md: Markdown stored in the exported package.
+        export_package_metadata: Extra metadata merged into the exported
+            package manifest.
     """
 
     experiment_name: str
@@ -47,20 +78,14 @@ class RunCfg:
 @dataclass
 class RunResult:
     """
-    Result object returned by `run(...)`.
+    Hold the main artifacts returned by :func:`run`.
 
-    Fields
-    ------
-    experiment_name:
-        Name of the run used for logging and jsonl artifacts.
-    model:
-        Model instance after training and optional checkpoint reload.
-    trainer:
-        Trainer instance used for fit/test.
-    train_result:
-        Raw dictionary returned by `trainer.fit(...)`.
-    test_records:
-        Records written to the experiment jsonl file during test evaluation.
+    Attributes:
+        experiment_name: Run name used during logging.
+        model: Model instance after training and optional checkpoint reload.
+        trainer: Trainer used for fitting and evaluation.
+        train_result: Raw dictionary returned by ``trainer.fit(...)``.
+        test_records: Jsonl-style test records generated during evaluation.
     """
 
     experiment_name: str
@@ -78,6 +103,20 @@ def build_loader(
     collate_fn,
     shuffle_default: bool,
 ):
+    """Construct a dataloader with optional random subsampling.
+
+    Args:
+        dataset: Dataset object for the loader.
+        batch_size: Batch size passed to ``DataLoader``.
+        num_workers: Dataloader worker count.
+        n_samples: Optional random sample budget. When set and smaller than the
+            dataset length, a ``RandomSampler`` is used.
+        collate_fn: Collate function for batched items.
+        shuffle_default: Whether to shuffle when no explicit sampler is used.
+
+    Returns:
+        A configured ``DataLoader``.
+    """
     if n_samples is not None and len(dataset) > n_samples:
         sampler = RandomSampler(dataset, num_samples=n_samples)
     else:
@@ -118,6 +157,19 @@ def _infer_summary_input_size(train_dataset):
 
 
 def run(cfg: RunCfg) -> RunResult:
+    """Execute a prepared training run and optional post-training export.
+
+    Args:
+        cfg: Fully prepared run configuration.
+
+    Returns:
+        A :class:`RunResult` containing the trained model, trainer, raw
+        training result, and per-dataset test records.
+
+    Raises:
+        ValueError: If required configuration such as ``collate_fn`` or export
+            dataset selection is missing.
+    """
     if cfg.collate_fn is None:
         raise ValueError("RunCfg.collate_fn must not be None.")
 

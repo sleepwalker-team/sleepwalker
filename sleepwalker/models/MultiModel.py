@@ -1,3 +1,10 @@
+"""Composite models that fuse embeddings from several submodels.
+
+This module provides the model-composition layer used by several task scripts
+and by ``MetaModel``. Tests in ``tests/test_metamodel.py`` confirm channel
+slicing, embedding fusion, and nested preprocessor warmup behavior.
+"""
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -10,11 +17,35 @@ from sleepwalker.utils import logger
 
 @dataclass
 class MetaModelEntry:
+    """Describe one submodel together with the channels it consumes.
+
+    Attributes:
+        model: Submodel instance implementing the ``BaseModel`` interface.
+        input_channels: Channel names that should be sliced out of the parent
+            input tensor before being passed to ``model``.
+    """
+
     model: BaseModel
     input_channels: list[str]
 
 
 class MultiModel(BaseModel):
+    """Fuse embeddings from several submodels and apply one shared head.
+
+    Args:
+        classes: Output label names for the shared classification head.
+        input_channels: Global input channel order expected by the composite
+            model. When omitted, the order is inferred from the submodel
+            entries.
+        models: Submodel entries describing channel routing.
+        preprocessors: Optional preprocessors applied before channel slicing.
+
+    Notes:
+        Each submodel must expose ``features(x)`` and ``feature_dim()``. The
+        composite model concatenates the resulting embeddings and feeds them
+        into a single linear head.
+    """
+
     def __init__(
         self,
         *,
@@ -58,6 +89,7 @@ class MultiModel(BaseModel):
         self.head = torch.nn.Linear(self._feature_dim, len(self.classes))
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Slice channels for each submodel and concatenate embeddings."""
         embeddings = []
 
         for entry in self.model_entries:
@@ -70,12 +102,23 @@ class MultiModel(BaseModel):
         return torch.cat(embeddings, dim=1)
 
     def feature_dim(self) -> int:
+        """Return the size of the fused embedding space."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the shared linear head to fused embeddings."""
         return self.head(x)
 
     def _warmup_preprocessors(self, data_loader: DataLoader, device: str = "cuda"):
+        """Warm composite preprocessors and then nested submodel preprocessors.
+
+        Args:
+            data_loader: Loader used to stream warmup batches.
+            device: Device used while running warmup updates.
+
+        Returns:
+            ``self`` after in-place warmup.
+        """
         self.to(device)
         total_batches = len(data_loader)
         batch_size = data_loader.batch_size

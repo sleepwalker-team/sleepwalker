@@ -1,8 +1,17 @@
+"""Online robust scaling preprocessor based on running quantile estimates."""
+
 import torch
 
 from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class RobustScaler(Preprocessor):
+    """Scale features by running median and interquartile range.
+
+    Args:
+        lower_quantile: Lower quantile used for the IQR estimate.
+        upper_quantile: Upper quantile used for the IQR estimate.
+    """
+
     def __init__(self, lower_quantile: float = 0.25, upper_quantile: float = 0.75, **kwargs):
         super().__init__()
 
@@ -20,13 +29,11 @@ class RobustScaler(Preprocessor):
         self.register_buffer("initialized", torch.zeros(0, dtype=torch.bool))  # (F,)
 
     def requires_warmup(self) -> bool:
+        """Return whether this preprocessor requires warmup."""
         return True
 
     def push(self, new_data: torch.Tensor):
-        """
-        Update percentiles for each feature using the P² algorithm.
-        Assumes new_data has shape (batch_size, num_samples, num_features).
-        """
+        """Update running quantile estimates from one batch."""
         # Flatten the first two dimensions (batch_size * num_samples, num_features)
         
         batch_size, num_samples, num_features = new_data.shape
@@ -103,14 +110,12 @@ class RobustScaler(Preprocessor):
         self.marker_positions[feature, k] += values.size(0)  # Shift marker position by the batch size
 
     def update(self, data: torch.Tensor):
+        """Alias `push` and increment the update counter."""
         self.push(data)
         self.cnt += 1
 
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
-        """
-        Scale the data for each feature based on the running median and IQR.
-        Expects input data to have shape (batch_size, num_samples, num_features).
-        """
+        """Scale data using the current median and IQR estimates."""
         if self.is_initialized: #and self.cnt > 100
             batch_size, num_samples, num_features = data.shape
             

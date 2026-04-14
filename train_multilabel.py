@@ -1,3 +1,11 @@
+"""Ruhrland multitask training script for the current lab workflow.
+
+This script assembles a Ruhrland-specific multitask dataset, quality filters,
+`MetaModel`, and `MultiLabelTrainer` into an internal multitask experiment. The
+configuration is tightly coupled to the current lab environment and should not
+be treated as a stable public CLI.
+"""
+
 #!/bin/env python3
 
 import argparse
@@ -68,6 +76,7 @@ channels_cfgs = [
 ]
 
 def has_required_channels(edf_path):
+    """Check whether an EDF file exposes the channels required by this script."""
     meta = read_edf_meta(edf_path)
     return all(c in meta["signals"] for c in sleep_channels) and all(
         channel in meta["signals"] for channel in respiratory_channels + list(impedance_channels.values())
@@ -135,6 +144,7 @@ task_config = {
 normalized_task_config = MultiLabelTrainer.normalize_task_config(task_config)
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):
+    """Trim leading and trailing wake before multitask target extraction."""
     trimmed = trim_wake(data_df, label_df, label_extra_df)
     if trimmed is None:
         return None
@@ -143,6 +153,16 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=Non
 
 
 def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra=None, patient=None, time=None):
+    """Apply signal-quality rejection and build one multitask sample item.
+
+    Returns:
+        A sample dictionary or `None` when the window fails the current
+        quality heuristics.
+
+    Notes:
+        The exact thresholds are experiment-specific and are documented here as
+        current script behavior, not as validated general defaults.
+    """
     # Reject high-impedance windows before they reach the
     # model while keeping impedance out of the actual model inputs.
     if quality_data is not None and "EEG" in quality_data.columns:
@@ -180,6 +200,7 @@ def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra
     return item
 
 def build_dataset():
+    """Build the configured Ruhrland multitask dataset template."""
     dataset = Ruhrlandklinik(
         channels=channels_cfgs,
         sample_frequency=sample_frequency,
@@ -194,6 +215,7 @@ def build_dataset():
 
 
 def summarize_patient_quality(patient, data_df, label_df, label_extra_df):
+    """Summarize per-patient signal and label quality metrics for filtering."""
     if data_df is None or len(data_df) == 0 or label_df is None or len(label_df) == 0:
         return None
 
@@ -244,6 +266,7 @@ def summarize_patient_quality(patient, data_df, label_df, label_extra_df):
 
 
 def apply_patient_filters(dataset, patients):
+    """Apply script-specific signal-QC and outlier filters to Ruhrland patients."""
     # TODO FROM HERE -> A bit too strong these filterings
     # TODO ONLY APPLY FOR TRAIN DATA?
     stats_df = dataset.get_patient_stats(patients, summarize_patient_quality, num_workers=num_workers_dataset)
@@ -277,23 +300,27 @@ def apply_patient_filters(dataset, patients):
     return kept
 
 def initialize_dataset(dataset, patients):
+    """Filter patients and initialize the multitask dataset."""
     # patients = patients[:10]
     filtered_patients = apply_patient_filters(dataset, patients)
     dataset.initialize(filtered_patients, num_workers=num_workers_dataset)
     return dataset
 
 def list_split_patients(purpose: str, dry_run: bool) -> list[str]:
+    """List train or test patients with the required channel set."""
     edf_root = edf_folder if purpose == "train" else edf_folder_test
     patients = [p for p in get_edf_files_in_repo(edf_root, recursive=True) if has_required_channels(p)]
     return patients[:2] if dry_run else patients
 
 
 def load_split_dataset(purpose: str, dry_run: bool):
+    """Build and initialize one Ruhrland dataset split."""
     patients = list_split_patients(purpose, dry_run)
     return initialize_dataset(build_dataset(), patients)
 
 
 def build_model(dataset):
+    """Build the current multitask composite model for Ruhrland data."""
     respiratory_model = UTime(
         ts_len=dataset.get_timeseries_len(),
         n_channels=4,
@@ -336,6 +363,7 @@ def build_model(dataset):
     return model
 
 def main():
+    """Build datasets, trainer, and model, then launch the multitask run."""
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
 

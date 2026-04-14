@@ -1,7 +1,18 @@
+"""Confusion-matrix-derived metric helpers."""
+
 import numpy as np
 
 
 def cohen_kappa_from_confusion_matrix(confusion_matrix):
+    """Compute Cohen's kappa from a confusion matrix.
+
+    Args:
+        confusion_matrix: Square confusion matrix as a NumPy-like array.
+
+    Returns:
+        Cohen's kappa value. The current implementation returns `0.0` for
+        several degenerate cases instead of propagating unstable divisions.
+    """
     n_total = np.sum(confusion_matrix)
     p_o = np.trace(confusion_matrix) / n_total
     row_sums = np.sum(confusion_matrix, axis=1)
@@ -14,6 +25,16 @@ def cohen_kappa_from_confusion_matrix(confusion_matrix):
 
 
 def f1_score_from_confusion_matrix(confusion_matrix, macro=False) -> float:
+    """Compute micro- or macro-averaged F1 from a confusion matrix.
+
+    Args:
+        confusion_matrix: Square confusion matrix as a NumPy-like array.
+        macro: Whether to average per-class F1 scores instead of computing a
+            micro score.
+
+    Returns:
+        The requested F1 score as a float.
+    """
     num_classes = confusion_matrix.shape[0]
 
     if macro:

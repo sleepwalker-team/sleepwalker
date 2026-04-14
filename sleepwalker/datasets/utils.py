@@ -1,3 +1,11 @@
+"""Dataset discovery, splitting, XML parsing, and cache-export helpers.
+
+This module contains a mix of reusable utilities used across dataset adapters,
+trainers, tests, and training scripts. The more stable pieces, based on current
+call sites and tests, are EDF discovery, dataset splitting, repeat sampling,
+and numpy-cache export helpers.
+"""
+
 from __future__ import annotations
 
 import json
@@ -22,6 +30,17 @@ from sleepwalker.utils import logger
 
 
 class RepeatSampler(Sampler[int]):
+    """Repeat each sampled index a fixed number of times.
+
+    Args:
+        sampler: Base sampler producing logical sample indices.
+        n_repeat: Number of times each index should be yielded.
+
+    Notes:
+        ``BaseTrainer`` uses this sampler to evaluate repeated windows and then
+        average the corresponding model outputs.
+    """
+
     def __init__(self, sampler: Sampler[int], n_repeat: int = 1):
         if n_repeat <= 0:
             raise ValueError("n_repeat must be positive.")
@@ -216,6 +235,14 @@ def summarize_dataset(
 
 
 def read_profusion(xml_path):
+    """Read Profusion XML annotations into a normalized event table.
+
+    Notes:
+        The mapping logic is dataset-specific and currently tailored to the XML
+        structures used by repository dataset adapters such as ``ABC`` and
+        ``SHHS``. The function returns a concatenated event table but does not
+        yet document a stronger schema guarantee beyond observed call sites.
+    """
     with open(xml_path, "r") as f:
         doc = xtd.parse(f.read())
         apnea_df = pd.DataFrame(doc["CMPStudyConfig"]["ScoredEvents"]["ScoredEvent"][1:])
@@ -260,6 +287,7 @@ def read_profusion(xml_path):
         return pd.concat([apnea_df, sleep_df], ignore_index=True)
 
 def read_nsrr(xml_path):
+    """Read NSRR-style XML annotations into an event table."""
     with open(xml_path, "r") as f:
         doc = xtd.parse(f.read())
         """
@@ -331,6 +359,7 @@ def fixed_split(
     test_patterns: Optional[Sequence[str]] = None,
     exclude_patterns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """Split patients by substring matching against path patterns."""
     train = [p for p in all_patients if _matches_any(p, train_patterns) and not _matches_any(p, exclude_patterns)]
     test = [p for p in all_patients if _matches_any(p, test_patterns) and not _matches_any(p, exclude_patterns)]
     return train, test
@@ -341,6 +370,7 @@ def random_split(
     seed: Optional[int] = None,
     include_patterns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """Randomly split patient paths into train and test partitions."""
     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
     rng = np.random.default_rng(seed)
     idx = np.arange(len(pats))
@@ -351,6 +381,7 @@ def random_split(
     return train, test
 
 def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str]]:
+    """Create K-fold train/test patient splits."""
     kf = KFold(n_splits)
     
     folds = []
@@ -365,6 +396,14 @@ def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str
 #     return [pats], [[]]
 
 def estimate_class_cnts(loader: DataLoader):
+    """Estimate multiclass target counts from a dataloader.
+
+    Args:
+        loader: Dataloader yielding batches with one-hot ``target`` tensors.
+
+    Returns:
+        A mapping from class name to observed count over one realized pass.
+    """
     dataset = loader.dataset
     total_batches = len(loader)
     batch_size = loader.batch_size or 1
@@ -432,6 +471,16 @@ def stack_numpy_values(values, key: str):
 
 
 def export_batch_collate(batch, extra_keys: Optional[Sequence[str]] = None):
+    """Collate a batch for cache export without losing selected metadata.
+
+    Args:
+        batch: Sequence of dataset items.
+        extra_keys: Optional metadata keys that must stay as lists rather than
+            being stacked.
+
+    Returns:
+        A collated batch suitable for ``export_dataloader_to_numpy_dir``.
+    """
     items = [item for item in batch if item is not None]
     keep_stacked = {"data", "target", "target_extra"}
     keep_ignored = {"time", "patient", *(extra_keys or [])}
@@ -466,25 +515,28 @@ def export_dataloader_to_numpy_dir(
     extra_keys: Optional[Sequence[str]] = None,
     n_samples_per_file: Optional[int] = None,
 ) -> Path:
-    """
-    Export one realized pass over a dataloader stream into a numpy cache directory.
+    """Export one realized dataloader pass into a numpy cache directory.
 
-    ``extra_keys`` is deliberately narrow: every requested key must be present
-    on every exported item and must reduce to either
+    Args:
+        loader: Dataloader producing already-collated dataset items.
+        out_dir: Output directory for the cache.
+        extra_keys: Optional per-item keys to export in addition to the
+            standard fields.
+        n_samples_per_file: Optional chunk size used to split arrays across
+            multiple ``.npy`` files.
 
-    - a scalar value, or
-    - a numpy / tensor / pandas value with the same shape for every item.
+    Returns:
+        The output directory path.
 
-    Export fails loudly for missing keys, ragged shapes, or arbitrary Python
-    objects. This is intentional so cache contents stay predictable and can be
-    loaded without pickle.
+    Raises:
+        ValueError: If required keys are missing, the dataset is not
+            initialized, or exported extra keys are ragged or unsupported.
 
-    The exported cache intentionally reflects exactly one epoch of the supplied
-    loader stream, including any sampling or dataset-side randomization that
-    happened before collation.
-
-    If ``n_samples_per_file`` is provided, arrays are split across multiple
-    ``.npy`` files along axis 0.
+    Notes:
+        The export intentionally captures exactly one realized loader pass,
+        including any dataset-side randomization. Tests in
+        ``tests/test_datasets.py`` confirm round-tripping, memmap loading, and
+        chunked exports.
     """
     dataset = loader.dataset
     if hasattr(dataset, 'initialized') and not dataset.initialized:

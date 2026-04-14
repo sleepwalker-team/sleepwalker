@@ -1,3 +1,11 @@
+"""Inference-time dataset template without label extraction.
+
+`UnlabelledDataset` reuses the EDF loading and window-building logic from
+`BaseDataset` but disables all label handling. It is primarily used by the
+prediction-package export/load path and by inference helpers that score raw EDF
+files without ground-truth annotations.
+"""
+
 from __future__ import annotations
 
 from typing import Callable, Optional, Sequence
@@ -8,6 +16,23 @@ from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig
 
 
 class UnlabelledDataset(BaseDataset):
+    """Dataset template for EDF inference without labels.
+
+    Args:
+        channels: Signal channels to load.
+        sample_frequency: Resampling frequency in Hz.
+        resample_type: Signal resampling mode.
+        total_input: Input window duration.
+        stride: Time between consecutive inference windows.
+        prepare_patient: Optional whole-patient callback reused from
+            `BaseDataset`.
+        prepare_sample: Optional final sample callback reused from
+            `BaseDataset`.
+        online_max_tries: Retry budget when `prepare_sample` rejects a window.
+        force_one_day: Whether to keep the one-day sanity check from the base
+            dataset.
+        rereference: Optional rereferencing groups applied after loading.
+    """
     def __init__(
         self,
         *,
@@ -51,12 +76,24 @@ class UnlabelledDataset(BaseDataset):
         )
 
     def clone(self) -> UnlabelledDataset:
+        """Return a fresh dataset template with the same configuration."""
         return UnlabelledDataset(**self._init_kwargs)
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Signal that unlabelled datasets do not provide event annotations."""
         raise ValueError("UnlabelledDataset does not provide labels.")
 
     def get_item(self, file, start_date: pd.Timestamp):
+        """Build one inference sample without any target fields.
+
+        Args:
+            file: Prepared EDF descriptor from `BaseDataset.initialize`.
+            start_date: Window start timestamp.
+
+        Returns:
+            A sample dictionary containing at least `data`, `patient`, and
+            `time`, or `None` when `prepare_sample` rejects the window.
+        """
         end_date = start_date + self.total_input
         item = {
             "patient": file.path,

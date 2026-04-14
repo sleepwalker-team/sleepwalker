@@ -1,3 +1,11 @@
+"""Ruhrlandklinik-specific dataset adapter.
+
+This adapter reads Ruhrland EDF files together with sidecar spreadsheet or CSV
+annotation files. The module is heavily used by the current task scripts, but
+it is also strongly tied to local annotation conventions, so the documentation
+here stays close to what is directly supported by code and tests.
+"""
+
 from __future__ import annotations
 
 import os
@@ -10,6 +18,19 @@ import xlrd
 from sleepwalker.datasets.Basedataset import BaseDataset
 
 class Ruhrlandklinik(BaseDataset):
+    """Dataset adapter for Ruhrlandklinik recordings and annotations.
+
+    The adapter reads main event annotations from ``*_MS.xls[x]`` files and,
+    when enabled, secondary annotations from ``*_AS.csv`` files. Tests in
+    ``tests/test_ruhrlandklinik.py`` currently cover the body-position expansion
+    helper, which turns change-based position annotations into interval-based
+    events.
+
+    Args:
+        return_nox: Whether ``get_extra_event_df`` should be exposed through the
+            dataset as a secondary target source.
+        **kwargs: Forwarded to :class:`sleepwalker.datasets.Basedataset.BaseDataset`.
+    """
     BODY_POSITION_EVENTS = ["rückenlage", "links", "rechts", "bauchlage", "aufrecht"]
 
     """
@@ -229,6 +250,22 @@ class Ruhrlandklinik(BaseDataset):
         super().__init__(**kwargs)
 
     def _expand_change_based_body_positions(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert change-based body-position markers into explicit intervals.
+
+        Args:
+            df: Event table containing at least ``Label``, ``Starttime``, and
+                ``Endtime`` columns.
+
+        Returns:
+            A copy of the event table in which body-position labels are
+            represented as intervals instead of instantaneous changes.
+
+        Notes:
+            Tests confirm three behaviors:
+            start at the first clear position by default, optionally seed an
+            initial position through ``initial_body_position_event``, and ignore
+            duplicate consecutive position changes.
+        """
         body_positions = df[df["Label"].isin(self.BODY_POSITION_EVENTS)].copy()
         if len(body_positions) == 0:
             return df
@@ -291,6 +328,18 @@ class Ruhrlandklinik(BaseDataset):
         )
 
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Read auxiliary Ruhrland annotations from the `_AS.csv` sidecar file.
+
+        Args:
+            edf_path: Path to the EDF file whose sidecar annotations should be
+                read.
+            start_datetime: Unused in the current implementation; kept for the
+                dataset interface.
+
+        Returns:
+            A normalized event table with ``Label``, ``Starttime``,
+            ``Endtime``, and ``Duration`` columns.
+        """
         nox_filepath = os.path.splitext(edf_path)[0] + "_AS.csv"
         try:
             dfnox = pd.read_csv(nox_filepath, skiprows=[1], header=0, parse_dates=["Anfangszeit","Endzeit"], dayfirst=True, usecols=[0,1,2,3])
@@ -313,9 +362,28 @@ class Ruhrlandklinik(BaseDataset):
                 raise ValueError(f"Error reading {nox_filepath}. Error was {traceback.format_exc()}")
     
     def has_extra_target(self):
+        """Report whether auxiliary Ruhrland annotations should be exposed."""
         return self.return_nox
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Read the main Ruhrland event annotations from spreadsheet files.
+
+        Args:
+            edf_path: Path to the EDF file.
+            start_datetime: Unused in the current implementation; kept for the
+                dataset interface.
+
+        Returns:
+            A normalized event table with ``Label``, ``Starttime``,
+            ``Endtime``, and ``Duration`` columns.
+
+        Notes:
+            The parser contains Ruhrland-specific normalization steps, including
+            merging overlapping ``lm`` intervals and suppressing certain
+            non-sleep events that overlap with wake intervals. Those behaviors
+            are documented because they are explicit in code, but their broader
+            annotation rationale remains dataset-specific.
+        """
         description_filepath = os.path.splitext(edf_path)[0] + "_MS"
         if os.path.exists(description_filepath + ".xls"):
             wb = xlrd.open_workbook(description_filepath + ".xls", logfile=open(os.devnull, 'w'))

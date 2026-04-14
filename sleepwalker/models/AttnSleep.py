@@ -10,6 +10,7 @@ from sleepwalker.models.Basemodel import BaseModel
 
 
 class SELayer(nn.Module):
+    """Squeeze-and-excitation block for 1D feature maps."""
     def __init__(self, channel, reduction=16):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool1d(1)
@@ -28,6 +29,7 @@ class SELayer(nn.Module):
 
 
 class SEBasicBlock(nn.Module):
+    """Residual 1D block with squeeze-and-excitation."""
     def __init__(self, inplanes, planes, stride=1, downsample=None, reduction=16):
         super().__init__()
         self.conv1 = nn.Conv1d(inplanes, planes, kernel_size=3, stride=stride, padding=1)
@@ -48,6 +50,7 @@ class SEBasicBlock(nn.Module):
 
 
 class MRCNN(nn.Module):
+    """Multi-resolution convolutional front-end used by AttnSleep."""
     def __init__(self, in_channels, afr_reduced_cnn_size):
         super().__init__()
         drate = 0.5
@@ -98,6 +101,7 @@ class MRCNN(nn.Module):
 
 
 class MultiHeadedAttention(nn.Module):
+    """Standard multi-head self-attention block."""
     def __init__(self, h, d_model, dropout=0.1):
         super().__init__()
         assert d_model % h == 0
@@ -121,6 +125,7 @@ class MultiHeadedAttention(nn.Module):
 
 
 class EncoderLayer(nn.Module):
+    """Transformer-style encoder layer used in the temporal encoder."""
     def __init__(self, d_model, self_attn, feed_forward, dropout):
         super().__init__()
         self.self_attn = self_attn
@@ -139,6 +144,7 @@ class EncoderLayer(nn.Module):
 
 
 class TCE(nn.Module):
+    """Stack of temporal-context encoder layers."""
     def __init__(self, layer, N):
         super().__init__()
         self.layers = nn.ModuleList([layer for _ in range(N)])
@@ -151,6 +157,7 @@ class TCE(nn.Module):
 
 
 class PositionwiseFeedForward(nn.Module):
+    """Position-wise feed-forward layer."""
     def __init__(self, d_model, d_ff, dropout=0.1):
         super().__init__()
         self.w_1 = nn.Linear(d_model, d_ff)
@@ -190,6 +197,19 @@ class AttnSleep(BaseModel):
         afr_reduced_cnn_size: int = 30,
         preprocessors=None,
     ) -> None:
+        """Construct the AttnSleep architecture.
+
+        Args:
+            n_channels: Number of input channels.
+            ts_len: Input sequence length in samples.
+            classes: Optional output class names.
+            N: Number of temporal encoder layers.
+            d_ff: Feed-forward hidden size in the temporal encoder.
+            h: Number of attention heads.
+            dropout: Dropout probability.
+            afr_reduced_cnn_size: Output width of the CNN reduction block.
+            preprocessors: Optional externally supplied preprocessors.
+        """
         super().__init__(preprocessors=preprocessors)
         self.mrcnn = MRCNN(n_channels, afr_reduced_cnn_size)
         self.h = h
@@ -215,6 +235,7 @@ class AttnSleep(BaseModel):
         self.fc = nn.Linear(flatten_len, len(self.classes)) if self.classes is not None else None
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute AttnSleep features from one input batch."""
         x = x.transpose(1, 2)
         x_feat = self.mrcnn(x)
         if x_feat.shape[2] % self.h != 0:
@@ -224,9 +245,11 @@ class AttnSleep(BaseModel):
         return x_encoded.flatten(1)
 
     def feature_dim(self) -> int:
+        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Map features to class logits."""
         if self.fc is None or self.classes is None:
             raise ValueError("AttnSleep.classifier() requires classes to be set.")
         return self.fc(x)

@@ -9,6 +9,7 @@ from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.Spectrogram import Spectrogram
 
 class SinusoidalPositionalEncoding(nn.Module):
+    """Add sinusoidal positional encodings to a sequence tensor."""
     def __init__(self, dim, max_len=5000):
         super().__init__()
         pe = torch.zeros(max_len, dim)
@@ -27,6 +28,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[: x.size(1)].unsqueeze(0)
 
 class AttentionPooling(nn.Module):
+    """Attention-weighted pooling over the sequence dimension."""
     def __init__(self, dim, attn_size):
         super().__init__()
         self.Wa = nn.Linear(dim, attn_size)
@@ -41,6 +43,7 @@ class AttentionPooling(nn.Module):
         return out, alpha
 
 class TransformerBlock(nn.Module):
+    """Transformer encoder block with optional attention pooling."""
     def __init__(
         self,
         input_dim,
@@ -115,6 +118,30 @@ class SleepTransformer(BaseModel):
         fc_dropout=0.1,
         output_strategy="center",
     ):
+        """Construct the SleepTransformer architecture.
+
+        Args:
+            classes: Optional output class names. When omitted, the classifier
+                head is disabled and the model acts as a feature extractor.
+            n_channels: Number of input channels.
+            ndim: Number of spectral bins after the spectrogram front-end.
+            frame_seq_len: Number of frames per epoch for the first transformer.
+            epoch_seq_len: Number of epochs per input window for the second
+                transformer.
+            hop_length: Spectrogram hop length.
+            frm_d_ff: Feed-forward size in the frame transformer.
+            frm_num_blocks: Number of frame-transformer layers.
+            frm_num_heads: Attention heads for the frame transformer.
+            frm_attention_dropout: Dropout in the frame transformer.
+            frm_attention_size: Attention-pooling hidden size.
+            seq_d_ff: Feed-forward size in the sequence transformer.
+            seq_num_blocks: Number of sequence-transformer layers.
+            seq_num_heads: Attention heads for the sequence transformer.
+            seq_attention_dropout: Dropout in the sequence transformer.
+            fc_hidden_size: Hidden size of the classifier MLP.
+            fc_dropout: Dropout in the classifier MLP.
+            output_strategy: Temporal reduction mode.
+        """
         spec = [Spectrogram(n_fft=2 * (ndim - 1), hop_length=hop_length), Normalize()] 
         super().__init__(preprocessors=spec)
         self.classes = list(classes) if classes is not None else None
@@ -175,6 +202,7 @@ class SleepTransformer(BaseModel):
             self.fc = None
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute SleepTransformer features from spectrogram inputs."""
         B = x.shape[0]
         spec = x.permute(0, 2, 1, 3).reshape(B, x.shape[2], -1)
         total_frames = spec.shape[1] // self.frame_seq_len
@@ -202,9 +230,11 @@ class SleepTransformer(BaseModel):
         return x_out
 
     def feature_dim(self) -> int:
+        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Map features to logits for the configured class set."""
         if self.fc is None or self.classes is None:
             raise ValueError("SleepTransformer.classifier() requires classes to be set.")
         B = x.shape[0]

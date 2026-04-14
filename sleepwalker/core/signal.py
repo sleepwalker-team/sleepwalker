@@ -1,3 +1,10 @@
+"""Low-level EDF metadata, signal loading, and header-repair helpers.
+
+These utilities are shared by dataset adapters and training scripts throughout
+the repository. The code prefers pyEDFlib when possible and falls back to MNE
+for some read paths and for one repair path in ``fix_edf_header``.
+"""
+
 from __future__ import annotations
 
 from contextlib import redirect_stdout
@@ -239,18 +246,20 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
     return readable
 
 def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) -> Dict[str, Any]:
-    """Read basic metadata about an EDF file.
+    """Read basic metadata for an EDF file or already-open reader.
 
-    Attempts pyEDFlib first, then falls back to MNE if pyEDFlib fails.
+    Args:
+        edf: EDF path or open ``pyedflib.EdfReader`` handle.
+        verbose: Whether to log read failures before falling back to MNE.
 
-    Returns
-    -------
-    dict with keys:
-        start : datetime
-        end : datetime
-        duration_s : float
-        signals : list[str]
-        fs : dict[str, float]
+    Returns:
+        A dictionary containing at least ``start``, ``end``,
+        ``duration_s``, ``signals``, ``fs``, and ``source``.
+
+    Notes:
+        The helper tries pyEDFlib first and falls back to MNE on failure. When
+        MNE is used, per-channel sampling frequencies are inferred from the
+        global raw object frequency.
     """
     close_after = isinstance(edf, str)
 
@@ -319,29 +328,29 @@ def edf_to_df(
     how: str = "nearest",
     verbose: bool = False,
 ) -> pd.DataFrame:
-    """
-    Read raw samples for one or more channels between [start, end).
+    """Read EDF signal samples into a pandas DataFrame.
 
-    Parameters
-    ----------
-    edf : str | pyedflib.EdfReader
-        Either the EDF file path (opened/closed internally)
-        or an already opened EdfReader handle.
-    channels : list of str
-        Channel names to extract.
-    start, end : pd.Timestamp or None
-        Time range to extract. If None, full file is used.
-    frequency : float
-        Target resampling frequency in Hz.
-    how : {'nearest', 'mean', 'max'}, default 'nearest'
-        Resampling strategy.
-    verbose : bool
-        If True, prints diagnostic information.
+    Args:
+        edf: EDF path or open ``pyedflib.EdfReader`` handle.
+        channels: Channel names to extract. Missing channels are skipped.
+        start: Optional extraction start timestamp. ``None`` means start of
+            file.
+        end: Optional extraction end timestamp. ``None`` means end of file.
+        frequency: Target resampling frequency in Hz.
+        how: Resampling mode. Supported values in current code are
+            ``"nearest"``, ``"mean"``, and ``"max"``.
+        verbose: Whether to log backend failures and some missing-channel
+            situations.
 
-    Returns
-    -------
-    pd.DataFrame
-        Indexed by timestamps, columns=channels.
+    Returns:
+        A time-indexed DataFrame whose columns correspond to the requested
+        channels that were actually found.
+
+    Notes:
+        The helper uses pyEDFlib first and falls back to MNE when pyEDFlib
+        fails. The current code treats the output as suitable for downstream
+        resampling and gap filling, but exact backend equivalence is not
+        documented.
     """
     close_after = isinstance(edf, str)
 

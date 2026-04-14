@@ -1,3 +1,11 @@
+"""Shared model base class with optional preprocessor support.
+
+This module defines the minimal interface expected by the repository's trainer
+and meta-model layers. Concrete architectures subclass ``BaseModel`` and
+implement feature extraction plus a classifier head, while optional
+preprocessors are warmed externally by trainer code.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -8,10 +16,18 @@ from torch import nn
 from torch.nn import ModuleList
 
 class BaseModel(nn.Module, ABC):
-    """Minimal base model that can own preprocessors.
+    """Base class for Sleepwalker models.
 
-    Preprocessors are simple callables with optional `requires_warmup()` and `update(x)`.
-    They receive and return tensors shaped [B, T, C]. Warmup is orchestrated externally.
+    The class assumes a common tensor layout of ``[B, T, C]`` and provides a
+    small amount of structure around optional preprocessors. Tests in
+    ``tests/test_metamodel.py`` and ``tests/test_deployment.py`` exercise this
+    interface through lightweight dummy implementations.
+
+    Args:
+        preprocessors: Optional iterable of modules applied before
+            feature extraction. Preprocessors may implement
+            ``requires_warmup()`` and ``update(x)``; warmup is orchestrated by
+            trainer code rather than by the model itself.
     """
 
     def __init__(self, preprocessors: Optional[Iterable] = None) -> None:
@@ -19,6 +35,16 @@ class BaseModel(nn.Module, ABC):
         self.preprocessors: ModuleList = ModuleList(preprocessors) if preprocessors is not None else ModuleList([])
 
     def apply_preprocessors(self, x: torch.Tensor, up:int = 0) -> torch.Tensor:
+        """Apply preprocessors up to a given slice boundary.
+
+        Args:
+            x: Input tensor shaped ``[B, T, C]``.
+            up: Exclusive upper bound on the preprocessors to apply. Values
+                below zero are clamped to zero.
+
+        Returns:
+            The transformed tensor.
+        """
         if up < 0:
             up = 0
             
@@ -27,10 +53,12 @@ class BaseModel(nn.Module, ABC):
         return x
 
     def features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+        """Run preprocessors and then compute the latent feature embedding."""
         x = self.apply_preprocessors(x, len(self.preprocessors)+1)
         return self._features(x)
 
     def classifier(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract
+        """Apply the task head to an already-computed embedding."""
         return self._classifier(x)
 
     @abstractmethod
@@ -38,6 +66,7 @@ class BaseModel(nn.Module, ABC):
         ...
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the full model from raw inputs to logits or task outputs."""
         return self.classifier(self.features(x))
 
     @abstractmethod

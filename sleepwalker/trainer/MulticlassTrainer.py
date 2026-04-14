@@ -1,3 +1,11 @@
+"""Concrete trainer for single-head multiclass tasks.
+
+This trainer is used by several task-specific scripts in the repository,
+including sleep staging and event-detection variants that reduce each window to
+one categorical target. Tests cover class balancing behavior, repeated-window
+evaluation, and prediction-frame generation.
+"""
+
 from functools import partial
 import random
 from typing import Callable, Optional
@@ -16,6 +24,29 @@ from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix,
 
 
 class MulticlassTrainer(BaseTrainer):
+    """Train and evaluate a single softmax classification head.
+
+    Args:
+        epochs: Number of training epochs.
+        optimizer: Factory that builds an optimizer for the model.
+        classes: Ordered output labels used for targets, confusion matrices,
+            and prediction tables.
+        loss_function: Base loss function, usually cross entropy.
+        device: Torch device used for training and inference.
+        warmup_device: Device used during preprocessor warmup.
+        save_every: Checkpoint cadence in epochs.
+        lr_scheduler: Optional scheduler factory.
+        early_stopping: Optional validation patience in epochs.
+        train_transform: Optional list of per-sample transforms.
+        n_repeat_train: Number of repeated views per training sample.
+        n_repeat_test: Number of repeated views per evaluation sample.
+        loss_mode: Loss reweighting mode understood by
+            ``class_weights_for_loss``.
+        class_weights: Optional manual per-class weights.
+        balance_batches: Whether to reject overrepresented targets in
+            ``prepare_target`` during training.
+    """
+
     def __init__(
         self,
         epochs: int,
@@ -90,6 +121,13 @@ class MulticlassTrainer(BaseTrainer):
         return wrapped_prepare_target
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
+        """Prepare class weighting and optional batch balancing.
+
+        Notes:
+            Batch balancing only applies to datasets that expose a mutable
+            ``prepare_target_callback``. Tests explicitly cover the repeat and
+            balancing paths.
+        """
         dataset = data_loader.dataset
 
         class_cnts = None
@@ -135,6 +173,7 @@ class MulticlassTrainer(BaseTrainer):
             self.loss_function = self.base_loss_function
 
     def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
+        """Convert model logits into the standard multiclass prediction table."""
         probabilities = torch.softmax(outputs.detach().cpu(), dim=1)
         pred_idx = probabilities.argmax(dim=1)
         frame = {
@@ -164,6 +203,18 @@ class MulticlassTrainer(BaseTrainer):
         logger.metric(f"{scope}/{mode}/loss", float(loss_value), step=step) 
 
     def run_epoch(self, loader, opt, model, prefix=""):
+        """Run one train, validation, or test epoch.
+
+        Args:
+            loader: Dataloader producing batch dictionaries with ``data`` and
+                one-hot ``target`` fields.
+            opt: Optimizer for training epochs, or ``None`` during evaluation.
+            model: Model instance to execute.
+            prefix: Progress-label prefix used to infer the logging mode.
+
+        Returns:
+            A tuple ``(epoch_loss, confusion_matrix)``.
+        """
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
         

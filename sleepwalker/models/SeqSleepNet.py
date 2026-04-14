@@ -18,6 +18,7 @@ from sleepwalker.utils import logger
 
 
 class Attention(nn.Module):
+    """Simple attention pooling over frame-level GRU outputs."""
     def __init__(self, input_size):
         super().__init__()
         self.att_weight = nn.Parameter(torch.randn(input_size))
@@ -60,6 +61,22 @@ class SeqSleepNet(BaseModel):
         nfilter=32,
         **kwargs
     ):
+        """Construct the SeqSleepNet architecture.
+
+        Args:
+            n_channels: Number of input channels.
+            n_features: Alias for `n_channels`.
+            ts_len: Input sequence length in samples.
+            classes: Optional output class names.
+            sampling_frequency: Sampling frequency in Hz.
+            sampling_rate: Alias for `sampling_frequency`.
+            n_fft: FFT size for the spectrogram front-end.
+            hop_length: Spectrogram hop length.
+            epoch_len: Epoch duration used for hierarchical segmentation.
+            hidden_size: Hidden size of the recurrent blocks.
+            output_strategy: Temporal reduction mode.
+            nfilter: Number of learned triangular filterbank channels.
+        """
         self.nfilter = nfilter
         self.classes = list(classes) if classes is not None else None
         self.sampling_frequency = sampling_frequency if sampling_frequency is not None else sampling_rate
@@ -163,6 +180,7 @@ class SeqSleepNet(BaseModel):
     #         return self._forward(x, **kwargs)
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute hierarchical recurrent features from spectrogram inputs."""
         # --- Filterbanks ---
         D = x.shape[-1]
         B = x.shape[0] // self.L
@@ -206,9 +224,11 @@ class SeqSleepNet(BaseModel):
         return epoch_out
 
     def feature_dim(self) -> int:
+        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
+        """Map features to logits for the configured class set."""
         if self.classifier_layer is None or self.classes is None:
             raise ValueError("SeqSleepNet.classifier() requires classes to be set.")
         logits = self.classifier_layer(x)

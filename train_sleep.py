@@ -1,3 +1,11 @@
+"""Sleep-staging training script for the current lab workflow.
+
+This script assembles dataset adapters, model configurations, patient filters,
+and shared trainer/run utilities into a multiclass sleep-staging experiment.
+It is actively developed and should be read as an internal experiment entry
+point rather than a stable public CLI.
+"""
+
 #!/bin/env python3
 
 from __future__ import annotations
@@ -436,6 +444,23 @@ def get_dataset(
     prepare_sample=None,
     total_input: str | None = None,
 ):
+    """Build one configured sleep-staging dataset instance.
+
+    Args:
+        name: Dataset configuration key from `DATASET_CFG`.
+        model_name: Model configuration key from `MODEL_CFG`.
+        patients: Optional patient list. When `None`, EDF files are discovered
+            from the configured dataset root.
+        path_root: Root directory containing dataset subfolders.
+        grouped: Whether to use grouped-channel input definitions.
+        prepare_patient: Optional patient-level callback.
+        prepare_target: Optional target-preparation callback.
+        prepare_sample: Optional sample-preparation callback.
+        total_input: Optional override for the model input duration.
+
+    Returns:
+        A configured dataset instance. The dataset is not initialized here.
+    """
     if name not in DATASET_CFG:
         raise ValueError(f"Unknown sleep staging dataset '{name}'.")
     if model_name not in MODEL_CFG:
@@ -482,6 +507,19 @@ def get_model_and_trainer(
     dry_run: bool = False,
     model_payload: dict[str, object] | None = None,
 ):
+    """Build the model and trainer for one sleep-staging experiment setup.
+
+    Args:
+        name: Model configuration key from `MODEL_CFG`.
+        dataset: Prepared training dataset or combined dataset view.
+        epochs: Requested epoch count.
+        n_samples: Requested training sample budget.
+        dry_run: Whether to reduce workload for pipeline checks.
+        model_payload: Optional flags that affect trainer selection.
+
+    Returns:
+        A `(model, trainer)` tuple.
+    """
     if name not in MODEL_CFG:
         raise ValueError(f"Unknown sleep staging model '{name}'.")
 
@@ -543,6 +581,7 @@ def get_model_and_trainer(
 
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):
+    """Trim leading and trailing wake for sleep-staging datasets."""
     trimmed = trim_wake(data_df, label_df, label_extra_df)
     if trimmed is None:
         return None
@@ -550,6 +589,7 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=Non
     return data_df, label_df, label_extra_df
 
 def list_filtered_sleep_patients(dataset_name: str, model_name: str, grouped: bool, dry_run: bool) -> list[str]:
+    """Discover patients and drop sleep-time outliers before splitting."""
     dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
     patients = get_edf_files_in_repo(dataset_path, recursive=True)
     dataset = get_dataset(
@@ -582,6 +622,7 @@ def load_split_with_logging(
     grouped: bool,
     patients: list[str],
 ):
+    """Initialize one dataset split while preserving readable logging."""
     with suppress_stdout_logging(logger):
         logger.context(purpose.upper())
         try:
@@ -607,6 +648,7 @@ def load_split_with_logging(
 
 
 def build_splits_for_dataset(dataset_name: str, args):
+    """Build train/validation/test splits for one configured dataset."""
     patients = list_filtered_sleep_patients(dataset_name, args.model, args.grouped, args.dry)
     if args.test is not None:
         train_patients, val_patients = random_split(patients, test_frac=VAL_FRAC)
@@ -622,6 +664,7 @@ def build_splits_for_dataset(dataset_name: str, args):
 
 
 def main():
+    """Parse arguments, build splits, and launch one sleep-staging run."""
     parser = argparse.ArgumentParser(description="Train and evaluate a sleep-staging model.")
     parser.add_argument("--model", required=False, default="sleeptransformer", type=str)
     parser.add_argument("--train", required=False, nargs="+", default=["sleepedfx"], type=str)

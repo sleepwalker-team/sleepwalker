@@ -1,3 +1,10 @@
+"""Helpers for turning label windows into multiclass training targets.
+
+These functions are used by dataset callbacks and are covered directly by
+``tests/test_targets.py``. They currently implement a conservative target
+construction path: ambiguous windows are rejected rather than force-assigned.
+"""
+
 from typing import Sequence
 
 import pandas as pd
@@ -5,18 +12,23 @@ import torch
 
 
 def resolve_multiclass_index(target, default_idx, min_event_seconds, raise_error=True):
-    """Return the unique active class index from per-class event durations.
+    """Resolve one active class index from per-class event durations.
 
-    Parameters
-    ----------
-    target:
-        1D tensor-like collection containing one duration per class.
-    default_idx:
-        Index to use when no class crosses `min_event_seconds`.
-    min_event_seconds:
-        Minimum duration required for a class to count as active.
-    raise_error:
-        If `True`, raise on ambiguous targets. Otherwise return `None`.
+    Args:
+        target: One-dimensional tensor-like collection containing one duration
+            per class.
+        default_idx: Class index to return when no class exceeds the minimum
+            duration threshold.
+        min_event_seconds: Minimum duration required for a class to count as
+            active.
+        raise_error: Whether ambiguous targets should raise ``ValueError``.
+
+    Returns:
+        The resolved class index or ``None`` when ambiguity is tolerated.
+
+    Raises:
+        ValueError: If multiple classes are active or no class is active and no
+            default index is provided while ``raise_error`` is true.
     """
     active = target > min_event_seconds
     active_sum = int(active.sum().item())
@@ -125,43 +137,31 @@ def prepare_multiclass_target(
     percentage: float = 0.5,
     filters=None,
 ):
-    """Prepare multiclass `target` and optional `target_extra` dataset items.
+    """Build one-hot multiclass targets from a label-activity window.
 
-    Parameters
-    ----------
-    target:
-        Primary label window as a time-indexed DataFrame with one column per
-        label and binary activity values.
-    target_extra:
-        Optional second label source for the same window. It is transformed
-        independently and never causes rejection of the main `target`.
-    patient, time:
-        Unused callback arguments kept for dataset API compatibility.
-    target_classes:
-        Output class order for the returned one-hot vectors.
-    percentage:
-        Minimum window fraction a class must cover to be considered active.
-    filters:
-        Optional list of filter dicts applied to `target` before target
-        construction.
+    Args:
+        target: Primary label window as a time-indexed DataFrame with one
+            column per label and binary activity values.
+        target_extra: Optional second label source for the same window. It is
+            transformed independently and does not reject an otherwise valid
+            primary target.
+        patient: Unused callback argument kept for dataset API compatibility.
+        time: Unused callback argument kept for dataset API compatibility.
+        target_classes: Output class order for the returned one-hot vectors.
+        percentage: Minimum fraction of the window a class must cover to be
+            considered active.
+        filters: Optional filter specifications applied before target
+            construction.
 
-        Supported filter modes:
-        - `"min"`: require at least `percentage` activity in `columns`
-        - `"max"`: require at most `percentage` activity in `columns`
+    Returns:
+        A dictionary containing ``target`` and optionally ``target_extra``, or
+        ``None`` when the window is filtered out or cannot be resolved
+        unambiguously.
 
-        Typical usage:
-        - Require at least 50% sleep:
-          `filters=[{"columns": ["n1", "n2", "n3", "rem"], "percentage": 0.5, "mode": "min"}]`
-        - Reject any artifact or movement:
-          `filters=[{"columns": ["artifact", "movement"], "percentage": 0.0, "mode": "max"}]`
-        - Reject wake-heavy windows:
-          `filters=[{"columns": ["wake"], "percentage": 0.5, "mode": "max"}]`
-
-    Returns
-    -------
-    dict | None
-        `{"target": onehot}` and optionally `{"target_extra": onehot}` on
-        success, otherwise `None`.
+    Notes:
+        Tests confirm the current fallback behavior: if exactly one target class
+        is absent from the input columns, that class may serve as the implicit
+        negative/default class.
     """
     if target is None:
         return None

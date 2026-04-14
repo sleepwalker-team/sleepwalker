@@ -1,3 +1,11 @@
+"""Inference CLI for exported Sleepwalker prediction packages.
+
+The script loads one or more ``.swmodel`` bundles, applies them to EDF files,
+and writes one wide one-hot prediction table per EDF file. Unit tests currently
+cover the prediction-frame reshaping helpers, but actual deployment workflows
+should still be treated as evolving lab-internal tooling.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -86,6 +94,22 @@ def _multilabel_probability_records(frame: pd.DataFrame, model_key: str, task_co
 
 
 def prediction_frame_to_probability_records(frame: pd.DataFrame, model_key: str, trainer) -> pd.DataFrame:
+    """Normalize trainer-specific prediction frames into long probability rows.
+
+    Args:
+        frame: Prediction DataFrame returned by a trainer.
+        model_key: Stable name assigned to the loaded model package.
+        trainer: Trainer object that determines whether the frame is interpreted
+            as multiclass or multitask output.
+
+    Returns:
+        A long-form DataFrame with columns ``time``, ``group``, ``label``, and
+        ``prob``.
+
+    Raises:
+        ValueError: If the trainer type is unsupported or required columns are
+            missing from the prediction frame.
+    """
     if hasattr(trainer, "task_config"):
         return _multilabel_probability_records(frame, model_key, trainer.task_config)
     if hasattr(trainer, "classes"):
@@ -96,6 +120,17 @@ def prediction_frame_to_probability_records(frame: pd.DataFrame, model_key: str,
 
 
 def probability_records_to_onehot(probability_records: pd.DataFrame) -> pd.DataFrame:
+    """Convert long probability rows into a wide winner-take-all table.
+
+    Args:
+        probability_records: Long-form probability rows produced by
+            :func:`prediction_frame_to_probability_records`.
+
+    Returns:
+        A time-indexed DataFrame with one column per ``group__label`` pair.
+        Duplicate ``time/group/label`` records are averaged first, matching the
+        behavior asserted in ``tests/test_predict.py``.
+    """
     if probability_records is None or len(probability_records) == 0:
         return pd.DataFrame()
 
@@ -119,6 +154,19 @@ def probability_records_to_onehot(probability_records: pd.DataFrame) -> pd.DataF
 
 
 def predict_edf(packages: list[tuple[str, object]], edf_path: str, batch_size: int, num_workers_dataset: int, num_workers_loader: int) -> pd.DataFrame:
+    """Run all loaded packages on one EDF file and merge their outputs.
+
+    Args:
+        packages: ``(model_key, PredictionPackage)`` pairs.
+        edf_path: EDF file to score.
+        batch_size: Inference batch size.
+        num_workers_dataset: Worker count used for dataset preparation.
+        num_workers_loader: Worker count used by the prediction dataloader.
+
+    Returns:
+        A wide one-hot prediction table, or an empty DataFrame when no package
+        produces predictions.
+    """
     probability_frames = []
     for model_key, package in packages:
         logger.info(f"Applying model '{model_key}' to {edf_path}")
@@ -160,6 +208,7 @@ def _write_dataframe(df: pd.DataFrame, output_path: Path, output_format: str) ->
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the prediction CLI."""
     parser = argparse.ArgumentParser(description="Run one or more exported Sleepwalker models on EDF files.")
     parser.add_argument("--models", nargs="+", required=True, help="One or more .swmodel files.")
     parser.add_argument("--edf-files", nargs="+", required=True, help="One or more EDF files to predict.")
@@ -173,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Load exported packages, predict EDF files, and write output tables."""
     args = build_parser().parse_args()
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)

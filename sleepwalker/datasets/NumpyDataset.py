@@ -1,3 +1,11 @@
+"""Cache-backed dataset for realized numpy exports.
+
+This dataset reads the directory format produced by
+``export_dataloader_to_numpy_dir`` and exposes it through a dataset-like API.
+Tests in ``tests/test_datasets.py`` and ``tests/test_deployment.py`` cover the
+current round-trip, memmap, and prediction-package export behavior.
+"""
+
 from __future__ import annotations
 
 import json
@@ -45,6 +53,14 @@ class NumpyDataset:
         cache_path: str | Path,
         in_memory: bool = True,
     ) -> None:
+        """Load a numpy cache directory as a dataset-like object.
+
+        Args:
+            cache_path: Directory containing ``meta.json`` and one or more
+                exported array files.
+            in_memory: Whether arrays should be fully loaded into memory.
+                ``False`` uses NumPy memmap mode where possible.
+        """
         self.cache_path = Path(cache_path)
         if not self.cache_path.exists():
             raise ValueError(f"Cache path does not exist: {self.cache_path}")
@@ -85,6 +101,7 @@ class NumpyDataset:
         self.all_patients = list(meta.get("all_patients", []))
 
     def load_array_shards(self, stem: str, mmap_mode: Optional[str], *, required: bool) -> Optional[list[np.ndarray]]:
+        """Load one array or a set of sharded arrays from the cache directory."""
         single_path = self.cache_path / f"{stem}.npy"
         if single_path.exists():
             return [np.load(single_path, mmap_mode=mmap_mode)]
@@ -98,6 +115,7 @@ class NumpyDataset:
         return None
 
     def resolve_index(self, idx: int) -> tuple[int, int]:
+        """Map a global row index to ``(shard_idx, local_idx)``."""
         shard_idx = int(np.searchsorted(self.cum_lengths, idx, side="right"))
         prev = 0 if shard_idx == 0 else int(self.cum_lengths[shard_idx - 1])
         return shard_idx, idx - prev
@@ -106,21 +124,32 @@ class NumpyDataset:
         return int(self.cum_lengths[-1])
 
     def has_extra_target(self) -> bool:
+        """Report whether the cache contains a secondary target array."""
         return self.target_extra_shards is not None
 
     def get_classes(self) -> list[str]:
+        """Return the cached class ordering."""
         return self.classes
 
     def get_timeseries_len(self) -> int:
+        """Return the number of timesteps per cached sample."""
         return int(self.data_shards[0].shape[1])
 
     def get_n_patients(self) -> int:
+        """Return the number of distinct patient identifiers in the cache."""
         return len(set(str(p) for shard in self.patient_shards for p in shard.tolist()))
 
     def get_input_channels(self) -> list[str]:
+        """Return the cached input channel names."""
         return list(self.input_channels)
 
     def to_unlabelled(self):
+        """Build an inference-time dataset template from cached metadata.
+
+        Returns:
+            An :class:`UnlabelledDataset` configured with the cache's signal
+            shape and timing metadata.
+        """
         return UnlabelledDataset(
             channels=self.channels,
             sample_frequency=self.sample_frequency,
@@ -152,6 +181,18 @@ class NumpyDataset:
         return self._to_tensor(arr)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Return one cached sample.
+
+        Args:
+            idx: Global sample index.
+
+        Returns:
+            A dictionary containing ``data``, ``patient``, ``time``, optional
+            targets, and any exported extra keys.
+
+        Raises:
+            IndexError: If ``idx`` is outside the dataset range.
+        """
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of range for dataset of length {len(self)}")
 

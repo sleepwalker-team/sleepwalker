@@ -1,3 +1,11 @@
+"""Loss and class-count helpers used by Sleepwalker trainers.
+
+This module contains a mix of generic weighting helpers and multitask-specific
+mask/count utilities used by `MulticlassTrainer` and `MultiLabelTrainer`.
+Tests in `tests/test_multilabel_trainer.py` cover the current conditioning and
+class-count behavior.
+"""
+
 from typing import Literal, Optional
 import numpy as np
 import torch
@@ -6,15 +14,16 @@ from sleepwalker.utils import logger
 
 
 def dice_loss(pred, target, weight = None, epsilon=1e-3):
-    """
-    Dice loss for multi-class targets.
+    """Compute a Dice-style loss for one-hot multiclass targets.
+
     Args:
-        pred (torch.Tensor): Logits of shape (B, C).
-        target (torch.Tensor): Class indices of shape (B,).
-        weight (torch.Tensor): Class weights of shape (C,).
-        epsilon (float): Small constant to avoid division by zero.
+        pred: Logits shaped `(B, C)`.
+        target: One-hot or probability-like targets shaped `(B, C)`.
+        weight: Optional per-class weights shaped `(C,)`.
+        epsilon: Small stabilizer to avoid division by zero.
+
     Returns:
-        torch.Tensor: Scalar Dice loss.
+        A scalar loss tensor.
     """
     pred = torch.softmax(pred, dim=1)  # (B, C)
     #target_onehot = torch.nn.functional.one_hot(target.long(), num_classes=pred.shape[1]).float()  # (B, C)
@@ -30,6 +39,17 @@ def dice_loss(pred, target, weight = None, epsilon=1e-3):
     return 1 - dice.mean()
 
 def class_weights_for_loss(user_weights: dict[str, float], class_distribution: dict[str, float], mode:Literal['inverse', 'inverse-log'] = "inverse") -> dict[str, float]:
+    """Derive effective class weights from observed class frequencies.
+
+    Args:
+        user_weights: Optional manual multipliers keyed by class name.
+        class_distribution: Observed class counts keyed by class name.
+        mode: Weighting strategy. Current code supports `"inverse"` and
+            `"inverse-log"`.
+
+    Returns:
+        A dictionary of effective class weights keyed by class name.
+    """
     new_weights = {}
 
     if mode == "inverse":
@@ -64,6 +84,24 @@ def build_multilabel_task_masks(
     condition_labels: Optional[list[str]] = None,
     conditioned_tasks: Optional[list[str]] = None,
 ):
+    """Build per-task sample masks for conditioned multitask training.
+
+    Args:
+        y: Integer multitask target tensor shaped `[B, n_tasks, max_steps]`.
+        task_config: Normalized task configuration.
+        condition_task: Optional task whose labels gate the conditioned tasks.
+        condition_labels: Labels within `condition_task` that activate the
+            conditioned tasks.
+        conditioned_tasks: Tasks to mask. Defaults to all tasks except the
+            condition task.
+
+    Returns:
+        A mapping from task name to boolean sample mask shaped `[B]`.
+
+    Raises:
+        ValueError: If task names or labels are invalid, or if the condition
+            task contains unresolved targets.
+    """
     task_specs = list(task_config.values())
     task_masks = {
         cfg["task"]: torch.ones(y.shape[0], dtype=torch.bool, device=y.device)
@@ -120,6 +158,23 @@ def estimate_multilabel_class_cnts(
     condition_labels: Optional[list[str]] = None,
     conditioned_tasks: Optional[list[str]] = None,
 ):
+    """Estimate per-task class counts from a multitask dataloader.
+
+    Args:
+        loader: Dataloader producing integer multitask targets.
+        task_config: Normalized task configuration.
+        condition_task: Optional task used to gate conditioned tasks.
+        condition_labels: Activating labels for `condition_task`.
+        conditioned_tasks: Tasks whose samples should be masked by the
+            condition task.
+
+    Returns:
+        Nested dictionaries of class counts keyed as `task -> label -> count`.
+
+    Notes:
+        Tests confirm that the current implementation respects conditioning
+        masks while counting conditioned tasks.
+    """
     class_cnts = {
         cfg["task"]: torch.zeros(len(cfg["labels"]), dtype=torch.float64)
         for cfg in task_config.values()

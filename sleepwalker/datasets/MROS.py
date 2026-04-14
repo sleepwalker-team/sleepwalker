@@ -1,3 +1,5 @@
+"""MROS dataset adapter for NSRR and Profusion XML sidecars."""
+
 import os
 
 import pandas as pd
@@ -6,6 +8,7 @@ from sleepwalker.datasets.utils import read_nsrr, read_profusion
 from pathlib import Path
 
 def read_xml(fpath, annotator, start_date):
+    """Load one MROS XML annotation file into the common event-table format."""
     name = Path(fpath).name.split(".edf")[0]
     subset = Path(fpath).parent.name
     repo_folder = fpath.split("edfs")[0]
@@ -122,7 +125,14 @@ class MROS(BaseDataset):
             ignore_patients_with_partial_events = False,
             **kwargs
         ): 
-        
+        """Configure the MROS adapter.
+
+        Args:
+            annotator: Primary annotation source to read.
+            ignore_patients_with_partial_events: Whether to reject patients that
+                do not cover each mapped label at least once.
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         if annotator not in ["nsrr", "profusion"]:
             raise ValueError(f"Unknown value for annotator given. Received {annotator}, but expected {{nsrr, profusion}}")
         else:
@@ -132,9 +142,11 @@ class MROS(BaseDataset):
         super().__init__(**kwargs)
 
     def has_extra_target(self):
+        """Return whether the alternate annotation source is available."""
         return True
 
     def get_extra_event_df(self, fpath, start_date):
+        """Load the alternate annotator XML as ``target_extra``."""
         if self.annotator == "profusion":
             df = read_xml(fpath, "nsrr", start_date)
         else:
@@ -143,6 +155,7 @@ class MROS(BaseDataset):
         return df 
 
     def get_event_df(self, fpath, start_date):
+        """Load the primary MROS annotation source for one EDF file."""
         df = read_xml(fpath, self.annotator, start_date)
 
         if self.ignore_patients_with_partial_events and len(self.event_mapping) > 0:

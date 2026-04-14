@@ -1,3 +1,5 @@
+"""SHHS dataset adapter for NSRR and Profusion XML sidecars."""
+
 import os
 
 import pandas as pd
@@ -5,6 +7,7 @@ from sleepwalker.datasets.Basedataset import BaseDataset
 from sleepwalker.datasets.utils import read_nsrr, read_profusion
 
 def read_xml(fpath, annotator, start_date):
+    """Load one SHHS XML annotation file into the common event-table format."""
     name = os.path.basename(fpath).split(".edf")[0]
     subset = name.split("-")[0]
 
@@ -27,12 +30,21 @@ def read_xml(fpath, annotator, start_date):
     return xml_df
 
 class SHHS(BaseDataset):
+    """Read SHHS EDF files together with NSRR or Profusion XML annotations."""
+
     def __init__(self, 
             annotator = "nsrr",
             ignore_patients_with_partial_events = False,
             **kwargs
         ): 
-        
+        """Configure the SHHS adapter.
+
+        Args:
+            annotator: Primary annotation source to read.
+            ignore_patients_with_partial_events: Whether to reject patients that
+                do not cover each mapped label at least once.
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         if annotator not in ["nsrr", "profusion"]:
             raise ValueError(f"Unknown value for annotator given. Received {annotator}, but expected {{nsrr, profusion}}")
         else:
@@ -42,9 +54,11 @@ class SHHS(BaseDataset):
         super().__init__(**kwargs)
 
     def has_extra_target(self):
+        """Return whether the alternate annotation source is available."""
         return True
 
     def get_extra_event_df(self, fpath, start_date):
+        """Load the alternate annotator XML as ``target_extra``."""
         if self.annotator == "profusion":
             df = read_xml(fpath, "nsrr", start_date)
         else:
@@ -53,6 +67,7 @@ class SHHS(BaseDataset):
         return df 
 
     def get_event_df(self, fpath, start_date):
+        """Load the primary SHHS annotation source for one EDF file."""
         df = read_xml(fpath, self.annotator, start_date)
 
         if self.ignore_patients_with_partial_events and len(self.event_mapping) > 0:

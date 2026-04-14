@@ -1,3 +1,11 @@
+"""ABC dataset adapter for NSRR and Profusion event sidecars.
+
+The module reads EDF recordings together with XML annotations stored in parallel
+``annotations-events-*`` folders. Current training scripts use it in the
+sleep-staging workflow and may also compare NSRR and Profusion variants through
+the adapter's extra-target support.
+"""
+
 import os
 
 import pandas as pd
@@ -7,6 +15,7 @@ from sleepwalker.datasets.utils import read_nsrr, read_profusion
 from pathlib import Path
 
 def read_xml(fpath, annotator, start_date):
+    """Load one ABC XML annotation file into the common event-table format."""
     name = Path(fpath).name.split(".edf")[0]
     subset = Path(fpath).parent.name
     repo_folder = fpath.split("edfs")[0]
@@ -115,7 +124,15 @@ class ABC(BaseDataset):
             ignore_patients_with_partial_events = False,
             **kwargs
         ): 
-        
+        """Configure the ABC dataset adapter.
+
+        Args:
+            annotator: Which XML annotation variant to expose as the primary
+                target.
+            ignore_patients_with_partial_events: Whether to reject patients that
+                do not cover every mapped label at least once.
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         if annotator not in ["nsrr", "profusion"]:
             raise ValueError(f"Unknown value for annotator given. Received {annotator}, but expected {{nsrr, profusion}}")
         else:
@@ -125,9 +142,11 @@ class ABC(BaseDataset):
         super().__init__(**kwargs)
 
     def has_extra_target(self):
+        """Return whether the alternate annotator is exposed as extra target."""
         return True
 
     def get_extra_event_df(self, fpath, start_date):
+        """Load the alternate annotation source as ``target_extra``."""
         if self.annotator == "profusion":
             df = read_xml(fpath, "nsrr", start_date)
         else:
@@ -136,6 +155,7 @@ class ABC(BaseDataset):
         return df 
 
     def get_event_df(self, fpath, start_date):
+        """Load the primary annotation source for one ABC recording."""
         df = read_xml(fpath, self.annotator, start_date)
 
         if self.ignore_patients_with_partial_events and len(self.event_mapping) > 0:

@@ -1,3 +1,14 @@
+"""Shared trainer lifecycle for Sleepwalker experiments.
+
+This module provides the common mechanics used by concrete trainers: optional
+preprocessor warmup, repeated-window handling, prediction helpers, checkpoint
+creation, and the fit/test loop that higher-level scripts call through
+``sleepwalker.trainer.Run``.
+
+Concrete task logic lives in subclasses such as
+``MulticlassTrainer`` and ``MultiLabelTrainer``.
+"""
+
 import os
 import shutil
 import tempfile
@@ -17,6 +28,13 @@ from sleepwalker.utils import logger
 
 
 class BaseTrainer(ABC):
+    """Abstract base class for model training and inference helpers.
+
+    Subclasses are expected to implement epoch execution and prediction-frame
+    formatting, while this base class handles loader wrapping, optional
+    preprocessor warmup, checkpointing, and convenience prediction methods.
+    """
+
     def __init__(
         self,
         epochs: int,
@@ -42,6 +60,15 @@ class BaseTrainer(ABC):
         self.n_repeat_test = n_repeat_test
 
     def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply per-sample augmentation transforms to a batch tensor.
+
+        Args:
+            x: Input tensor shaped ``[B, T, C]``.
+
+        Returns:
+            A tensor with the same shape and dtype after sequentially applying
+            the configured ``train_transform`` callables.
+        """
         if self.train_transform is None or len(self.train_transform) == 0:
             return x
 
@@ -55,6 +82,17 @@ class BaseTrainer(ABC):
         return torch.stack(out, dim=0)
 
     def warmup_preprocessors(self, model, data_loader, device: str = "cuda"):
+        """Warm up model preprocessors that need streaming statistics.
+
+        Args:
+            model: Model instance that may expose ``preprocessors`` or a custom
+                ``_warmup_preprocessors`` hook.
+            data_loader: Loader that yields batches with a ``data`` field.
+            device: Device used while warming preprocessors.
+
+        Returns:
+            The warmed model. The object is mutated in place.
+        """
         if hasattr(model, "_warmup_preprocessors"):
             return model._warmup_preprocessors(data_loader, device)
 
@@ -80,6 +118,12 @@ class BaseTrainer(ABC):
         return model
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
+        """Run trainer-specific warmup before optimization starts.
+
+        Notes:
+            The base implementation is a no-op. Subclasses use this hook for
+            class-count estimation, loss reweighting, and related setup.
+        """
         return
 
     def _wrap_loader_with_repeats(self, loader, n_repeat: int, shuffle_default: bool):
@@ -117,6 +161,7 @@ class BaseTrainer(ABC):
             sampler.set_epoch(epoch)
 
     def test(self, model, test_loader):
+        """Run evaluation on one loader using the trainer's test repeat setup."""
         test_loader = self._wrap_loader_with_repeats(test_loader, self.n_repeat_test, shuffle_default=False)
         model.eval()
         with torch.inference_mode():
@@ -167,12 +212,29 @@ class BaseTrainer(ABC):
         pass
 
     def predict_window(self, model, batch, n_repeat: int = 1) -> pd.DataFrame:
+        """Run inference for one already-collated batch.
+
+        Args:
+            model: Model instance to evaluate.
+            batch: Collated batch dictionary containing at least ``data``.
+            n_repeat: Number of repeated views per logical sample.
+
+        Returns:
+            A prediction DataFrame produced by the subclass-specific
+            ``_prediction_frame`` implementation.
+        """
         model.eval()
         with torch.inference_mode():
             outputs, collapsed_batch = self._predict_model_outputs(model, batch, n_repeat=n_repeat)
             return self._prediction_frame(collapsed_batch, outputs)
 
     def predict_loader(self, model, loader) -> pd.DataFrame:
+        """Run inference for all batches in a loader.
+
+        Returns:
+            A concatenated prediction DataFrame. An empty DataFrame is returned
+            when no batch produces predictions.
+        """
         loader = self._wrap_loader_with_repeats(loader, self.n_repeat_test, shuffle_default=False)
         frames = []
         model = model.to(self.device)
@@ -195,6 +257,23 @@ class BaseTrainer(ABC):
         num_workers_loader: int = 0,
         collate_fn=None,
     ) -> pd.DataFrame:
+        """Predict one EDF file using a clone of an unlabelled dataset template.
+
+        Args:
+            model: Model instance to evaluate.
+            dataset_template: Dataset object implementing ``clone()`` and
+                ``initialize(...)``.
+            edf_path: EDF file to score.
+            batch_size: Inference batch size.
+            num_workers_dataset: Worker count used while initializing the
+                temporary dataset.
+            num_workers_loader: Dataloader worker count.
+            collate_fn: Optional batch collator. Defaults to
+                :func:`sleepwalker.datasets.Basedataset.batch_collate`.
+
+        Returns:
+            A prediction DataFrame assembled by :meth:`predict_loader`.
+        """
         if not hasattr(dataset_template, "clone"):
             raise ValueError(
                 f"Prediction dataset of type {type(dataset_template).__name__} does not implement clone()."
@@ -213,6 +292,18 @@ class BaseTrainer(ABC):
         return self.predict_loader(model, loader)
 
     def fit(self, model, train_loader, val_loader=None):
+        """Train a model and optionally track validation checkpoints.
+
+        Args:
+            model: Model instance to optimize.
+            train_loader: Training dataloader.
+            val_loader: Optional validation dataloader.
+
+        Returns:
+            A dictionary containing at least ``losses`` and ``outputs``. When
+            checkpointing occurs, the dictionary may also contain
+            ``checkpoint`` and ``best_model``.
+        """
         train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)
         if val_loader is not None:
             val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)

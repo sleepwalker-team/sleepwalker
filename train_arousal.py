@@ -43,13 +43,12 @@ N_SAMPLES = 250_000
 NUM_WORKERS_DATASET = 16
 NUM_WORKERS_DATALOADER = 16
 SAMPLE_FREQUENCY = 100
-TOTAL_INPUT = "10s"
-TARGET_RESOLUTION = "10s"
-STRIDE = "1s"
+TOTAL_INPUT = "120s"
+TARGET_RESOLUTION = "1s" #TODO 0.5s
+STRIDE = "1s" #TODO 0.5s
 SLEEP_PERCENTAGE = 0.5
 IMPEDANCE_CUTOFF_OHM = 20_000.0
 TARGET_CLASSES = ["no_arousal", "arousal"]
-SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
 EEG_GROUP_CHANNELS = ["C3-M2", "C4-M1", "E1-M2", "E2-M1"]
 EEG_QUALITY_CHANNELS = {
     "C3-M2": "C3 Impedanz",
@@ -60,10 +59,6 @@ EEG_QUALITY_CHANNELS = {
 
 EVENT_MAPPING = {
     "wach": "wake",
-    "n1": "n1",
-    "n2": "n2",
-    "n3": "n3",
-    "rem": "rem",
     "arousal": "arousal",
     "artefakt": "artifact",
     "rera": "arousal",
@@ -73,7 +68,6 @@ prepare_arousal_target = partial(
     prepare_multiclass_target,
     target_classes=TARGET_CLASSES,
     filters=[
-        {"columns": SLEEP_LABELS, "percentage": SLEEP_PERCENTAGE, "mode": "min"},
         {"columns": ["wake"], "percentage": 0.5, "mode": "max"},
         {"columns": ["artifact"], "percentage": 0.0, "mode": "max"},
     ],
@@ -204,20 +198,9 @@ def has_required_channels(edf_path: str, grouped: bool) -> bool:
 
 def list_patients(source_root: str, grouped: bool, dry_run: bool) -> list[str]:
     patients = [
-        patient
-        for patient in get_edf_files_in_repo(source_root, recursive=True)
-        if not is_pap_patient(patient) and has_required_channels(patient, grouped)
+        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(patient) and has_required_channels(patient, grouped)
     ]
     return patients[:2] if dry_run else patients
-
-
-def load_split_dataset(
-    patients: list[str],
-    grouped: bool,
-    impedance_cutoff_ohm: float,
-):
-    return build_dataset(patients, grouped, impedance_cutoff_ohm)
-
 
 def build_model_and_trainer(train_dataset):
     eeg_channels = [channel for channel in ["EEG", "C3-M2"] if channel in train_dataset.get_input_channels()]
@@ -232,15 +215,16 @@ def build_model_and_trainer(train_dataset):
         n_channels=len(aux_channels),
         classes=None,
         sampling_frequency=SAMPLE_FREQUENCY,
-        channel=[16, 32, 64, 128],
-        maxpool=[10, 8, 6, 4],
-        kernel=[5, 5, 5, 5],
+        channel=[32, 64, 128],
+        maxpool=[8, 6, 4],
+        kernel=[5, 3, 3],
         norm="channel",
         mlp_size=64,
     )
     eeg_model = SleepTransformer(
         classes=None,
         n_channels=1,
+        epoch_seq_len=5
     )
     model = MultiModel(
         classes=TARGET_CLASSES,
@@ -259,7 +243,8 @@ def build_model_and_trainer(train_dataset):
         classes=TARGET_CLASSES,
         loss_function=torch.nn.functional.cross_entropy,
         save_every=10,
-        loss_mode="inverse",
+        # loss_mode="inverse",
+        balance_batches=True
     )
     return model, trainer
 
@@ -288,7 +273,7 @@ def main():
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
-        train_dataset = load_split_dataset(
+        train_dataset = build_dataset(
             train_patients,
             args.grouped,
             args.impedance_cutoff_ohm,
@@ -296,14 +281,14 @@ def main():
         logger.uncontext()
         if len(val_patients) > 0:
             logger.context("VAL")
-            val_dataset = load_split_dataset(
+            val_dataset = build_dataset(
                 val_patients,
                 args.grouped,
                 args.impedance_cutoff_ohm,
             )
             logger.uncontext()
         logger.context("TEST")
-        test_dataset = load_split_dataset(
+        test_dataset = build_dataset(
             test_patients,
             args.grouped,
             args.impedance_cutoff_ohm,
@@ -326,7 +311,7 @@ def main():
             val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
-            n_samples=1_000 if args.dry else N_SAMPLES,
+            n_samples=N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
             test_repeats=[1],
             use_energy_tracker=False,

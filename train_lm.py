@@ -18,15 +18,15 @@ from torch.utils.data import DataLoader, RandomSampler
 
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
-from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo, random_split
+from sleepwalker.datasets.NumpyDataset import NumpyDataset
+from sleepwalker.datasets.utils import ActivePatientSampler, export_batch_collate, get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.filtering import trim_wake
 from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
-from sleepwalker.utils import logger, suppress_stdout_logging
+from sleepwalker.utils import logger
 
 torch.set_num_threads(2)
 torch.set_num_interop_threads(1)
@@ -48,6 +48,7 @@ SLEEP_PERCENTAGE = 0.5
 PATIENT_FILTER_QUANTILE = 0.05
 TARGET_CLASSES = ["lm", "no lm"]
 SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
+TRAIN_PATIENTS_PER_EPOCH: int | None = None
 
 EVENT_MAPPING = {
     "wach": "wake",
@@ -69,7 +70,7 @@ prepare_lm_target = partial(
     target_classes=TARGET_CLASSES,
     filters=[
         {"columns": SLEEP_LABELS, "percentage": SLEEP_PERCENTAGE, "mode": "min"},
-        {"columns": ["artifact", "movement"], "percentage": 0.0, "mode": "max"},
+        #{"columns": ["artifact", "movement"], "percentage": 0.0, "mode": "max"},
     ],
 )
 
@@ -89,7 +90,6 @@ def build_channels():
         #ChannelConfig(name="Activity", normalizer=None, group=None),
     ]
 
-
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
     trimmed = trim_wake(data_df, label_df, label_extra_df)
     if trimmed is None:
@@ -97,14 +97,13 @@ def prepare_patient(data_df, label_df, label_extra_df, patient=None):
     label_df, label_extra_df = trimmed
     return data_df, label_df, label_extra_df
 
-
 def prepare_sample(data, quality_data=None, target=None, target_extra=None, patient=None, time=None):
     if float(data.isna().mean().mean()) > 0.05:
         return None
 
-    for col in ["Left Leg", "Right Leg"]:
-        if col in data.columns and float(data[col].std()) < 1e-3:
-            return None
+    # for col in ["Left Leg", "Right Leg"]:
+    #     if col in data.columns and float(data[col].std()) < 1e-3:
+    #         return None
 
     item = {
         "data": torch.from_numpy(data.values).float(),
@@ -115,7 +114,6 @@ def prepare_sample(data, quality_data=None, target=None, target_extra=None, pati
     if target_extra is not None:
         item["target_extra"] = target_extra
     return item
-
 
 def create_dataset():
     return Ruhrlandklinik(
@@ -129,6 +127,7 @@ def create_dataset():
         total_input=TOTAL_INPUT,
         target_resolution=TARGET_RESOLUTION,
     )
+
 
 def summarize_patient_lm_duration(patient, data_df, label_df, label_extra_df):
     if label_df is None or len(label_df) == 0:
@@ -144,6 +143,7 @@ def summarize_patient_lm_duration(patient, data_df, label_df, label_extra_df):
         "patient": patient,
         "total_lm_seconds": total_lm_seconds,
     }
+
 
 def apply_patient_filters(patients: list[str]) -> list[str]:
     dataset = create_dataset()
@@ -172,13 +172,23 @@ def load_split_dataset(
     patients: list[str],
     enable_cache: bool,
     n_samples: int | None = None,
+    n_patients_per_epoch: int | None = None,
     cache_path: str | None = None,
 ):
     if enable_cache:
         if cache_path is None:
             raise ValueError("cache_path must be provided when enable_cache is set.")
         dataset = build_dataset(patients)
-        sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
+        # dataset.online_retry_scope = "patient" if n_patients_per_epoch is not None else "global"
+        if n_patients_per_epoch is not None:
+            sampler = ActivePatientSampler(
+                dataset,
+                n_patients_per_epoch=n_patients_per_epoch,
+                num_samples=n_samples,
+                shuffle=True,
+            )
+        else:
+            sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
         export_loader = DataLoader(
             dataset,
             batch_size=BATCH_SIZE,
@@ -195,7 +205,9 @@ def load_split_dataset(
             in_memory=False,
         )
 
-    return build_dataset(patients)
+    dataset = build_dataset(patients)
+    # dataset.online_retry_scope = "global"
+    return dataset
 
 
 def build_model_and_trainer(train_dataset):
@@ -231,6 +243,12 @@ def main():
     parser.add_argument("--enable-cache", action="store_true", help="Load or build numpy-backed cached splits.")
     parser.add_argument("--cache-path", default=os.path.join("cache", "train_lm"), help="Base directory for train/test caches.")
     parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
+    parser.add_argument(
+        "--train-patients-per-epoch",
+        type=int,
+        default=TRAIN_PATIENTS_PER_EPOCH,
+        help="Restrict each live training epoch to this many patients. Cache-backed training ignores this at runtime.",
+    )
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
@@ -258,6 +276,7 @@ def main():
         train_patients,
         args.enable_cache,
         N_SAMPLES,
+        args.train_patients_per_epoch,
         train_cache_path,
     )
     logger.uncontext()
@@ -267,6 +286,7 @@ def main():
             val_patients,
             args.enable_cache,
             N_SAMPLES,
+            None,
             val_cache_path,
         )
         logger.uncontext()
@@ -275,11 +295,27 @@ def main():
         test_patients,
         False, #args.enable_cache,
         None,
+        None,
         test_cache_path,
     )
     logger.uncontext()
 
     model, trainer = build_model_and_trainer(train_dataset)
+    train_n_samples = N_SAMPLES
+    train_patients_per_epoch = args.train_patients_per_epoch
+    if isinstance(train_dataset, NumpyDataset):
+        if train_n_samples is not None:
+            logger.warning("Cache-backed training ignores RunCfg.n_samples; the cached export already defines the sampled training set.")
+        if train_patients_per_epoch is not None:
+            logger.warning(
+                "Cache-backed training ignores RunCfg.train_patients_per_epoch; the cached export already defines the patient subset."
+            )
+        if trainer.balance_batches:
+            logger.warning("Disabling balance_batches for cache-backed training.")
+            trainer.balance_batches = False
+        train_n_samples = None
+        train_patients_per_epoch = None
+
     experiment_name = f"{EXPERIMENT_NAME}" 
     if args.dry:
         logger.info("Performing dry run to test pipeline!")
@@ -295,12 +331,13 @@ def main():
             val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
-            n_samples=N_SAMPLES,
+            n_samples=train_n_samples,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
             test_repeats=[1],
             use_energy_tracker=False,
             tags={"model": "UTime"},
             collate_fn=batch_collate,
+            train_patients_per_epoch=train_patients_per_epoch,
         )
     )
 

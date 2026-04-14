@@ -427,6 +427,7 @@ class BaseDataset(Dataset, ABC):
         self.prepare_patient_callback = prepare_patient
         self.all_patients: list[str | os.PathLike] = []
         self.online_max_tries = online_max_tries
+        # self.online_retry_scope = "global"
         self.initialized = False
         self.force_one_day = force_one_day
         self.rereference = rereference
@@ -477,6 +478,9 @@ class BaseDataset(Dataset, ABC):
 
     def get_n_patients(self) -> int:
         return len(self.edf_files)
+
+    def get_patient_index_spans(self) -> list[tuple[int, int]]:
+        return list(zip(self.lower_bounds, self.upper_bounds))
 
     def get_input_channels(self) -> list[str]:
         return list(self.channel_groups.keys())
@@ -847,7 +851,11 @@ class BaseDataset(Dataset, ABC):
                     break
                 
                 cnt += 1
-                idx = np.random.choice(range(len(self)))
+                idx = int(np.random.randint(self.lower_bounds[pidx], self.upper_bounds[pidx]))
+                #idx = np.random.choice(range(len(self)))
+                # if self.online_retry_scope == "patient": # TODO maybe remove this
+                # else:
+                #     idx = np.random.choice(range(len(self)))
         
         if self.online_max_tries == 0 or cnt <= self.online_max_tries:
             return item

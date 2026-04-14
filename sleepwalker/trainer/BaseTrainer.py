@@ -111,6 +111,11 @@ class BaseTrainer(ABC):
             loader_kwargs["prefetch_factor"] = loader.prefetch_factor
         return DataLoader(**loader_kwargs)
 
+    def _set_loader_epoch(self, loader, epoch: int):
+        sampler = getattr(loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
     def test(self, model, test_loader):
         test_loader = self._wrap_loader_with_repeats(test_loader, self.n_repeat_test, shuffle_default=False)
         model.eval()
@@ -212,6 +217,7 @@ class BaseTrainer(ABC):
         if val_loader is not None:
             val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)
 
+        self._set_loader_epoch(train_loader, 0)
         logger.context("Warmup trainer")
         self.warmup_trainer(train_loader)
         logger.uncontext()
@@ -229,6 +235,7 @@ class BaseTrainer(ABC):
             logger.warning("early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
+        self._set_loader_epoch(train_loader, 0)
         logger.context("Warmup preprocessors")
         self.warmup_preprocessors(model, train_loader, self.warmup_device)
         logger.uncontext()
@@ -245,6 +252,7 @@ class BaseTrainer(ABC):
         self.last_folder = None
 
         for epoch in range(self.epochs):
+            self._set_loader_epoch(train_loader, epoch)
             model.train()
             loss, output = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
             outputs.append({"train": output})

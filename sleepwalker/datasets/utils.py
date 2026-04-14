@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from functools import partial
 from pathlib import Path
@@ -35,6 +36,112 @@ class RepeatSampler(Sampler[int]):
 
     def __len__(self):
         return len(self.sampler) * self.n_repeat
+
+    def set_epoch(self, epoch: int):
+        if hasattr(self.sampler, "set_epoch"):
+            self.sampler.set_epoch(epoch)
+
+
+class ActivePatientSampler(Sampler[int]):
+    def __init__(
+        self,
+        dataset,
+        n_patients_per_epoch: int,
+        num_samples: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0,
+    ):
+        if n_patients_per_epoch <= 0:
+            raise ValueError("n_patients_per_epoch must be positive.")
+        if num_samples is not None and num_samples <= 0:
+            raise ValueError("num_samples must be positive when provided.")
+        if not hasattr(dataset, "get_patient_index_spans"):
+            raise ValueError(
+                f"Dataset of type {type(dataset).__name__} does not implement get_patient_index_spans()."
+            )
+
+        self.dataset = dataset
+        self.n_patients_per_epoch = int(n_patients_per_epoch)
+        self.num_samples = None if num_samples is None else int(num_samples)
+        self.shuffle = shuffle
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def _get_patient_spans(self) -> list[tuple[int, int]]:
+        spans = list(self.dataset.get_patient_index_spans())
+        normalized = []
+        for lower, upper in spans:
+            lower = int(lower)
+            upper = int(upper)
+            if upper < lower:
+                raise ValueError(f"Invalid patient span ({lower}, {upper}).")
+            if upper == lower:
+                continue
+            normalized.append((lower, upper))
+        return normalized
+
+    def _get_active_patient_ids(self, spans: list[tuple[int, int]]) -> np.ndarray:
+        n_patients = len(spans)
+        if n_patients == 0:
+            return np.empty(0, dtype=int)
+
+        active_cnt = min(self.n_patients_per_epoch, n_patients)
+        if not self.shuffle or active_cnt == n_patients:
+            return np.arange(active_cnt, dtype=int)
+
+        n_groups = math.ceil(n_patients / active_cnt)
+        cycle = self.epoch // n_groups
+        group_idx = self.epoch % n_groups
+        rng = np.random.default_rng(self.seed + cycle)
+        order = rng.permutation(n_patients)
+        start = group_idx * active_cnt
+        stop = min(start + active_cnt, n_patients)
+        return order[start:stop]
+
+    def _get_active_indices(self) -> np.ndarray:
+        spans = self._get_patient_spans()
+        patient_ids = self._get_active_patient_ids(spans)
+        if len(patient_ids) == 0:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(
+            [np.arange(spans[pidx][0], spans[pidx][1], dtype=np.int64) for pidx in patient_ids]
+        )
+
+    def __iter__(self):
+        active_indices = self._get_active_indices()
+        if len(active_indices) == 0:
+            return iter(())
+
+        if self.num_samples is None:
+            if not self.shuffle:
+                return iter(active_indices.tolist())
+
+            rng = np.random.default_rng(self.seed + self.epoch)
+            return iter(rng.permutation(active_indices).tolist())
+
+        if not self.shuffle:
+            n_repeats, remainder = divmod(self.num_samples, len(active_indices))
+            repeated = np.tile(active_indices, n_repeats)
+            if remainder > 0:
+                repeated = np.concatenate([repeated, active_indices[:remainder]])
+            return iter(repeated.tolist())
+
+        rng = np.random.default_rng(self.seed + self.epoch)
+        remaining = self.num_samples
+        chunks = []
+        while remaining > 0:
+            permuted = rng.permutation(active_indices)
+            chunks.append(permuted[: min(remaining, len(permuted))])
+            remaining -= min(remaining, len(permuted))
+        return iter(np.concatenate(chunks).tolist())
+
+    def __len__(self):
+        if self.num_samples is not None:
+            return self.num_samples
+        return int(len(self._get_active_indices()))
 
 def summarize_dataset(
     dataset_clazz,

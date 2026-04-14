@@ -28,9 +28,10 @@ from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
-from sleepwalker.datasets.utils import RepeatSampler, export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
+from sleepwalker.datasets.utils import ActivePatientSampler, RepeatSampler, export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
+from sleepwalker.trainer.Run import build_loader
 
 from dotenv import load_dotenv
 
@@ -202,15 +203,247 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
 
 def test_repeat_sampler_repeats_indices():
     class FixedSampler:
+        def __init__(self):
+            self.seen_epoch = None
+
         def __iter__(self):
             return iter([0, 2, 4])
 
         def __len__(self):
             return 3
 
-    sampler = RepeatSampler(FixedSampler(), n_repeat=3)
+        def set_epoch(self, epoch):
+            self.seen_epoch = epoch
+
+    fixed = FixedSampler()
+    sampler = RepeatSampler(fixed, n_repeat=3)
+    sampler.set_epoch(7)
+
+    assert fixed.seen_epoch == 7
 
     assert list(iter(sampler)) == [0, 0, 0, 2, 2, 2, 4, 4, 4]
+
+
+def test_active_patient_sampler_limits_to_first_patient_spans_without_shuffle():
+    class SpanDataset:
+        def get_patient_index_spans(self):
+            return [(0, 2), (2, 5), (5, 9)]
+
+    sampler = ActivePatientSampler(
+        SpanDataset(),
+        n_patients_per_epoch=2,
+        shuffle=False,
+    )
+
+    assert len(sampler) == 5
+    assert list(iter(sampler)) == [0, 1, 2, 3, 4]
+
+
+def test_active_patient_sampler_combines_patient_limit_with_num_samples():
+    class SpanDataset:
+        def get_patient_index_spans(self):
+            return [(0, 2), (2, 5), (5, 9)]
+
+    sampler = ActivePatientSampler(
+        SpanDataset(),
+        n_patients_per_epoch=2,
+        num_samples=8,
+        shuffle=False,
+    )
+
+    assert len(sampler) == 8
+    assert list(iter(sampler)) == [0, 1, 2, 3, 4, 0, 1, 2]
+
+
+def test_active_patient_sampler_swaps_patients_across_epochs():
+    class SpanDataset:
+        def get_patient_index_spans(self):
+            return [(0, 2), (2, 4), (4, 6), (6, 8)]
+
+    sampler = ActivePatientSampler(
+        SpanDataset(),
+        n_patients_per_epoch=2,
+        shuffle=True,
+        seed=123,
+    )
+    epoch0 = set(iter(sampler))
+    sampler.set_epoch(1)
+    epoch1 = set(iter(sampler))
+
+    assert epoch0 != epoch1
+    assert len(epoch0) == 4
+    assert len(epoch1) == 4
+    assert epoch0.isdisjoint(epoch1)
+
+
+def test_build_loader_uses_active_patient_sampler_for_training_limit():
+    class SpanDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 9
+
+        def __getitem__(self, idx):
+            return idx
+
+        def get_patient_index_spans(self):
+            return [(0, 2), (2, 5), (5, 9)]
+
+    loader = build_loader(
+        SpanDataset(),
+        batch_size=2,
+        num_workers=0,
+        n_samples=8,
+        collate_fn=lambda batch: batch,
+        shuffle_default=True,
+        train_patients_per_epoch=2,
+    )
+
+    assert isinstance(loader.sampler, ActivePatientSampler)
+    assert len(loader.sampler) == 8
+
+
+def test_multi_dataset_flattens_patient_spans():
+    d1 = DummyDataset(
+        channels=[ChannelConfig(name="EEG")],
+        sample_frequency=1,
+        total_input="30s",
+        target_resolution="30s",
+        event_mapping={},
+        remove_unmapped_events=False,
+    )
+    d1.initialized = True
+    d1.classes = []
+    d1.edf_files = [
+        EDFFile(channels=["EEG"], path="a.edf", start_date=pd.Timestamp("2024-01-01"), length=2),
+        EDFFile(channels=["EEG"], path="b.edf", start_date=pd.Timestamp("2024-01-01"), length=3),
+    ]
+    d1.lower_bounds = [0, 2]
+    d1.upper_bounds = [2, 5]
+
+    d2 = DummyDataset(
+        channels=[ChannelConfig(name="EEG")],
+        sample_frequency=1,
+        total_input="30s",
+        target_resolution="30s",
+        event_mapping={},
+        remove_unmapped_events=False,
+    )
+    d2.initialized = True
+    d2.classes = []
+    d2.edf_files = [
+        EDFFile(channels=["EEG"], path="c.edf", start_date=pd.Timestamp("2024-01-01"), length=4),
+    ]
+    d2.lower_bounds = [0]
+    d2.upper_bounds = [4]
+
+    merged = MultiDataset([d1, d2])
+
+    assert merged.get_patient_index_spans() == [(0, 2), (2, 5), (5, 9)]
+
+
+def test_basedataset_retry_stays_within_current_patient():
+    class RetryDataset(DummyDataset):
+        def __init__(self):
+            super().__init__(
+                channels=[ChannelConfig(name="EEG")],
+                sample_frequency=1,
+                total_input="30s",
+                target_resolution="30s",
+                event_mapping={},
+                remove_unmapped_events=False,
+                online_max_tries=3,
+            )
+            self.calls = []
+
+        def get_item(self, file, start_date):
+            self.calls.append(file.path)
+            if len(self.calls) == 1:
+                return None
+            return {"data": torch.zeros(30, 1), "target": torch.tensor([1.0]), "patient": file.path, "time": start_date}
+
+    dataset = RetryDataset()
+    dataset.edf_files = [
+        EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=2),
+        EDFFile(channels=["EEG"], path="p2.edf", start_date=pd.Timestamp("2024-01-01"), length=2),
+    ]
+    dataset.lower_bounds = [0, 2]
+    dataset.upper_bounds = [2, 4]
+    dataset.initialized = True
+    # dataset.online_retry_scope = "patient"
+
+    item = dataset[0]
+
+    assert item["patient"] == "p1.edf"
+    assert dataset.calls == ["p1.edf", "p1.edf"]
+
+
+def test_basedataset_retry_scope_can_stay_global():
+    class RetryDataset(DummyDataset):
+        def __init__(self):
+            super().__init__(
+                channels=[ChannelConfig(name="EEG")],
+                sample_frequency=1,
+                total_input="30s",
+                target_resolution="30s",
+                event_mapping={},
+                remove_unmapped_events=False,
+                online_max_tries=3,
+            )
+            self.calls = []
+
+        def get_item(self, file, start_date):
+            self.calls.append(file.path)
+            if len(self.calls) == 1:
+                return None
+            return {"data": torch.zeros(30, 1), "target": torch.tensor([1.0]), "patient": file.path, "time": start_date}
+
+    dataset = RetryDataset()
+    dataset.edf_files = [
+        EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+        EDFFile(channels=["EEG"], path="p2.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+    ]
+    dataset.lower_bounds = [0, 1]
+    dataset.upper_bounds = [1, 2]
+    dataset.initialized = True
+    # dataset.online_retry_scope = "global"
+
+    original_choice = np.random.choice
+    np.random.choice = lambda values: 1
+    try:
+        item = dataset[0]
+    finally:
+        np.random.choice = original_choice
+
+    assert item["patient"] == "p2.edf"
+    assert dataset.calls == ["p1.edf", "p2.edf"]
+
+
+def test_build_loader_sets_patient_retry_scope_for_active_patient_training():
+    class SpanDataset(torch.utils.data.Dataset):
+        def __init__(self):
+            pass
+            # self.online_retry_scope = "global"
+
+        def __len__(self):
+            return 9
+
+        def __getitem__(self, idx):
+            return idx
+
+        def get_patient_index_spans(self):
+            return [(0, 2), (2, 5), (5, 9)]
+
+    dataset = SpanDataset()
+    build_loader(
+        dataset,
+        batch_size=2,
+        num_workers=0,
+        n_samples=8,
+        collate_fn=lambda batch: batch,
+        shuffle_default=True,
+        train_patients_per_epoch=2,
+    )
+
+    # assert dataset.online_retry_scope == "patient"
 
 
 def test_grouped_multiclass_trainer_averages_repeats():

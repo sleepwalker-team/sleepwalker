@@ -163,6 +163,33 @@ class MultiLabelTrainer(BaseTrainer):
             else:
                 self.task_loss_functions[task] = loss_function
 
+    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
+        rows = []
+        batch_size = len(batch.get("time", []))
+        largest_resolution = pd.to_timedelta(self.largest_task_resolution)
+        for sample_idx in range(batch_size):
+            row = {
+                "patient": batch["patient"][sample_idx],
+                "time": batch["time"][sample_idx],
+            }
+            largest_start = pd.Timestamp(batch["time"][sample_idx]) - largest_resolution / 2
+            for task, cfg in self.task_config.items():
+                task_logits = outputs[task][sample_idx].detach().cpu()
+                task_probs = torch.softmax(task_logits, dim=-1)
+                task_pred_idx = task_probs.argmax(dim=-1)
+                task_resolution = pd.to_timedelta(cfg["target_resolution"])
+                for step_idx in range(cfg["n_steps"]):
+                    suffix = "" if cfg["n_steps"] == 1 else f"__step_{step_idx}"
+                    step_center = largest_start + step_idx * task_resolution + task_resolution / 2
+                    pred_idx = int(task_pred_idx[step_idx].item())
+                    row[f"{task}{suffix}__time"] = step_center
+                    row[f"{task}{suffix}__prediction_idx"] = pred_idx
+                    row[f"{task}{suffix}__prediction"] = cfg["labels"][pred_idx]
+                    for label_idx, label in enumerate(cfg["labels"]):
+                        row[f"{task}{suffix}__prob__{label}"] = float(task_probs[step_idx, label_idx].item())
+            rows.append(row)
+        return pd.DataFrame(rows)
+
     @staticmethod
     def normalize_task_config(task_config: dict[str, dict]):
         normalized = OrderedDict()

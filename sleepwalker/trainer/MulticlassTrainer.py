@@ -2,6 +2,7 @@ from functools import partial
 import random
 from typing import Callable, Optional
 import numpy as np
+import pandas as pd
 from sklearn.metrics import confusion_matrix
 import torch
 
@@ -94,7 +95,8 @@ class MulticlassTrainer(BaseTrainer):
         class_cnts = None
         if self.balance_batches or self.loss_mode != "regular":
             class_cnts = estimate_class_cnts(data_loader)
-
+            logger.info(f"Class counts are {class_cnts}")
+            
         if self.balance_batches and class_cnts is not None:
             current_datasets = dataset.datasets if hasattr(dataset, "datasets") else [dataset]
             can_balance_batches = True
@@ -131,6 +133,19 @@ class MulticlassTrainer(BaseTrainer):
             self.loss_function = partial(self.base_loss_function, weight=weights_torch)
         else:
             self.loss_function = self.base_loss_function
+
+    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
+        probabilities = torch.softmax(outputs.detach().cpu(), dim=1)
+        pred_idx = probabilities.argmax(dim=1)
+        frame = {
+            "patient": list(batch.get("patient", [None] * probabilities.shape[0])),
+            "time": list(batch.get("time", [None] * probabilities.shape[0])),
+            "prediction_idx": pred_idx.tolist(),
+            "prediction": [self.classes[idx] for idx in pred_idx.tolist()],
+        }
+        for class_idx, label in enumerate(self.classes):
+            frame[f"prob__{label}"] = probabilities[:, class_idx].tolist()
+        return pd.DataFrame(frame)
 
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  

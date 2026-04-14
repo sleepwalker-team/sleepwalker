@@ -6,6 +6,7 @@ import argparse
 import copy
 import inspect
 import os
+from functools import partial
 
 import pandas as pd
 import torch
@@ -48,7 +49,7 @@ from sleepwalker.trainer.NegativeGroupedChanelMulticlassTrainer import GradRever
 from sleepwalker.trainer.losses import dice_loss
 from sleepwalker.trainer.utils.filtering import filter_patients_by_sleep_time, trim_wake
 from sleepwalker.trainer.utils.splits import combine_datasets, split_patients_train_val_test
-from sleepwalker.trainer.utils.targets import build_multiclass_target
+from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
 # torch.set_num_threads(2)
@@ -540,29 +541,6 @@ def get_model_and_trainer(
         trainer = MulticlassTrainer(**trainer_kwargs)
 
     return model, trainer
-
-
-def prepare_multiclass_target(
-    target,
-    target_extra=None,
-    patient=None,
-    time=None,
-    percentage: float = 0.5,
-    target_classes=None,
-):
-    if target is None:
-        return None
-
-    if target_classes is not None:
-        target = target.reindex(columns=target_classes, fill_value=0)
-        if target_extra is not None:
-            target_extra = target_extra.reindex(columns=target_classes, fill_value=0)
-
-    return build_multiclass_target(
-        target=target,
-        target_extra=target_extra,
-        percentage=percentage,
-    )
 
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):

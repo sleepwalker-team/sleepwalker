@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler
 from torchinfo import summary
 
+from sleepwalker.deployment import export_prediction_package
 from sleepwalker.trainer.utils.disk import append_to_jsonl
 from sleepwalker.trainer.utils.splits import combine_datasets
 from sleepwalker.utils import logger
@@ -37,6 +38,10 @@ class RunCfg:
     use_energy_tracker: bool = False
     tags: dict[str, str] = field(default_factory=dict)
     collate_fn: Any = None
+    export_package_path: str | None = None
+    export_package_unlabelled_dataset: Any = None
+    export_package_model_card_md: str = ""
+    export_package_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -73,18 +78,26 @@ def build_loader(
     collate_fn,
     shuffle_default: bool,
 ):
-    sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
+    if n_samples is not None and len(dataset) > n_samples:
+        sampler = RandomSampler(dataset, num_samples=n_samples) 
+    else:
+        sampler = None
+        
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle_default and sampler is None,
+        "sampler": sampler,
+        "num_workers": num_workers,
+        "collate_fn": collate_fn,
+        "drop_last": False,
+        "pin_memory": True,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle_default and sampler is None,
-        sampler=sampler,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        drop_last=False,
-        persistent_workers=True,
-        prefetch_factor=2,
-        pin_memory=True,
+        **loader_kwargs,
     )
 
 
@@ -156,6 +169,25 @@ def run(cfg: RunCfg) -> RunResult:
         with torch.inference_mode():
             state_dict = torch.load(os.path.join(train_result["checkpoint"], "model.pt"), map_location="cpu")
             cfg.model.load_state_dict(state_dict)
+
+    if cfg.export_package_path is not None:
+        export_dataset = cfg.export_package_unlabelled_dataset
+        if export_dataset is None:
+            if len(cfg.train_datasets) == 1:
+                export_dataset = cfg.train_datasets[0]
+            else:
+                raise ValueError(
+                    "RunCfg.export_package_unlabelled_dataset must be provided when exporting a prediction package "
+                    "from multiple training datasets."
+                )
+        export_prediction_package(
+            cfg.export_package_path,
+            model=cfg.model,
+            trainer=cfg.trainer,
+            dataset=export_dataset,
+            model_card_md=cfg.export_package_model_card_md,
+            metadata=cfg.export_package_metadata,
+        )
 
     test_records: list[dict[str, Any]] = []
     for dataset_name, test_dataset in cfg.test_datasets:

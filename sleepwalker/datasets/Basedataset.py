@@ -362,13 +362,14 @@ class BaseDataset(Dataset, ABC):
     Build a multiclass target and reject low-sleep windows cheaply:
 
     ```python
-    def prepare_target(target, target_extra=None, patient=None, time=None):
-        if target is None:
-            return None
-        sleep_fraction = target[["n1", "n2", "n3", "rem"]].any(axis=1).mean()
-        if sleep_fraction < 0.5:
-            return None
-        return build_multiclass_target(target, target_extra)
+    from functools import partial
+    from sleepwalker.trainer.utils.targets import prepare_multiclass_target
+
+    prepare_target = partial(
+        prepare_multiclass_target,
+        target_classes=["wake", "n1", "n2", "n3", "rem"],
+        filters=[{"columns": ["n1", "n2", "n3", "rem"], "percentage": 0.5, "mode": "min"}],
+    )
     ```
 
     Convert signals to tensors and reject bad windows:
@@ -479,6 +480,22 @@ class BaseDataset(Dataset, ABC):
 
     def get_input_channels(self) -> list[str]:
         return list(self.channel_groups.keys())
+
+    def to_unlabelled(self):
+        from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+
+        return UnlabelledDataset(
+            channels=self.channels,
+            sample_frequency=self.sample_frequency,
+            resample_type=self.resample_type,
+            total_input=self.total_input,
+            stride=self.stride,
+            prepare_patient=self.prepare_patient_callback,
+            prepare_sample=self.prepare_sample_callback,
+            online_max_tries=self.online_max_tries,
+            force_one_day=self.force_one_day,
+            rereference=self.rereference,
+        )
 
     def __len__(self):
         return sum([f.length for f in self.edf_files])

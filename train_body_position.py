@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from functools import partial
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -11,7 +12,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
 os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
-import pandas as pd
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, RandomSampler
@@ -19,11 +19,12 @@ from torch.utils.data import DataLoader, RandomSampler
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo
+from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
+from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
 torch.set_num_threads(2)
@@ -36,9 +37,9 @@ EXPERIMENT_NAME = "body_position"
 BATCH_SIZE = 128
 EPOCHS = 100
 N_SAMPLES = 250_000
-NUM_WORKERS_DATASET = 16
-NUM_WORKERS_DATALOADER = 16
-SAMPLE_FREQUENCY = 75
+NUM_WORKERS_DATASET = 8
+NUM_WORKERS_DATALOADER = 8
+SAMPLE_FREQUENCY = 20
 TOTAL_INPUT = "30s"
 TARGET_RESOLUTION = "30s"
 STRIDE = "5s"
@@ -50,10 +51,14 @@ EVENT_MAPPING = {
     "rechts": "right",
     "bauchlage": "prone",
     "aufrecht": "upright",
-    "unbekannt": "unknown",
     "bewegung": "movement",
 }
 
+prepare_body_position_target = partial(
+    prepare_multiclass_target,
+    target_classes=TARGET_CLASSES,
+    filters=[{"columns": ["movement"], "percentage": 0.0, "mode": "max"}],
+)
 
 def build_channels():
     return [
@@ -77,47 +82,6 @@ def prepare_sample(data, quality_data=None, target=None, target_extra=None, pati
     if target_extra is not None:
         item["target_extra"] = target_extra
     return item
-
-
-def _merge_target_frames(target, target_extra, columns):
-    current = target.reindex(columns=columns, fill_value=0) if target is not None else None
-    extra = target_extra.reindex(columns=columns, fill_value=0) if target_extra is not None else None
-    if current is None and extra is None:
-        return None
-    if current is None:
-        return extra
-    if extra is None:
-        return current
-    return current.add(extra, fill_value=0)
-
-
-def prepare_body_position_target(target, target_extra=None, patient=None, time=None, percentage: float = 0.5):
-    if target is None:
-        return None
-
-    ignore_target = _merge_target_frames(target, target_extra, ["unknown", "movement"])
-    if ignore_target is not None and float(ignore_target.any(axis=1).mean()) > 0.0:
-        return None
-
-    position_target = _merge_target_frames(target, target_extra, TARGET_CLASSES)
-    if position_target is None:
-        return None
-
-    freq = pd.to_timedelta(position_target.index.freq).total_seconds()
-    threshold = len(position_target) * freq * percentage
-    durations = torch.tensor(position_target.sum().to_numpy() * freq, dtype=torch.float32)
-    active = durations >= threshold
-    if int(active.sum().item()) != 1:
-        return None
-
-    onehot = torch.zeros(len(TARGET_CLASSES), dtype=torch.float32)
-    onehot[int(active.nonzero(as_tuple=False).item())] = 1.0
-
-    item = {"target": onehot}
-    if target_extra is not None:
-        item["target_extra"] = onehot.clone()
-    return item
-
 
 def build_dataset(patients: list[str]):
     dataset = Ruhrlandklinik(
@@ -148,16 +112,14 @@ def list_patients(source_root: str, dry_run: bool) -> list[str]:
 
 
 def load_split_dataset(
-    source_root: str,
+    patients: list[str],
     enable_cache: bool,
-    dry_run: bool,
     n_samples: int | None = None,
     cache_path: str | None = None,
 ):
     if enable_cache:
         if cache_path is None:
             raise ValueError("cache_path must be provided when enable_cache is set.")
-        patients = list_patients(source_root, dry_run)
         dataset = build_dataset(patients)
         sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
         export_loader = DataLoader(
@@ -176,7 +138,6 @@ def load_split_dataset(
             in_memory=False,
         )
 
-    patients = list_patients(source_root, dry_run)
     return build_dataset(patients)
 
 
@@ -186,9 +147,9 @@ def build_model_and_trainer(train_dataset):
         n_channels=len(train_dataset.get_input_channels()),
         classes=TARGET_CLASSES,
         sampling_frequency=SAMPLE_FREQUENCY,
-        channel=[16, 32, 64, 128],
-        maxpool=[10, 8, 6, 4],
-        kernel=[5, 5, 3, 3],
+        channel=[32, 64, 128],
+        maxpool=[6, 4, 4],
+        kernel=[3, 3, 3],
         norm="channel",
         mlp_size=64,
     )
@@ -202,6 +163,7 @@ def build_model_and_trainer(train_dataset):
         loss_function=torch.nn.functional.cross_entropy,
         save_every=10,
         loss_mode="inverse",
+        early_stopping=5
     )
     return model, trainer
 
@@ -210,27 +172,44 @@ def main():
     parser = argparse.ArgumentParser(description="Train and evaluate a body-position model.")
     parser.add_argument("--enable-cache", action="store_true", help="Load or build numpy-backed cached splits.")
     parser.add_argument("--cache-path", default=os.path.join("cache", "train_body_position"), help="Base directory for train/test caches.")
+    parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
     train_cache_path = os.path.join(args.cache_path, "train")
+    val_cache_path = os.path.join(args.cache_path, "val")
     test_cache_path = os.path.join(args.cache_path, "test")
+    train_patients = list_patients(TRAIN_ROOT, args.dry)
+    test_patients = list_patients(TEST_ROOT, args.dry)
+
+    val_dataset = None
+    if args.val_frac is not None and args.val_frac > 0:
+        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac)
+    else:
+        val_patients = []
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
         train_dataset = load_split_dataset(
-            TRAIN_ROOT,
+            train_patients,
             args.enable_cache,
-            args.dry,
             1_000 if args.dry else N_SAMPLES,
             train_cache_path,
         )
         logger.uncontext()
+        if len(val_patients) > 0:
+            logger.context("VAL")
+            val_dataset = load_split_dataset(
+                val_patients,
+                args.enable_cache,
+                1_000 if args.dry else N_SAMPLES,
+                val_cache_path,
+            )
+            logger.uncontext()
         logger.context("TEST")
         test_dataset = load_split_dataset(
-            TEST_ROOT,
+            test_patients,
             args.enable_cache,
-            args.dry,
             None,
             test_cache_path,
         )
@@ -249,7 +228,7 @@ def main():
             model=model,
             trainer=trainer,
             train_datasets=[train_dataset],
-            val_datasets=[],
+            val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
             n_samples=1_000 if args.dry else N_SAMPLES,

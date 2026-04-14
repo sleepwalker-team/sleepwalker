@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from functools import partial
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -11,7 +12,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
 os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
-import pandas as pd
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, RandomSampler
@@ -19,16 +19,16 @@ from torch.utils.data import DataLoader, RandomSampler
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
-from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo
+from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.filtering import trim_wake
 from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
+from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
 torch.set_num_threads(2)
@@ -60,6 +60,12 @@ EVENT_MAPPING = {
     "rem": "rem",
     "entsättigung": "desaturation",
 }
+
+prepare_desaturation_target = partial(
+    prepare_multiclass_target,
+    target_classes=TARGET_CLASSES,
+    filters=[{"columns": SLEEP_LABELS, "percentage": SLEEP_PERCENTAGE, "mode": "min"}],
+)
 
 def build_channels():
     channels = [
@@ -100,35 +106,6 @@ def prepare_sample(data, quality_data=None, target=None, target_extra=None, pati
         item["target_extra"] = target_extra
     return item
 
-
-def prepare_desaturation_target(target, target_extra=None, patient=None, time=None, percentage: float = 0.5):
-    if target is None:
-        return None
-
-    sleep_cols = [label for label in SLEEP_LABELS if label in target.columns]
-    if len(sleep_cols) == 0:
-        raise ValueError(f"Sleep-aware desaturation filtering requires sleep labels, found {list(target.columns)}")
-    if target[sleep_cols].any(axis=1).mean() < SLEEP_PERCENTAGE:
-        return None
-
-    def _build_onehot(current_target):
-        freq = pd.to_timedelta(current_target.index.freq).total_seconds()
-        threshold = len(current_target) * freq * percentage
-        positive_seconds = float(current_target.get("desaturation", pd.Series(0.0, index=current_target.index)).sum() * freq)
-        is_desat = positive_seconds >= threshold
-        onehot = torch.zeros(2, dtype=torch.float32)
-        onehot[0 if is_desat else 1] = 1.0
-        return onehot
-
-    target_onehot = _build_onehot(target)
-
-    item = {"target": target_onehot}
-    if target_extra is not None:
-        target_extra_onehot = _build_onehot(target_extra)
-        item["target_extra"] = target_extra_onehot
-    return item
-
-
 def build_dataset(patients: list[str]):
     dataset = Ruhrlandklinik(
         channels=build_channels(),
@@ -168,18 +145,14 @@ def is_pap_patient(edf_path: str) -> bool:
     return any(ch in available_channels for ch in PAP_CHANNEL_PATTERNS)
 
 def load_split_dataset(
-    source_root: str,
+    patients: list[str],
     enable_cache: bool,
-    dry_run: bool,
     n_samples: int | None = None,
     cache_path: str | None = None,
 ):
     if enable_cache:
         if cache_path is None:
             raise ValueError("cache_path must be provided when enable_cache is set.")
-        patients = [p for p in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(p)]
-        if dry_run:
-            patients = patients[:2]
         dataset = build_dataset(patients)
         sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
         export_loader = DataLoader(
@@ -198,9 +171,6 @@ def load_split_dataset(
             in_memory=False,
         )
 
-    patients = [p for p in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(p)]
-    if dry_run:
-        patients = patients[:2]
     return build_dataset(patients)
 
 def build_model_and_trainer(train_dataset):
@@ -219,12 +189,13 @@ def build_model_and_trainer(train_dataset):
         epochs=EPOCHS,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1, end_factor=1e-2, total_iters=50
+            optimizer, start_factor=1, end_factor=1e-2, total_iters=75
         ),
         classes=TARGET_CLASSES,
         loss_function=torch.nn.functional.cross_entropy,
         save_every=10,
         loss_mode="inverse",
+        early_stopping=5
     )
     return model, trainer
 
@@ -233,27 +204,47 @@ def main():
     parser = argparse.ArgumentParser(description="Train and evaluate a desaturation model.")
     parser.add_argument("--enable-cache", action="store_true", help="Load or build numpy-backed cached splits.")
     parser.add_argument("--cache-path", default=os.path.join("cache", "train_desaturation"), help="Base directory for train/test caches.")
+    parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
     train_cache_path = os.path.join(args.cache_path, "train")
+    val_cache_path = os.path.join(args.cache_path, "val")
     test_cache_path = os.path.join(args.cache_path, "test")
+    train_patients = [p for p in get_edf_files_in_repo(TRAIN_ROOT, recursive=True) if not is_pap_patient(p)]
+    test_patients = [p for p in get_edf_files_in_repo(TEST_ROOT, recursive=True) if not is_pap_patient(p)]
+    if args.dry:
+        train_patients = train_patients[:2]
+        test_patients = test_patients[:2]
+
+    val_dataset = None
+    if args.val_frac is not None and args.val_frac > 0:
+        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac)
+    else:
+        val_patients = []
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
         train_dataset = load_split_dataset(
-            TRAIN_ROOT,
+            train_patients,
             args.enable_cache,
-            args.dry,
             1_000 if args.dry else N_SAMPLES,
             train_cache_path,
         )
         logger.uncontext()
+        if len(val_patients) > 0:
+            logger.context("VAL")
+            val_dataset = load_split_dataset(
+                val_patients,
+                args.enable_cache,
+                1_000 if args.dry else N_SAMPLES,
+                val_cache_path,
+            )
+            logger.uncontext()
         logger.context("TEST")
         test_dataset = load_split_dataset(
-            TEST_ROOT,
+            test_patients,
             args.enable_cache,
-            args.dry,
             None,
             test_cache_path,
         )
@@ -272,7 +263,7 @@ def main():
             model=model,
             trainer=trainer,
             train_datasets=[train_dataset],
-            val_datasets=[],
+            val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
             n_samples=1_000 if args.dry else N_SAMPLES,
@@ -281,6 +272,7 @@ def main():
             use_energy_tracker=False,
             tags={"model": "UTime"},
             collate_fn=batch_collate,
+            export_package_path=os.path.join("deployment","desaturation")
         )
     )
 

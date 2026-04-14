@@ -1,11 +1,23 @@
-from typing import Optional
+from typing import Sequence
 
-import numpy as np
 import pandas as pd
 import torch
 
 
 def resolve_multiclass_index(target, default_idx, min_event_seconds, raise_error=True):
+    """Return the unique active class index from per-class event durations.
+
+    Parameters
+    ----------
+    target:
+        1D tensor-like collection containing one duration per class.
+    default_idx:
+        Index to use when no class crosses `min_event_seconds`.
+    min_event_seconds:
+        Minimum duration required for a class to count as active.
+    raise_error:
+        If `True`, raise on ambiguous targets. Otherwise return `None`.
+    """
     active = target > min_event_seconds
     active_sum = int(active.sum().item())
 
@@ -21,27 +33,162 @@ def resolve_multiclass_index(target, default_idx, min_event_seconds, raise_error
         return None
     return None
 
+def _passes_filters(target, filters) -> bool:
+    """Return whether a target window satisfies all configured filters.
 
-def build_multiclass_target(target, target_extra=None, percentage: float = 0.5):
-    try:
-        freq = pd.to_timedelta(target.index.freq).total_seconds()
-        targets = torch.tensor(target.sum().to_numpy())
-        target_idx = resolve_multiclass_index(targets, None, len(target) * freq * percentage, True)
-        target_onehot = torch.zeros(len(targets), dtype=torch.float)
-        if target_idx is not None:
-            target_onehot[target_idx] = 1.0
+    `filters` is a list of dicts with:
+    - `columns`: label columns inspected together
+    - `percentage`: threshold in `[0, 1]`
+    - `mode`:
+      - `"min"` keeps the sample only if the fraction of timesteps where any
+        of `columns` is active is at least `percentage`
+      - `"max"` keeps the sample only if that fraction is at most
+        `percentage`
 
-        item = {"target": target_onehot}
+    Examples
+    --------
+    Require at least 50% sleep:
+    `{"columns": ["n1", "n2", "n3", "rem"], "percentage": 0.5, "mode": "min"}`
 
-        if target_extra is not None:
-            freq = pd.to_timedelta(target_extra.index.freq).total_seconds()
-            targets = torch.tensor(target_extra.sum().to_numpy())
-            target_extra_idx = resolve_multiclass_index(targets, None, len(target_extra) * freq * percentage, True)
-            target_extra_onehot = torch.zeros(len(targets), dtype=torch.float)
-            if target_extra_idx is not None:
-                target_extra_onehot[target_extra_idx] = 1.0
-            item["target_extra"] = target_extra_onehot
+    Reject windows with any artifact or movement:
+    `{"columns": ["artifact", "movement"], "percentage": 0.0, "mode": "max"}`
+    """
+    if filters is None:
+        return True
 
-        return item
-    except Exception:
+    for spec in filters:
+        value = float(target.reindex(columns=list(spec["columns"]), fill_value=0).any(axis=1).mean())
+        threshold = float(spec.get("percentage", 0.0))
+        if threshold < 0.0:
+            raise ValueError("Threshold cannot be negative.")
+        mode = spec.get("mode", "max")
+
+        if mode == "min":
+            if value < threshold:
+                return False
+        elif mode == "max":
+            if value > threshold:
+                return False
+        else:
+            raise ValueError(f"Unknown filter mode '{mode}'.")
+
+    return True
+
+
+def _build_multiclass_onehot(target, target_classes: Sequence[str], percentage: float):
+    """Convert a label window into a one-hot vector in `target_classes` order.
+
+    A class is active when it covers at least `percentage` of the window.
+    If no present class is active, the function accepts a single implicit
+    fallback class: exactly one class from `target_classes` may be missing from
+    `target.columns`, and that class becomes the default label. This is useful
+    for tasks such as `["desaturation", "no desaturation"]`.
+    """
+    target_classes = list(target_classes)
+    if len(target_classes) == 0:
+        raise ValueError("target_classes must not be empty.")
+    
+    present_classes = [label for label in target_classes if label in target.columns]
+    fallback_classes = [label for label in target_classes if label not in target.columns]
+
+    freq = pd.to_timedelta(target.index.freq).total_seconds()
+    threshold = len(target) * freq * percentage
+    durations = torch.tensor(
+        target.reindex(columns=present_classes, fill_value=0).sum().to_numpy() * freq,
+        dtype=torch.float32,
+    )
+    active = durations >= threshold
+    active_sum = int(active.sum().item())
+
+    if active_sum > 1:
+        #raise ValueError("Multiple active classes found.")
         return None
+    if active_sum == 1:
+        target_label = present_classes[int(active.nonzero(as_tuple=False).item())]
+    elif len(fallback_classes) == 1:
+        target_label = fallback_classes[0]
+    else:
+        # raise ValueError("Ambiguous class labels found with no active class and no unique fallback class.")
+        return None
+
+    onehot = torch.zeros(len(target_classes), dtype=torch.float32)
+    onehot[target_classes.index(target_label)] = 1.0
+    return onehot
+
+def prepare_multiclass_target(
+    target,
+    target_extra=None,
+    patient=None,
+    time=None,
+    *,
+    target_classes: Sequence[str],
+    percentage: float = 0.5,
+    filters=None,
+):
+    """Prepare multiclass `target` and optional `target_extra` dataset items.
+
+    Parameters
+    ----------
+    target:
+        Primary label window as a time-indexed DataFrame with one column per
+        label and binary activity values.
+    target_extra:
+        Optional second label source for the same window. It is transformed
+        independently and never causes rejection of the main `target`.
+    patient, time:
+        Unused callback arguments kept for dataset API compatibility.
+    target_classes:
+        Output class order for the returned one-hot vectors.
+    percentage:
+        Minimum window fraction a class must cover to be considered active.
+    filters:
+        Optional list of filter dicts applied to `target` before target
+        construction.
+
+        Supported filter modes:
+        - `"min"`: require at least `percentage` activity in `columns`
+        - `"max"`: require at most `percentage` activity in `columns`
+
+        Typical usage:
+        - Require at least 50% sleep:
+          `filters=[{"columns": ["n1", "n2", "n3", "rem"], "percentage": 0.5, "mode": "min"}]`
+        - Reject any artifact or movement:
+          `filters=[{"columns": ["artifact", "movement"], "percentage": 0.0, "mode": "max"}]`
+        - Reject wake-heavy windows:
+          `filters=[{"columns": ["wake"], "percentage": 0.5, "mode": "max"}]`
+
+    Returns
+    -------
+    dict | None
+        `{"target": onehot}` and optionally `{"target_extra": onehot}` on
+        success, otherwise `None`.
+    """
+    if target is None:
+        return None
+    if not _passes_filters(target, filters):
+        return None
+
+    try:
+        target_onehot = _build_multiclass_onehot(target, target_classes=target_classes, percentage=percentage)
+    except ValueError:
+        return None
+
+    if target_onehot is None:
+        return None
+
+    item = {"target": target_onehot}
+    if target_extra is None:
+        return item
+
+    try:
+        target_extra_onehot = _build_multiclass_onehot(
+            target_extra,
+            target_classes=target_classes,
+            percentage=percentage,
+        )
+    except ValueError:
+        target_extra_onehot = None
+
+    if target_extra_onehot is not None:
+        item["target_extra"] = target_extra_onehot
+    return item

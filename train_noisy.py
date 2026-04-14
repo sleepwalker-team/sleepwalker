@@ -23,12 +23,13 @@ from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormali
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
-from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo
+from sleepwalker.datasets.utils import export_batch_collate, get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.splits import load_or_build_numpy_cache
+from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
 torch.set_num_threads(2)
@@ -61,6 +62,11 @@ EVENT_MAPPING = {
     "artefakt": "noisy",
     "bewegung": "noisy",
 }
+
+prepare_noisy_target = partial(
+    prepare_multiclass_target,
+    target_classes=TARGET_CLASSES,
+)
 
 
 def build_channels(grouped: bool):
@@ -130,39 +136,6 @@ def prepare_sample(
         item["target_extra"] = target_extra
     return item
 
-
-def _merge_target_frames(target, target_extra, columns):
-    current = target.reindex(columns=columns, fill_value=0) if target is not None else None
-    extra = target_extra.reindex(columns=columns, fill_value=0) if target_extra is not None else None
-    if current is None and extra is None:
-        return None
-    if current is None:
-        return extra
-    if extra is None:
-        return current
-    return current.add(extra, fill_value=0)
-
-
-def prepare_noisy_target(target, target_extra=None, patient=None, time=None, percentage: float = 0.5):
-    if target is None and target_extra is None:
-        return None
-
-    merged = _merge_target_frames(target, target_extra, ["noisy"])
-    if merged is None:
-        return None
-
-    freq = merged.index.freq.delta.total_seconds()
-    threshold = len(merged) * freq * percentage
-    noisy_seconds = float(merged["noisy"].sum() * freq)
-    onehot = torch.zeros(2, dtype=torch.float32)
-    onehot[1 if noisy_seconds >= threshold else 0] = 1.0
-
-    item = {"target": onehot}
-    if target_extra is not None:
-        item["target_extra"] = onehot.clone()
-    return item
-
-
 def build_dataset(patients: list[str], grouped: bool, impedance_cutoff_ohm: float):
     dataset = Ruhrlandklinik(
         channels=build_channels(grouped),
@@ -201,9 +174,8 @@ def list_patients(source_root: str, grouped: bool, dry_run: bool) -> list[str]:
 
 
 def load_split_dataset(
-    source_root: str,
+    patients: list[str],
     enable_cache: bool,
-    dry_run: bool,
     grouped: bool,
     impedance_cutoff_ohm: float,
     n_samples: int | None = None,
@@ -212,7 +184,6 @@ def load_split_dataset(
     if enable_cache:
         if cache_path is None:
             raise ValueError("cache_path must be provided when enable_cache is set.")
-        patients = list_patients(source_root, grouped, dry_run)
         dataset = build_dataset(patients, grouped, impedance_cutoff_ohm)
         sampler = RandomSampler(dataset, num_samples=n_samples) if n_samples is not None else None
         export_loader = DataLoader(
@@ -231,7 +202,6 @@ def load_split_dataset(
             in_memory=False,
         )
 
-    patients = list_patients(source_root, grouped, dry_run)
     return build_dataset(patients, grouped, impedance_cutoff_ohm)
 
 
@@ -291,29 +261,48 @@ def main():
         default=IMPEDANCE_CUTOFF_OHM,
         help="Reject grouped EEG windows whose mean impedance exceeds this threshold.",
     )
+    parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
     train_cache_path = os.path.join(args.cache_path, "train")
+    val_cache_path = os.path.join(args.cache_path, "val")
     test_cache_path = os.path.join(args.cache_path, "test")
+    train_patients = list_patients(TRAIN_ROOT, args.grouped, args.dry)
+    test_patients = list_patients(TEST_ROOT, args.grouped, args.dry)
+
+    val_dataset = None
+    if args.val_frac is not None and args.val_frac > 0:
+        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac)
+    else:
+        val_patients = []
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
         train_dataset = load_split_dataset(
-            TRAIN_ROOT,
+            train_patients,
             args.enable_cache,
-            args.dry,
             args.grouped,
             args.impedance_cutoff_ohm,
             1_000 if args.dry else N_SAMPLES,
             train_cache_path,
         )
         logger.uncontext()
+        if len(val_patients) > 0:
+            logger.context("VAL")
+            val_dataset = load_split_dataset(
+                val_patients,
+                args.enable_cache,
+                args.grouped,
+                args.impedance_cutoff_ohm,
+                None,
+                val_cache_path,
+            )
+            logger.uncontext()
         logger.context("TEST")
         test_dataset = load_split_dataset(
-            TEST_ROOT,
+            test_patients,
             args.enable_cache,
-            args.dry,
             args.grouped,
             args.impedance_cutoff_ohm,
             None,
@@ -334,7 +323,7 @@ def main():
             model=model,
             trainer=trainer,
             train_datasets=[train_dataset],
-            val_datasets=[],
+            val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[("test", test_dataset)],
             batch_size=BATCH_SIZE,
             n_samples=1_000 if args.dry else N_SAMPLES,

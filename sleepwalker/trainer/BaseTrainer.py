@@ -10,6 +10,7 @@ import torch
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.trainer.utils.disk import store_checkpoint
 from sleepwalker.utils import logger
@@ -115,6 +116,96 @@ class BaseTrainer(ABC):
         model.eval()
         with torch.inference_mode():
             return self.run_epoch(test_loader, None, model, "TEST")
+
+    def _average_prediction_outputs(self, outputs):
+        if len(outputs) == 0:
+            raise ValueError("Cannot average an empty list of outputs.")
+        first = outputs[0]
+        if isinstance(first, torch.Tensor):
+            return torch.stack(outputs, dim=0).mean(dim=0)
+        if isinstance(first, dict):
+            return {
+                key: self._average_prediction_outputs([output[key] for output in outputs])
+                for key in first.keys()
+            }
+        raise ValueError(f"Unsupported prediction output type {type(first)}.")
+
+    def _collapse_repeated_batch_field(self, value, base_batch: int, n_repeat: int):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            shape = (base_batch, n_repeat, *value.shape[1:])
+            return value.view(shape)[:, 0]
+        if isinstance(value, list):
+            return [value[idx * n_repeat] for idx in range(base_batch)]
+        if isinstance(value, tuple):
+            return [value[idx * n_repeat] for idx in range(base_batch)]
+        return value
+
+    def _predict_model_outputs(self, model, batch, n_repeat: int = 1):
+        x = batch["data"].to(self.device, non_blocking=True)
+        if n_repeat <= 1:
+            return model(x), batch
+
+        if x.shape[0] % n_repeat != 0:
+            raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
+        base_batch = x.shape[0] // n_repeat
+        x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
+        outputs = [model(x_grouped[:, repeat_idx]) for repeat_idx in range(n_repeat)]
+        collapsed_batch = {}
+        for key, value in batch.items():
+            collapsed_batch[key] = self._collapse_repeated_batch_field(value, base_batch, n_repeat)
+        return self._average_prediction_outputs(outputs), collapsed_batch
+
+    @abstractmethod
+    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
+        pass
+
+    def predict_window(self, model, batch, n_repeat: int = 1) -> pd.DataFrame:
+        model.eval()
+        with torch.inference_mode():
+            outputs, collapsed_batch = self._predict_model_outputs(model, batch, n_repeat=n_repeat)
+            return self._prediction_frame(collapsed_batch, outputs)
+
+    def predict_loader(self, model, loader) -> pd.DataFrame:
+        loader = self._wrap_loader_with_repeats(loader, self.n_repeat_test, shuffle_default=False)
+        frames = []
+        model = model.to(self.device)
+        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
+        for batch in loader:
+            frame = self.predict_window(model, batch, n_repeat=n_repeat)
+            if frame is not None and len(frame) > 0:
+                frames.append(frame)
+        if len(frames) == 0:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def predict_patient(
+        self,
+        model,
+        dataset_template,
+        edf_path,
+        batch_size: int,
+        num_workers_dataset: int = 1,
+        num_workers_loader: int = 0,
+        collate_fn=None,
+    ) -> pd.DataFrame:
+        if not hasattr(dataset_template, "clone"):
+            raise ValueError(
+                f"Prediction dataset of type {type(dataset_template).__name__} does not implement clone()."
+            )
+        dataset = dataset_template.clone()
+        dataset.initialize([edf_path], num_workers=num_workers_dataset)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers_loader,
+            collate_fn=batch_collate if collate_fn is None else collate_fn,
+            drop_last=False,
+            persistent_workers=num_workers_loader > 0,
+        )
+        return self.predict_loader(model, loader)
 
     def fit(self, model, train_loader, val_loader=None):
         train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)

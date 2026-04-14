@@ -10,6 +10,8 @@ import xlrd
 from sleepwalker.datasets.Basedataset import BaseDataset
 
 class Ruhrlandklinik(BaseDataset):
+    BODY_POSITION_EVENTS = ["rückenlage", "links", "rechts", "bauchlage", "aufrecht"]
+
     """
     Dataset Summary
         Summary of core statistics for this dataset.
@@ -217,23 +219,76 @@ class Ruhrlandklinik(BaseDataset):
     """
     def __init__(self, 
             return_nox = False,
-            cutoff_time = "adaptive",
-            merge_overlapping_lm = True,
-            round_lm_up = "11s",
-            round_lm_down = "0.49s",
-            drop_patients_wrong_lm = "False",
-            fix_awake = True,
             **kwargs
         ): 
 
         self.return_nox = return_nox
-        self.cutoff_time = cutoff_time
-        self.merge_overlapping_lm = merge_overlapping_lm
-        self.round_lm_up = round_lm_up
-        self.round_lm_down = round_lm_down
-        self.drop_patients_wrong_lm = drop_patients_wrong_lm
-        self.fix_awake = fix_awake
+        # Set this to a label such as "aufrecht" to seed an initial body position
+        # before the first explicit position change is recorded.
+        self.initial_body_position_event = None
         super().__init__(**kwargs)
+
+    def _expand_change_based_body_positions(self, df: pd.DataFrame) -> pd.DataFrame:
+        body_positions = df[df["Label"].isin(self.BODY_POSITION_EVENTS)].copy()
+        if len(body_positions) == 0:
+            return df
+
+        other_events = df[~df["Label"].isin(self.BODY_POSITION_EVENTS)].copy()
+        body_positions = body_positions.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)
+
+        source_start = pd.Timestamp(df["Starttime"].min())
+        source_end = df["Endtime"].dropna().max()
+        if pd.isna(source_end):
+            source_end = df["Starttime"].dropna().max()
+        source_end = pd.Timestamp(source_end)
+        current_label = self.initial_body_position_event
+        current_start = source_start if current_label is not None else None
+        intervals = []
+
+        for _, row in body_positions.iterrows():
+            next_label = str(row["Label"]).lower().strip()
+            next_start = pd.Timestamp(row["Starttime"])
+
+            if current_label is None:
+                current_label = next_label
+                current_start = next_start
+                continue
+
+            if next_label == current_label:
+                continue
+
+            if current_start is not None and next_start > current_start:
+                intervals.append(
+                    {
+                        "Label": current_label,
+                        "Starttime": current_start,
+                        "Endtime": next_start,
+                        "Duration": (next_start - current_start).total_seconds(),
+                    }
+                )
+
+            current_label = next_label
+            current_start = next_start
+
+        if current_label is not None and current_start is not None and source_end > current_start:
+            intervals.append(
+                {
+                    "Label": current_label,
+                    "Starttime": current_start,
+                    "Endtime": source_end,
+                    "Duration": (source_end - current_start).total_seconds(),
+                }
+            )
+
+        if len(intervals) == 0:
+            return other_events.reset_index(drop=True)
+
+        position_df = pd.DataFrame(intervals)
+        return (
+            pd.concat([other_events, position_df], axis=0, ignore_index=True)
+            .sort_values(["Starttime", "Endtime", "Label"])
+            .reset_index(drop=True)
+        )
 
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         nox_filepath = os.path.splitext(edf_path)[0] + "_AS.csv"
@@ -250,11 +305,10 @@ class Ruhrlandklinik(BaseDataset):
             dfnox["Ereignis"] = dfnox.apply(lambda row: encoding_fix.get(row.Ereignis.lower().strip(), row.Ereignis.lower().strip()), axis=1) # type: ignore
             # dfnox["Ereignis"] = dfnox.apply(lambda row: self.event_mapping[row["Ereignis"]] if row["Ereignis"] in self.event_mapping else None, axis=1) # type: ignore
             dfnox = dfnox.rename(columns={"Ereignis":"Label", "Anfangszeit":"Starttime", "Endzeit":"Endtime", "Dauer":"Duration"})
-            dfnox = dfnox.dropna()
+            dfnox = dfnox.dropna(subset=["Label", "Starttime"])
             dfnox["Starttime"] = pd.to_datetime(dfnox["Starttime"])
             dfnox["Endtime"] = pd.to_datetime(dfnox["Endtime"])
-
-            return dfnox
+            return self._expand_change_based_body_positions(dfnox)
         except Exception as e:
                 raise ValueError(f"Error reading {nox_filepath}. Error was {traceback.format_exc()}")
     
@@ -279,44 +333,60 @@ class Ruhrlandklinik(BaseDataset):
         xls_file["Anfangszeit"] = pd.to_datetime(xls_file["Anfangszeit"])
         xls_file["Endzeit"] = pd.to_datetime(xls_file["Endzeit"])
 
-        # TODO 
-        # Retrieve event time boundaries.
-        if self.cutoff_time == "adaptive":
-            # Usually we would assume that people would be tagging the start/end of their analysis by a "Start der Analyse" tag. However, only a fraction (8/304 during development) patients had these tags. The tagging of sleepstages seems more reliable. Usually I would assume that a patient start in "Wake" and ends in "Wake", however, this also seems somewhat unreliable. Hence, we take any sleep stage here as boundary
-            idx = xls_file[xls_file["Ereignis"].isin(["wach", "n1", "n2", "n3", "rem"]) ].first_valid_index()
-            first_event_timestamp = xls_file.loc[idx]["Anfangszeit"]
+        # # TODO 
+        # # Retrieve event time boundaries.
+        # if self.cutoff_time == "adaptive":
+        #     # Usually we would assume that people would be tagging the start/end of their analysis by a "Start der Analyse" tag. However, only a fraction (8/304 during development) patients had these tags. The tagging of sleepstages seems more reliable. Usually I would assume that a patient start in "Wake" and ends in "Wake", however, this also seems somewhat unreliable. Hence, we take any sleep stage here as boundary
+        #     idx = xls_file[xls_file["Ereignis"].isin(["wach", "n1", "n2", "n3", "rem"]) ].first_valid_index()
+        #     first_event_timestamp = xls_file.loc[idx]["Anfangszeit"]
             
-            idx = xls_file[xls_file["Ereignis"].isin(["wach", "n1", "n2", "n3", "rem"]) ].last_valid_index()
-            last_event_timestamp = xls_file.loc[idx]["Endzeit"]
-        else:
-            first_event_timestamp = xls_file.iloc[0]["Anfangszeit"] + pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
-            last_event_timestamp = xls_file.iloc[-1]["Endzeit"] - pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
+        #     idx = xls_file[xls_file["Ereignis"].isin(["wach", "n1", "n2", "n3", "rem"]) ].last_valid_index()
+        #     last_event_timestamp = xls_file.loc[idx]["Endzeit"]
+        # else:
+        #     first_event_timestamp = xls_file.iloc[0]["Anfangszeit"] + pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
+        #     last_event_timestamp = xls_file.iloc[-1]["Endzeit"] - pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
 
         events = list(set(self.event_mapping.keys()))
-        if "LM" in events and self.merge_overlapping_lm:
-            dff = xls_file.loc[xls_file["Ereignis"] == "lm",:]
-            #dff['Dauer'] = dff["Dauer"].astype(np.float64) #dff.loc[:,'Dauer'].apply(pd.to_numeric)
-            merged_rows = []
-            
-            current_start = dff["Anfangszeit"].values[0]
-            current_end = dff["Endzeit"].values[0]
+        if "lm" in events:
+            dff = xls_file.loc[xls_file["Ereignis"] == "lm", :].sort_values("Anfangszeit").reset_index(drop=True)
+            if len(dff) > 0:
+                merged_rows = []
 
-            for i in range(1, len(dff)):
-                if dff["Anfangszeit"].values[i] <= current_end:  # If the start time overlaps
-                    current_end = max(current_end, dff["Endzeit"].values[i])  # Extend the end time if necessary
-                else:
-                    merged_rows.append({"Anfangszeit": current_start, "Endzeit": current_end, "Ereignis": "lm", "Dauer": (current_end - current_start).total_seconds()})
-                    current_start = dff["Anfangszeit"].values[i]
-                    current_end = dff["Endzeit"].values[i]
-            merged_rows.append({"Anfangszeit": current_start, "Endzeit": current_end, "Ereignis": "lm", "Dauer": (current_end - current_start).total_seconds()})
-            dff = pd.DataFrame(merged_rows)
-            xls_file = xls_file.loc[xls_file["Ereignis"] != "lm",:]
-            xls_file = pd.concat([xls_file, dff], axis=0)
+                current_start = pd.Timestamp(dff.loc[0, "Anfangszeit"])
+                current_end = pd.Timestamp(dff.loc[0, "Endzeit"])
+
+                for i in range(1, len(dff)):
+                    next_start = pd.Timestamp(dff.loc[i, "Anfangszeit"])
+                    next_end = pd.Timestamp(dff.loc[i, "Endzeit"])
+                    if next_start <= current_end:
+                        current_end = max(current_end, next_end)
+                    else:
+                        merged_rows.append(
+                            {
+                                "Anfangszeit": current_start,
+                                "Endzeit": current_end,
+                                "Ereignis": "lm",
+                                "Dauer": pd.Timedelta(current_end - current_start).total_seconds(),
+                            }
+                        )
+                        current_start = next_start
+                        current_end = next_end
+                merged_rows.append(
+                    {
+                        "Anfangszeit": current_start,
+                        "Endzeit": current_end,
+                        "Ereignis": "lm",
+                        "Dauer": pd.Timedelta(current_end - current_start).total_seconds(),
+                    }
+                )
+                dff = pd.DataFrame(merged_rows)
+                xls_file = xls_file.loc[xls_file["Ereignis"] != "lm", :]
+                xls_file = pd.concat([xls_file, dff], axis=0, ignore_index=True)
 
         non_sleep_events = [e for e in events if e not in ["wach", "n1", "n2", "n3", "rem"]]
         non_cnt = 0
 
-        if self.fix_awake and len(non_sleep_events) > 0:
+        if len(non_sleep_events) > 0:
             # Filter for "Wach" events and merge consecutive intervals
             wach_df = xls_file[xls_file["Ereignis"] == "wach"].sort_values("Anfangszeit").reset_index(drop=True)
 
@@ -359,34 +429,10 @@ class Ruhrlandklinik(BaseDataset):
         # if non_cnt > 0:
         #     logger.info(f"Removed {non_cnt} annotations for patient {edf_path}, due to not being asleep.")
 
-        arousals = ["arousal", "plm-arousal", "rera"]
-        if any(a.lower() in events for a in arousals):
-            # Remove all arousals that are either too short or too long. 
-            # Quantiles for the data distribution (December 2024) were (0, 0.25, 0.5, 0.75, 1): 
-            # [0.0 2.21 3.0 3.0 4.818 9.0 15.0 25.52122 125.57799999999999]
-            xls_file.loc[(xls_file["Ereignis"].isin(arousals)) & (xls_file["Dauer"] < 1), "Ereignis"] = None
-            xls_file.loc[(xls_file["Ereignis"].isin(arousals)) & (xls_file["Dauer"] > 60), "Ereignis"] = None
-
-        apneas = ["a. gemischt", "a. obstruktiv", "a. zentral", "apnoe", "cheyne stokes", "fg apnoe geschlossen", "fg apnoe geöffnet", "fg hypopnoe", "fg-apnoe unbekannt", "h. obstruktiv", "h. zentral", "hypopnea-gemischt", "hypopnoe"]
-
-        if any(a.lower() in events for a in apneas):
-            # Remove all apneas that are either too short or too long. 
-            # Quantiles for the data distribution (November 2024) were (0, 0.25, 0.5, 0.75, 1): 
-            # [0.0 11.0 13.520999999999999 17.494999999999997 23.2845 30.759999999999998 119.493]
-            xls_file.loc[(xls_file["Ereignis"].isin(apneas)) & (xls_file["Dauer"] < 5), "Ereignis"] = None
-            xls_file.loc[(xls_file["Ereignis"].isin(apneas)) & (xls_file["Dauer"] > 60), "Ereignis"] = None
-
-        lms = ["PLM"]
-        if any(a.lower() in events for a in lms):
-            # Remove all apneas that are either too short or too long. 
-            # Quantiles for the data distribution (November 2024): 
-            # 0.699 20.36125 90.1345 139.50074999999998 233.75549999999998 470.84799999999996 1116.8415 5450.110000000001 16960.272]
-            xls_file.loc[(xls_file["Ereignis"].isin(lms)) & (xls_file["Dauer"] < 0.7), "Ereignis"] = None
-            #xls_file.loc[(xls_file["Ereignis"].isin(lms)) & (xls_file["Dauer"] > 250), "Ereignis"] = None
-
-        xls_file["Ereignis"] = xls_file["Ereignis"].apply(lambda x: None if x is None else x.lower().strip()).dropna()
+        xls_file["Ereignis"] = xls_file["Ereignis"].apply(lambda x: None if x is None else x.lower().strip())
+        xls_file = xls_file.dropna(subset=["Ereignis"]).reset_index(drop=True)
         df = xls_file[["Ereignis", "Anfangszeit", "Endzeit", "Dauer"]].copy().rename(columns={"Ereignis":"Label", "Anfangszeit":"Starttime", "Endzeit":"Endtime", "Dauer":"Duration"})
-        return df 
+        return self._expand_change_based_body_positions(df)
         # xls_file["Ereignis"] = xls_file["Ereignis"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
 
         # xls_file["Ereignis"] = xls_file.apply(lambda row: None if row.Ereignis is None else row.Ereignis.lower().strip(), axis=1)

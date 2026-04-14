@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 
 from sleepwalker.datasets.Basedataset import ChannelConfig
+from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 
 
 class NumpyDataset:
@@ -118,6 +119,20 @@ class NumpyDataset:
 
     def get_input_channels(self) -> list[str]:
         return list(self.input_channels)
+
+    def to_unlabelled(self):
+        return UnlabelledDataset(
+            channels=self.channels,
+            sample_frequency=self.sample_frequency,
+            resample_type=self.resample_type,
+            total_input=self.total_input,
+            stride=self.stride,
+            prepare_patient=None,
+            prepare_sample=None,
+            online_max_tries=1,
+            force_one_day=True,
+            rereference=None,
+        )
 
     def _to_tensor(self, value: np.ndarray) -> torch.Tensor:
         arr = np.asarray(value)

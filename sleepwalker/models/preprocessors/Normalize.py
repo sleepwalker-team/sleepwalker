@@ -1,9 +1,15 @@
+"""Running mean/variance normalization preprocessor."""
+
 import torch
 from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
 
 class Normalize(Preprocessor):
     def __init__(self, stat_dims=None):
         """
+        Normalize features using running mean and variance estimates.
+
+        The implementation maintains incremental statistics during warmup and then
+        standardizes later inputs using those estimates.
         Args:
             stat_dims: Dimensions to keep in the statistics (absolute indices).
                        E.g. stat_dims=(2, 3) on (B, N, F, D) → mean shape (F, D).
@@ -31,6 +37,7 @@ class Normalize(Preprocessor):
         return t.reshape(shape)
 
     def update(self, data: torch.Tensor):
+        """Update running mean and second-moment statistics from one batch."""
         reduce_dims = self._reduce_dims(data.dim())
         batch_count = 1
         for d in reduce_dims:
@@ -55,9 +62,11 @@ class Normalize(Preprocessor):
             self.count = total_count
 
     def requires_warmup(self) -> bool:
+        """Return whether this preprocessor requires warmup."""
         return True
 
     def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        """Normalize a tensor using the accumulated running statistics."""
         if self.mean is not None and self.M2 is not None and self.count > 1:
             var = self.M2 / (self.count - 1)
             mean = self._expand_for_broadcast(self.mean, data.dim())

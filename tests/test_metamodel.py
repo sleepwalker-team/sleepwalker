@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.MultiModel import MultiModel
 from sleepwalker.models.MetaModel import MetaModel, MetaModelEntry
 
 
@@ -65,6 +66,29 @@ def test_metamodel_slices_channels_fuses_embeddings_and_applies_task_heads():
     assert set(y.keys()) == {"sleep staging", "breathing"}
     assert y["sleep staging"].shape == (1, 1, 3)
     assert y["breathing"].shape == (1, 3, 2)
+    assert torch.equal(m1.last_input, x[:, :, [0, 2]])
+    assert torch.equal(m2.last_input, x[:, :, [1]])
+
+
+def test_multimodel_slices_channels_fuses_embeddings_and_applies_single_head():
+    m1 = DummyEmbeddingModel(2, 2)
+    m2 = DummyEmbeddingModel(1, 1)
+
+    model = MultiModel(
+        classes=["c1", "c2", "c3"],
+        input_channels=["a", "b", "c"],
+        models=[
+            MetaModelEntry(m1, ["a", "c"]),
+            MetaModelEntry(m2, ["b"]),
+        ],
+    )
+
+    x = torch.tensor(
+        [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
+    )
+    y = model(x)
+
+    assert y.shape == (1, 3)
     assert torch.equal(m1.last_input, x[:, :, [0, 2]])
     assert torch.equal(m2.last_input, x[:, :, [1]])
 

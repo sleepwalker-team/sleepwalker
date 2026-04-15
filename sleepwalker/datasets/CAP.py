@@ -1,3 +1,11 @@
+"""CAP sleep dataset adapter.
+
+This adapter reads CAP EDF files together with tab-delimited sleep-stage sidecar
+files. The implementation is used by the repository's sleep-staging workflow
+and carries a few dataset-specific exclusions and date-handling heuristics from
+current lab usage.
+"""
+
 from __future__ import annotations
 from datetime import datetime, timedelta
 
@@ -6,6 +14,7 @@ from sleepwalker.utils import logger
 from sleepwalker.datasets.Basedataset import BaseDataset
 
 def convert_to_datetime(row, start_date):
+    """Convert CAP time-of-day strings into absolute datetimes."""
     try:
         row_ts = datetime.strptime(row, '%H:%M:%S')
     except:
@@ -173,6 +182,12 @@ class CAP(BaseDataset):
             disorders = ["n", "ins", "narco", "nfle", "rbd", "sdb", "brux", "plm"],
             **kwargs
         ): 
+        """Configure disorder-based CAP file filtering.
+
+        Args:
+            disorders: Disorder prefixes to keep when discovering EDF files.
+            **kwargs: Forwarded to :class:`BaseDataset`.
+        """
         self.disorders = disorders
 
         if self.disorders is None:
@@ -185,9 +200,11 @@ class CAP(BaseDataset):
         super().__init__(**kwargs)
         
     def has_extra_target(self):
+        """Return whether this adapter exposes a second target table."""
         return False
 
     def get_event_df(self, fpath, start_date):
+        """Load the sleep-stage sidecar file corresponding to one CAP EDF."""
         label_path = fpath.replace('edf', 'txt')
 
         # The first couple of lines of the document are metadata. Skip

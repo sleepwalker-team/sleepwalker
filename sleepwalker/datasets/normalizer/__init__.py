@@ -1,2 +1,6 @@
 from .base import Normalizer
+from .SignalFilterNormalizer import SignalFilterNormalizer
 from .EEGFilterNormalizer import EEGFilterNormalizer
+from .RespirationFilterNormalizer import RespirationFilterNormalizer
+from .SaturationFilterNormalizer import SaturationFilterNormalizer
+from .PulseFilterNormalizer import PulseFilterNormalizer

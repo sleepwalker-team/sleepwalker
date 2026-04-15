@@ -1,3 +1,5 @@
+"""Small synthetic dataset adapter used in tests and local experiments."""
+
 from __future__ import annotations
 from pathlib import Path
 import re
@@ -63,19 +65,27 @@ class SyntheticDataset(BaseDataset):
     """
 
     def __init__(self, has_extra: bool = False, **kwargs):
+        """Construct a test-oriented dataset backed by local stage text files.
+
+        Args:
+            has_extra: Whether `get_extra_event_df` should expose the
+                `extra_stages_*.txt` files.
+            **kwargs: Forwarded to `BaseDataset`.
+        """
         self._has_extra = has_extra
         super().__init__(**kwargs)
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
+        """Load the primary stage annotations for one synthetic EDF path."""
         return load_stages(edf_path=edf_path, start_datetime=start_datetime)
 
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
-        """Return fake extra event dataframe, if enabled."""
+        """Load the secondary stage annotations when enabled."""
         if not self._has_extra:
             return pd.DataFrame()
         else:
             return load_stages(edf_path=edf_path, start_datetime=start_datetime, basename="extra_stages")
 
     def has_extra_target(self) -> bool:
+        """Return whether this dataset exposes secondary target annotations."""
         return self._has_extra
-

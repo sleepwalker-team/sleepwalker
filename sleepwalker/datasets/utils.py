@@ -1,7 +1,17 @@
+"""Dataset discovery, splitting, XML parsing, and cache-export helpers.
+
+This module contains a mix of reusable utilities used across dataset adapters,
+trainers, tests, and training scripts. The more stable pieces, based on current
+call sites and tests, are EDF discovery, dataset splitting, repeat sampling,
+and numpy-cache export helpers.
+"""
+
 from __future__ import annotations
 
+import json
 from collections import Counter
 from functools import partial
+from pathlib import Path
 import os
 import multiprocessing
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -10,24 +20,27 @@ import numpy as np
 import pandas as pd
 import torch
 import xmltodict as xtd
-from torch.utils.data import DataLoader
-from torch.utils.data import RandomSampler
-from torch.utils.data import Sampler
+from torch.utils.data import DataLoader, Sampler
 
 from sklearn.model_selection import KFold
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_collate
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.utils import logger
-
-import numpy as np
-import pandas as pd
-from collections import Counter
-from torch.utils.data import DataLoader
 from sleepwalker.utils import logger
 
 
 class RepeatSampler(Sampler[int]):
+    """Repeat each sampled index a fixed number of times.
+
+    Args:
+        sampler: Base sampler producing logical sample indices.
+        n_repeat: Number of times each index should be yielded.
+
+    Notes:
+        ``BaseTrainer`` uses this sampler to evaluate repeated windows and then
+        average the corresponding model outputs.
+    """
+
     def __init__(self, sampler: Sampler[int], n_repeat: int = 1):
         if n_repeat <= 0:
             raise ValueError("n_repeat must be positive.")
@@ -42,60 +55,9 @@ class RepeatSampler(Sampler[int]):
     def __len__(self):
         return len(self.sampler) * self.n_repeat
 
-def _collect_patient_stats_one(args):
-    patient, summarize_patient = args
-    try:
-        return patient, summarize_patient(patient), None
-    except Exception as exc:
-        return patient, None, exc
-
-def collect_patient_stats(
-    patients: Sequence[str | os.PathLike],
-    summarize_patient: Callable[[str | os.PathLike], Optional[dict]],
-    num_workers: int = 0,
-    drop_failed: bool = True,
-) -> pd.DataFrame:
-    rows: list[dict] = []
-    patient_list = list(patients)
-
-    logger.progress_start(len(patient_list), desc="Collecting patient stats", leave=True)
-    if num_workers > 1:
-        with multiprocessing.Pool(num_workers) as pool:
-            results = pool.imap(_collect_patient_stats_one, [(patient, summarize_patient) for patient in patient_list])
-            for patient, row, exc in results:
-                try:
-                    if exc is not None:
-                        if not drop_failed:
-                            raise exc
-                        logger.warning(f"Failed to summarize patient {patient}: {exc}")
-                        continue
-                    if row is None:
-                        continue
-                    current_row = dict(row)
-                    current_row.setdefault("patient", patient)
-                    rows.append(current_row)
-                finally:
-                    logger.progress_advance(1)
-    else:
-        for patient in patient_list:
-            try:
-                row = summarize_patient(patient)
-                if row is None:
-                    continue
-                current_row = dict(row)
-                current_row.setdefault("patient", patient)
-                rows.append(current_row)
-            except Exception as exc:
-                if not drop_failed:
-                    raise
-                logger.warning(f"Failed to summarize patient {patient}: {exc}")
-            finally:
-                logger.progress_advance(1)
-
-    logger.progress_close()
-    logger.info(f"Collected patient stats for {len(rows)}/{len(patient_list)} patients.")
-    return pd.DataFrame(rows)
-
+    def set_epoch(self, epoch: int):
+        if hasattr(self.sampler, "set_epoch"):
+            self.sampler.set_epoch(epoch)
 
 def summarize_dataset(
     dataset_clazz,
@@ -194,7 +156,6 @@ def summarize_dataset(
     # If no channel provided → return only metadata + coverage
     if channel_name is None:
         return {
-            "n_patients":dataset.n_patients,
             "duration_stats": duration_stats,
             "duration_histogram": duration_hist,
             "signal_coverage": signal_coverage,
@@ -209,7 +170,6 @@ def summarize_dataset(
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,
-        num_workers=8
     )
     dataset.initialize(edf_files, 8)
 
@@ -219,7 +179,6 @@ def summarize_dataset(
     # if class frequency estimation is disabled, stop here
     if not estimate_class_frequencies:
         return {
-            "n_patients":dataset.n_patients,
             "duration_stats": duration_stats,
             "duration_histogram": duration_hist,
             "signal_coverage": signal_coverage,
@@ -236,6 +195,7 @@ def summarize_dataset(
         collate_fn=lambda x: batch_collate(
             x, ignore_list=["time", "patient", "target", "target_extra"]
         ),
+        num_workers=8
     )
 
     label_counter = Counter()
@@ -261,7 +221,6 @@ def summarize_dataset(
     logger.info("Finished summarizing dataset")
 
     return {
-        "n_patients": dataset.n_patients,
         "duration_stats": duration_stats,
         "duration_histogram": duration_hist,
         "signal_coverage": signal_coverage,
@@ -274,6 +233,14 @@ def summarize_dataset(
 
 
 def read_profusion(xml_path):
+    """Read Profusion XML annotations into a normalized event table.
+
+    Notes:
+        The mapping logic is dataset-specific and currently tailored to the XML
+        structures used by repository dataset adapters such as ``ABC`` and
+        ``SHHS``. The function returns a concatenated event table but does not
+        yet document a stronger schema guarantee beyond observed call sites.
+    """
     with open(xml_path, "r") as f:
         doc = xtd.parse(f.read())
         apnea_df = pd.DataFrame(doc["CMPStudyConfig"]["ScoredEvents"]["ScoredEvent"][1:])
@@ -318,6 +285,7 @@ def read_profusion(xml_path):
         return pd.concat([apnea_df, sleep_df], ignore_index=True)
 
 def read_nsrr(xml_path):
+    """Read NSRR-style XML annotations into an event table."""
     with open(xml_path, "r") as f:
         doc = xtd.parse(f.read())
         """
@@ -389,6 +357,7 @@ def fixed_split(
     test_patterns: Optional[Sequence[str]] = None,
     exclude_patterns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """Split patients by substring matching against path patterns."""
     train = [p for p in all_patients if _matches_any(p, train_patterns) and not _matches_any(p, exclude_patterns)]
     test = [p for p in all_patients if _matches_any(p, test_patterns) and not _matches_any(p, exclude_patterns)]
     return train, test
@@ -399,6 +368,7 @@ def random_split(
     seed: Optional[int] = None,
     include_patterns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """Randomly split patient paths into train and test partitions."""
     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
     rng = np.random.default_rng(seed)
     idx = np.arange(len(pats))
@@ -409,6 +379,7 @@ def random_split(
     return train, test
 
 def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str]]:
+    """Create K-fold train/test patient splits."""
     kf = KFold(n_splits)
     
     folds = []
@@ -422,29 +393,33 @@ def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str
 #     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
 #     return [pats], [[]]
 
-def estimate_class_cnts(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
-    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient", "data"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
-    
+def estimate_class_cnts(loader: DataLoader):
+    """Estimate multiclass target counts from a dataloader.
+
+    Args:
+        loader: Dataloader yielding batches with one-hot ``target`` tensors.
+
+    Returns:
+        A mapping from class name to observed count over one realized pass.
+    """
+    dataset = loader.dataset
     total_batches = len(loader)
-    class_cnts = torch.zeros(len(dataset.get_classes())) 
-    logger.progress_start(total_batches*batch_size, desc=f"Estimating class counts", leave=True)
+    batch_size = loader.batch_size or 1
+    class_cnts = torch.zeros(len(dataset.get_classes()))
+    logger.progress_start(total_batches * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         y = batch["target"]
         target = y.argmax(dim=1)
         idx, cnt = torch.unique(target, return_counts=True)
         class_cnts[idx] += cnt
-        logger.progress_advance(batch_size)
+        logger.progress_advance(len(y))
     logger.progress_close()
 
     return {
         cname:c.item() for cname,c in zip(dataset.get_classes(), class_cnts)
     }
 
-def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 8, batch_size:int = 128):
-    sampler = RandomSampler(dataset, num_samples = n_samples) if n_samples is not None else None
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler, num_workers=num_workers, collate_fn=partial(batch_collate, ignore_list=["time", "patient"]), drop_last=False, persistent_workers=True, prefetch_factor=2, pin_memory=True) 
-    
+def dataloader_to_numpy(loader: DataLoader):
     X = []
     Y = []
     Y_extra = []
@@ -452,7 +427,8 @@ def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 
     patients = []
 
     total_batches = len(loader)
-    logger.progress_start(total_batches*batch_size, desc=f"Converting dataset to numpy", leave=True)
+    batch_size = loader.batch_size or 1
+    logger.progress_start(total_batches * batch_size, desc="Converting dataloader to numpy", leave=True)
     for batch in loader:
         X.append(batch["data"].cpu().numpy())
         if batch["data"].shape[0] < batch_size:
@@ -462,8 +438,7 @@ def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 
         if "target_extra" in batch: Y_extra.append(batch["target_extra"].cpu().numpy())
         timestamps.extend(batch["time"])
         patients.extend(batch["patient"])
-
-        logger.progress_advance(batch_size)
+        logger.progress_advance(batch["data"].shape[0])
     logger.progress_close()
 
     X = np.vstack(X)
@@ -471,3 +446,172 @@ def dataset_to_numpy(dataset, n_samples:Optional[int] = None, num_workers:int = 
     if Y_extra: Y_extra = np.vstack(Y_extra)
 
     return X, Y, Y_extra, timestamps, patients
+
+
+def value_to_numpy(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    if isinstance(value, (pd.DataFrame, pd.Series, pd.Index)):
+        return value.to_numpy()
+    if isinstance(value, pd.Timestamp):
+        return np.int64(value.value)
+    return np.asarray(value)
+
+def stack_numpy_values(values, key: str):
+    arrays = [value_to_numpy(v) for v in values]
+    first = arrays[0]
+    if np.asarray(first).ndim == 0:
+        return np.asarray([np.asarray(v).item() if np.asarray(v).ndim == 0 else v for v in arrays])
+    try:
+        return np.stack(arrays)
+    except ValueError as exc:
+        raise ValueError(f"Cannot stack exported values for key '{key}'. Ensure the field has a stable shape across items.") from exc
+
+
+def export_batch_collate(batch, extra_keys: Optional[Sequence[str]] = None):
+    """Collate a batch for cache export without losing selected metadata.
+
+    Args:
+        batch: Sequence of dataset items.
+        extra_keys: Optional metadata keys that must stay as lists rather than
+            being stacked.
+
+    Returns:
+        A collated batch suitable for ``export_dataloader_to_numpy_dir``.
+    """
+    items = [item for item in batch if item is not None]
+    keep_stacked = {"data", "target", "target_extra"}
+    keep_ignored = {"time", "patient", *(extra_keys or [])}
+    ignore_list = list(keep_ignored)
+
+    if items:
+        for key in items[0].keys():
+            if key not in keep_stacked and key not in keep_ignored:
+                ignore_list.append(key)
+
+    return batch_collate(items, ignore_list=ignore_list)
+
+
+def save_array_chunks(out_path: Path, stem: str, array: np.ndarray, n_samples_per_file: Optional[int]) -> None:
+    if n_samples_per_file is None or int(array.shape[0]) <= int(n_samples_per_file):
+        np.save(out_path / f"{stem}.npy", array, allow_pickle=False)
+        return
+
+    n_samples_per_file = int(n_samples_per_file)
+    if n_samples_per_file <= 0:
+        raise ValueError("n_samples_per_file must be positive when provided.")
+
+    for chunk_idx, start in enumerate(range(0, int(array.shape[0]), n_samples_per_file)):
+        stop = min(start + n_samples_per_file, int(array.shape[0]))
+        np.save(out_path / f"{stem}.{chunk_idx:06d}.npy", array[start:stop], allow_pickle=False)
+
+
+def export_dataloader_to_numpy_dir(
+    loader: DataLoader,
+    out_dir: str | os.PathLike,
+    *,
+    extra_keys: Optional[Sequence[str]] = None,
+    n_samples_per_file: Optional[int] = None,
+) -> Path:
+    """Export one realized dataloader pass into a numpy cache directory.
+
+    Args:
+        loader: Dataloader producing already-collated dataset items.
+        out_dir: Output directory for the cache.
+        extra_keys: Optional per-item keys to export in addition to the
+            standard fields.
+        n_samples_per_file: Optional chunk size used to split arrays across
+            multiple ``.npy`` files.
+
+    Returns:
+        The output directory path.
+
+    Raises:
+        ValueError: If required keys are missing, the dataset is not
+            initialized, or exported extra keys are ragged or unsupported.
+
+    Notes:
+        The export intentionally captures exactly one realized loader pass,
+        including any dataset-side randomization. Tests in
+        ``tests/test_datasets.py`` confirm round-tripping, memmap loading, and
+        chunked exports.
+    """
+    dataset = loader.dataset
+    if hasattr(dataset, 'initialized') and not dataset.initialized:
+        raise ValueError(f"{dataset.__class__.__name__} is not initialized. Call initialize(...) before exporting.")
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    X = []
+    Y = []
+    Y_extra = []
+    timestamps = []
+    patients = []
+    extras = {key: [] for key in (extra_keys or [])}
+
+    expected = len(loader) * (loader.batch_size or 1)
+    logger.progress_start(expected, desc='Exporting dataset to numpy cache', leave=True)
+    for batch in loader:
+        if 'data' not in batch or 'patient' not in batch or 'time' not in batch:
+            raise ValueError('Export requires item keys: data, patient, time')
+
+        X.append(batch['data'].cpu().numpy().astype(np.float32, copy=False))
+        if 'target' in batch:
+            Y.append(batch['target'].cpu().numpy())
+        if 'target_extra' in batch:
+            Y_extra.append(batch['target_extra'].cpu().numpy())
+
+        timestamps.append(np.asarray([np.int64(pd.Timestamp(t).value) for t in batch['time']], dtype=np.int64))
+        patients.append(np.asarray([str(patient) for patient in batch['patient']]))
+ 
+        batch_size_actual = len(batch['patient'])
+        for key in extras:
+            if key not in batch:
+                raise ValueError(f"Requested extra key '{key}' missing from exported batch.")
+            if len(batch[key]) != batch_size_actual:
+                raise ValueError(f"Requested extra key '{key}' has inconsistent batch length during export.")
+            extras[key].append(stack_numpy_values(batch[key], key))
+
+        logger.progress_advance(batch_size_actual)
+    logger.progress_close()
+
+    if len(X) == 0:
+        raise ValueError('Export produced no valid items.')
+
+    logger.info(f"Writing files to {out_path}")
+    data_arr = np.concatenate(X, axis=0)
+    save_array_chunks(out_path, 'data', data_arr, n_samples_per_file)
+
+    if Y:
+        save_array_chunks(out_path, 'target', np.concatenate(Y, axis=0), n_samples_per_file)
+    if Y_extra:
+        save_array_chunks(out_path, 'target_extra', np.concatenate(Y_extra, axis=0), n_samples_per_file)
+
+    save_array_chunks(out_path, 'time', np.concatenate(timestamps, axis=0), n_samples_per_file)
+    save_array_chunks(out_path, 'patient', np.concatenate(patients, axis=0), n_samples_per_file)
+
+    for key, values in extras.items():
+        save_array_chunks(out_path, f'extra__{key}', np.concatenate(values, axis=0), n_samples_per_file)
+
+    input_channels = dataset.get_input_channels() if hasattr(dataset, 'get_input_channels') else [str(i) for i in range(data_arr.shape[-1])]
+    classes = dataset.get_classes() if hasattr(dataset, 'get_classes') else []
+    fallback_patients = [str(patient) for patient in np.concatenate(patients, axis=0)]
+    all_patients = sorted(set(fallback_patients))
+
+    meta = {
+        'sample_frequency': float(getattr(dataset, 'sample_frequency')),
+        'resample_type': str(getattr(dataset, 'resample_type', 'cached')),
+        'total_input': str(getattr(dataset, 'total_input')),
+        'target_resolution': str(getattr(dataset, 'target_resolution')),
+        'classes': list(classes),
+        'input_channels': list(input_channels),
+        'all_patients': [str(p) for p in all_patients],
+        'extra_keys': list(extras.keys()),
+        'n_items': int(data_arr.shape[0]),
+        'stride': str(getattr(dataset, 'stride', getattr(dataset, 'target_resolution'))),
+    }
+    with (out_path / 'meta.json').open('w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=2)
+
+    return out_path

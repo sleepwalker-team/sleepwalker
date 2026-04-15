@@ -1,3 +1,10 @@
+"""Domain-adversarial multiclass trainer for grouped multi-dataset setups.
+
+This trainer extends `MulticlassTrainer` with a gradient-reversal domain head.
+It is currently wired into the sleep-staging script via the `--gradrev` path
+and should be treated as an experiment-oriented trainer variant.
+"""
+
 import numpy as np
 from sklearn.metrics import confusion_matrix
 import torch
@@ -6,7 +13,7 @@ from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.utils import logger
 
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
 import torch.nn as nn
 from torch.autograd import Function
@@ -15,6 +22,7 @@ from torch.autograd import Function
 # Gradient Reversal Function
 # --------------------------
 class GradReverse(Function):
+    """Autograd primitive that multiplies gradients by `-lambda`."""
     @staticmethod
     def forward(ctx, x, lambd):
         ctx.lambd = lambd
@@ -25,10 +33,21 @@ class GradReverse(Function):
         return -ctx.lambd * grad_output, None
 
 def grad_reverse(x, lambd=1.0):
+    """Apply the gradient-reversal autograd function."""
     return GradReverse.apply(x, lambd)
 
 # GroupedChannel
 class GradReverseTrainer(MulticlassTrainer):
+    """Multiclass trainer with an auxiliary domain-classification head.
+
+    Args:
+        feature_dim: Feature dimension produced by the main model.
+        n_domains: Number of dataset/domain IDs expected in the `dataset`
+            batch field.
+        lambda_domain: Weight applied to the reversed domain gradient.
+        domain_hidden: Hidden size of the auxiliary domain head.
+        **kwargs: Forwarded to `MulticlassTrainer`.
+    """
     def __init__(
         self,
         feature_dim,
@@ -49,6 +68,7 @@ class GradReverseTrainer(MulticlassTrainer):
         self.n_domains = n_domains
 
     def run_epoch(self, loader, opt, model, prefix=""):
+        """Run one epoch with both task loss and optional domain loss."""
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
         
@@ -242,6 +262,7 @@ class GradReverseTrainer(MulticlassTrainer):
     #     return epoch_loss, cm_sum
 
     def fit(self, model, train_loader, val_loader = None):
+        """Delegate fit to the base trainer implementation."""
         # TODO check model and loaders
         # TODO add annealing over epochs
         return super().fit(model, train_loader, val_loader)

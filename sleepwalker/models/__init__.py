@@ -1,2 +1,3 @@
 from .SleepTransformer import SleepTransformer
-from .MetaModel import MetaModel, MetaModelEntry
+from .MultiModel import MultiModel, MetaModelEntry
+from .MetaModel import MetaModel

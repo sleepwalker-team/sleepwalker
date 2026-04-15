@@ -4,11 +4,12 @@ import shutil
 import tempfile
 from typing import Callable, Optional
 import numpy as np
-import pandas as pd
 from sklearn.metrics import confusion_matrix
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler, Normalizer
+from sklearn.pipeline import Pipeline
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader
 from abc import ABC
 from torch.optim.lr_scheduler import OneCycleLR
 
@@ -132,7 +133,7 @@ class MaskedAutoencoderTrainer(ABC):
         return epoch_loss
 
     @torch.inference_mode
-    def run_sleep_classification(self, val_loader, test_loader, model, middle_slices=150):
+    def run_downstream_tasks(self, val_loader, test_loader, model):
         model.eval()
         logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL', leave=True)
 
@@ -141,7 +142,7 @@ class MaskedAutoencoderTrainer(ABC):
         y = []
         for batch in val_loader:
             x = batch['data'].to(self.device)
-            class_label = batch['target'].argmax(-1).to(self.device)
+            class_label = batch['target'].argmax(-1)
             embeddings = model.embed(x)
 
             X.append(embeddings)
@@ -159,7 +160,7 @@ class MaskedAutoencoderTrainer(ABC):
         y = []
         for batch in test_loader:
             x = batch['data'].to(self.device)
-            class_label = batch['target'].argmax(-1).to(self.device)
+            class_label = batch['target'].argmax(-1)
             embeddings = model.embed(x)
 
             X.append(embeddings)
@@ -171,9 +172,12 @@ class MaskedAutoencoderTrainer(ABC):
         X_test = torch.cat(X, 0).cpu().numpy()
         y_test = torch.cat(y, 0).cpu().numpy()
 
+        self.run_sleep_classification(X_train, X_test, y_train, y_test, model, middle_slices=50)
+
+    @torch.inference_mode
+    def run_sleep_classification(self, X_train, X_test, y_train, y_test, model, label='sleep', middle_slices=150):
         # Slice out middle fo prediction
         T = X_train.shape[1]
-        middle_slices = middle_slices // (model.token_size // int(test_loader.dataset.sample_frequency))
         _from = T//2 - middle_slices // 2
         _to = T//2 + middle_slices // 2
         if model.use_cls:
@@ -183,11 +187,12 @@ class MaskedAutoencoderTrainer(ABC):
         X_train = X_train[:, _from:_to].mean(1).mean(-1)
         X_test = X_test[:, _from:_to].mean(1).mean(-1)
 
-        clf_cls = LogisticRegression(max_iter=1000)
-        clf_cls.fit(X_train, y_train)
-        y_pred = clf_cls.predict(X_test)
+        #clf = Pipeline([('l2', Normalizer(norm='l2')), ('scaler', StandardScaler()), ('clf', LogisticRegression(max_iter=10000))])
+        clf = LogisticRegression(max_iter=10000)
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode='sleep', scope='epoch', step=self.epoch_step)
+        self._log_from_cm(cm, mode=label, scope='epoch', step=self.epoch_step)
     
     def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None):
         opt = self.optimizer_fn(model)
@@ -242,7 +247,7 @@ class MaskedAutoencoderTrainer(ABC):
                 val_losses.append(val_loss)
 
                 if test_loader is not None:
-                    cm = self.run_sleep_classification(val_loader, test_loader, model)
+                    self.run_downstream_tasks(val_loader, test_loader, model)
             
                 imin = np.argmin(val_losses)
                 if self.best_model_idx is None or imin != self.best_model_idx:

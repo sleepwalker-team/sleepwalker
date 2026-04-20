@@ -224,7 +224,7 @@ def main():
             use_energy_tracker=False,
             tags={"model": "UTime"},
             collate_fn=batch_collate,
-            export_package_path=os.path.join("deployment","desaturation")
+            log_path=os.path.join("deployment", "desaturation"),
         )
     )
 

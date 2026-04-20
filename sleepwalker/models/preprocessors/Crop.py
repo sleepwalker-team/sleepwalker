@@ -14,13 +14,14 @@ class Crop(Preprocessor):
         sampling_rate: Sampling interval as a pandas-compatible timedelta.
         where: Crop anchor, one of `"left"`, `"middle"`, or `"right"`.
     """
-    def __init__(self, total_input, sampling_rate, where: Literal["left", "middle", "right"] = "middle", **kwargs):
+    def __init__(self, total_input, sampling_rate, where: Literal["left", "middle", "right"] = "middle", channels=None, **kwargs):
+        super().__init__(channels=channels)
         self.total_input = pd.to_timedelta(total_input)
         self.sampling_rate = pd.to_timedelta(sampling_rate)
         self.where = where
         self.len = int(self.total_input / self.sampling_rate)  # ensure integer length
 
-    def update(self, data:torch.Tensor):
+    def _update(self, data:torch.Tensor):
         """No-op warmup hook because cropping is stateless."""
         ...
 
@@ -28,7 +29,7 @@ class Crop(Preprocessor):
         """Return whether this preprocessor requires warmup."""
         return False 
 
-    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+    def _transform(self, data: torch.Tensor) -> torch.Tensor:
         """Crop one fixed-length segment from each input sequence."""
         # data: (batch_size, num_samples, num_features)
         B, T, D = data.shape

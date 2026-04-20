@@ -83,6 +83,43 @@ def test_normalize_stability_zero_variance():
     assert torch.allclose(out, torch.zeros_like(out))
 
 
+def test_normalize_selective_channels_only_updates_requested_indices():
+    data = torch.tensor(
+        [
+            [[1.0, 10.0, 100.0], [3.0, 10.0, 200.0]],
+            [[2.0, 10.0, 150.0], [4.0, 10.0, 300.0]],
+        ]
+    )
+    norm = Normalize(channels=[0, 2])
+    norm.update(data)
+
+    out = norm.transform(data)
+    assert out.shape == data.shape
+    assert torch.allclose(out[..., 1], data[..., 1])
+    assert not torch.allclose(out[..., 0], data[..., 0])
+    assert not torch.allclose(out[..., 2], data[..., 2])
+
+
+@pytest.mark.parametrize(
+    "channels,pattern",
+    [
+        ([], "must not be empty"),
+        ([0, 0], "duplicate"),
+        ([-1], "negative"),
+    ],
+)
+def test_preprocessor_rejects_invalid_channel_configs(channels, pattern):
+    with pytest.raises(ValueError, match=pattern):
+        Normalize(channels=channels)
+
+
+def test_preprocessor_rejects_out_of_range_channels_at_runtime():
+    norm = Normalize(channels=[0, 3])
+    data = torch.randn(2, 4, 3)
+    with pytest.raises(ValueError, match="out of range"):
+        norm.transform(data)
+
+
 # --------------------------
 # Spectogram tests
 # --------------------------
@@ -138,6 +175,13 @@ def test_spectrogram_consistency_cpu_vs_cuda():
 
     # They should be numerically close
     assert torch.allclose(out_cpu, out_gpu, atol=1e-5, rtol=1e-3)
+
+
+def test_spectrogram_rejects_selective_channel_merge_when_output_shape_changes():
+    spec = Spectrogram(n_fft=64, hop_length=16, channels=[0])
+    data = torch.randn(2, 512, 3)
+    with pytest.raises(ValueError, match="Selective preprocessing requires"):
+        spec.transform(data)
 
 # --------------------------
 # Crop tests
@@ -370,6 +414,9 @@ def test_normalizealongdim_forward(device, dim):
     assert torch.allclose(std, torch.ones_like(std), atol=1e-3)
 
 def test_peprocessor_chain(device="cuda"):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))
     NUM_PATIENTS = int(os.environ.get("NUM_PATIENTS", 5))
 
@@ -379,7 +426,14 @@ def test_peprocessor_chain(device="cuda"):
     assert len(edf_files) > 0
     edf_files = edf_files[:NUM_PATIENTS]
     preprocessors = [Spectrogram(), Normalize()]
-    dataset = SyntheticDataset(total_input="120s", patients = edf_files, channels = [ChannelConfig(name="EEG", normalizer=None)], sample_frequency=100, event_mapping={}, remove_unmapped_events=False)
+    dataset = SyntheticDataset(
+        total_input="120s",
+        channels=[ChannelConfig(name="EEG", normalizer=None)],
+        sample_frequency=100,
+        event_mapping={},
+        remove_unmapped_events=False,
+    )
+    dataset.initialize(edf_files)
     iterate_dataset(dataset, NUM_BATCHES, preprocessors=preprocessors, device=device)  
 
 if __name__ == '__main__':

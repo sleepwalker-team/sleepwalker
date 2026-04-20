@@ -15,8 +15,8 @@ class EmpiricalClipScaler(Preprocessor):
             bounds.
     """
         
-    def __init__(self, q=0.9, scale=1, **kwargs):
-        super().__init__()
+    def __init__(self, q=0.9, scale=1, channels=None, **kwargs):
+        super().__init__(channels=channels)
         self.mins = None
         self.maxs = None
         self.q = q
@@ -26,7 +26,7 @@ class EmpiricalClipScaler(Preprocessor):
         """Return whether this preprocessor requires warmup."""
         return True
 
-    def update(self, data: torch.Tensor):
+    def _update(self, data: torch.Tensor):
         """Update empirical min/max bounds from one batch."""
         x = data
         (_, _, n_features) = x.shape
@@ -42,7 +42,7 @@ class EmpiricalClipScaler(Preprocessor):
         self.mins = torch.minimum(emp_mins, self.mins)
         self.maxs = torch.maximum(emp_maxs, self.maxs)
 
-    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+    def _transform(self, data: torch.Tensor) -> torch.Tensor:
         """Clamp and rescale a tensor using the learned bounds."""
         if self.mins is None or self.maxs is None:
             logger.warning('EmpiricalClipScaler is not fitted; Return data as-is')

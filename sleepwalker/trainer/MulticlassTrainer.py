@@ -9,8 +9,10 @@ evaluation, and prediction-frame generation.
 from functools import partial
 import random
 from typing import Callable, Optional
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.metrics import confusion_matrix
 import torch
 
@@ -45,6 +47,10 @@ class MulticlassTrainer(BaseTrainer):
         class_weights: Optional manual per-class weights.
         balance_batches: Whether to reject overrepresented targets in
             ``prepare_target`` during training.
+        balance_gamma: Exponent applied to the inverse-frequency acceptance
+            probability during batch balancing. ``1.0`` reproduces the
+            previous behavior, values above ``1.0`` make balancing more
+            aggressive, and values between ``0`` and ``1`` make it weaker.
     """
 
     def __init__(
@@ -64,6 +70,7 @@ class MulticlassTrainer(BaseTrainer):
         loss_mode: str = "regular",
         class_weights: Optional[dict[str, float]] = None,
         balance_batches: bool = False,
+        balance_gamma: float = 1.0,
     ):
         super().__init__(
             epochs=epochs,
@@ -85,6 +92,7 @@ class MulticlassTrainer(BaseTrainer):
         self.loss_mode = loss_mode
         self.class_weights = dict(class_weights or {})
         self.balance_batches = balance_batches
+        self.balance_gamma = float(balance_gamma)
 
     def _keep_balanced_target(self, target, class_cnts: list[float]) -> bool:
         target_arr = target.detach().cpu().numpy() if isinstance(target, torch.Tensor) else np.asarray(target)
@@ -102,7 +110,8 @@ class MulticlassTrainer(BaseTrainer):
             raise ValueError(f"Target index {target_idx} out of range for {len(probas)} classes.")
 
         probas = probas / probas.sum()
-        keep_prob = float(np.clip(probas.min() / probas[target_idx], 0.0, 1.0))
+        raw_keep_prob = float(np.clip(probas.min() / probas[target_idx], 0.0, 1.0))
+        keep_prob = float(np.clip(raw_keep_prob ** self.balance_gamma, 0.0, 1.0))
         return random.random() <= keep_prob
 
     def _wrap_prepare_target_for_balancing(self, prepare_target, class_cnts: list[float]):
@@ -186,7 +195,7 @@ class MulticlassTrainer(BaseTrainer):
             frame[f"prob__{label}"] = probabilities[:, class_idx].tolist()
         return pd.DataFrame(frame)
 
-    def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0):
+    def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0, show_cm:bool = False):
         """Centralized metric logging from confusion matrix."""  
         total = cm.sum()  
         if total == 0:  
@@ -201,6 +210,15 @@ class MulticlassTrainer(BaseTrainer):
         logger.metric(f"{scope}/{mode}/f1_macro", f1_macro, step=step)  
         logger.metric(f"{scope}/{mode}/coehns_kappa", kappa, step=step)  
         logger.metric(f"{scope}/{mode}/loss", float(loss_value), step=step) 
+        if show_cm:
+            fig, ax = plt.subplots(figsize=(max(6, len(self.classes)), max(5, len(self.classes) * 0.8)))
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=self.classes)
+            disp.plot(ax=ax, cmap="Blues", colorbar=True, values_format="d")
+            ax.set_title(f"{scope} confusion matrix {mode} {step} ")
+            fig.tight_layout()
+            logger.figure(f"{mode}_cm_{scope}_{step}", fig)
+            plt.close(fig)
+            logger.info(render_confusion_table_grid([format_confusion_table(self.classes, cm)], header=f"{mode.upper()} confusion matrix", n_cols=1))
 
     def run_epoch(self, loader, opt, model, prefix=""):
         """Run one train, validation, or test epoch.
@@ -240,7 +258,7 @@ class MulticlassTrainer(BaseTrainer):
                 x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
                 y = y.view(base_batch, n_repeat, *y.shape[1:])[:, 0]
 
-                logits_sum = None
+                logits_sum = None 
                 for repeat_idx in range(n_repeat):
                     current_logits = model(x_grouped[:, repeat_idx])
                     logits_sum = current_logits if logits_sum is None else logits_sum + current_logits
@@ -248,11 +266,14 @@ class MulticlassTrainer(BaseTrainer):
             else:
                 logits = model(x)
 
-            loss = self.loss_function(logits, y)
-            
+            if logits.shape[1] == 1: # TODO add this to forward deployment!
+                loss = self.loss_function(logits, y.argmax(axis=1, keepdim=True).float())
+                pred_np = (logits >= 0.5).ravel().long().cpu().numpy()
+            else:
+                loss = self.loss_function(logits, y)
+                pred_np = logits.argmax(axis=1).cpu().numpy()
             target_np = y.argmax(axis=1).cpu().numpy()
-            pred_np = logits.argmax(axis=1).cpu().numpy()
-
+            
             if opt is not None:
                 loss.backward()
                 opt.step()
@@ -263,7 +284,7 @@ class MulticlassTrainer(BaseTrainer):
             loss_sum += float(loss.item())
 
             step = self.steps[mode]
-            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch", step=step) 
+            self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch", step=step, show_cm = False) 
 
             accs = cm_sum.trace() / cm_sum.sum() * 100.0
             f1_micro = f1_score_from_confusion_matrix(cm_sum, macro=False)
@@ -279,7 +300,7 @@ class MulticlassTrainer(BaseTrainer):
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
-        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step)  
-        logger.info(render_confusion_table_grid([format_confusion_table(self.classes, cm_sum)], header=f"{mode.upper()} confusion matrix", n_cols=1))
+        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm = True)  
+        
 
         return epoch_loss, cm_sum  

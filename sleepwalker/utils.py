@@ -1,6 +1,8 @@
 # unified_logger.py
 from __future__ import annotations
-import os, sys, logging, inspect
+import json
+import os, sys, logging, inspect, shutil
+from pathlib import Path
 from typing import Any, Dict, Optional, List, Protocol
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -115,6 +117,7 @@ class Sink(Protocol):
     def end(self, status: str = "FINISHED") -> None: ...
     def event(self, level: str, message: str, context: str) -> None: ...
     def metric(self, name: str, value: float, step:int, context: str) -> None: ...
+    def hparams(self, values: Dict[str, Any], context: str) -> None: ...
     def figure(self, name: str, figure: Any, context: str) -> None: ...
     def artifact(self, path: str, dest: Optional[str], context: str) -> None: ...
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress: ...
@@ -142,6 +145,9 @@ class StdLogSink:
         self._logger = logging.getLogger(f"UnifiedLogger.stdout.{id(self)}")
         self._logger.propagate = False
         self._logger.setLevel(logging.DEBUG)
+        self._formatter = formatter
+        self._file_handler: Optional[logging.FileHandler] = None
+        self._path: Optional[str] = None
 
         # Console
         ch = ConsoleTqdmHandler()
@@ -149,11 +155,22 @@ class StdLogSink:
         ch.setFormatter(formatter)
         self._logger.addHandler(ch)
 
-        # File
+        self.set_path(path)
+
+    def set_path(self, path: str) -> None:
+        if self._file_handler is not None:
+            self._logger.removeHandler(self._file_handler)
+            self._file_handler.close()
+
         fh = logging.FileHandler(path, mode="a", encoding="utf-8")
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(formatter)
+        fh.setFormatter(self._formatter)
         self._logger.addHandler(fh)
+        self._file_handler = fh
+        self._path = path
+
+    def get_path(self) -> Optional[str]:
+        return self._path
 
     def start(self, run_name, params, tags): pass
     def end(self, status="FINISHED"): pass
@@ -174,6 +191,7 @@ class StdLogSink:
         self._logger.handle(lr)
 
     def metric(self, name: str, value: float, step:int, context: str): pass
+    def hparams(self, values: Dict[str, Any], context: str): pass
     def figure(self, name: str, figure: Any, context: str): pass
     def artifact(self, path: str, dest: Optional[str], context: str): pass
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
@@ -193,6 +211,7 @@ class TqdmSink:
     def end(self, status="FINISHED"): pass
     def event(self, level, message, context: str): pass
     def metric(self, name, value, step, context: str): pass
+    def hparams(self, values: Dict[str, Any], context: str): pass
     def figure(self, name, figure, context: str): pass
     def artifact(self, path, dest, context: str): pass
 
@@ -266,6 +285,22 @@ class MlflowSink:
         # Context is ignored → metric name must be explicit
         self.mlflow.log_metric(name, float(value), step=step, synchronous=False)
 
+    def hparams(self, values: Dict[str, Any], context: str):
+        flat_params: dict[str, str | float | int] = {}
+        for key, value in values.items():
+            if isinstance(value, bool):
+                flat_params[key] = str(value)
+            elif isinstance(value, (str, int, float)):
+                flat_params[key] = value
+            else:
+                flat_params[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if flat_params:
+            self.mlflow.log_params(flat_params)
+        self.mlflow.log_text(
+            json.dumps(values, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            "hparams.json",
+        )
+
     def figure(self, name: str, figure: Any, context: str):
         import tempfile, os
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -286,15 +321,76 @@ class MlflowSink:
                 pass
 
     def artifact(self, path: str, dest: Optional[str], context: str):
-        # Context is ignored → artifact path only depends on dest
-        artifact_path = dest or ""
-        if os.path.isdir(path):
-            self.mlflow.log_artifacts(path, artifact_path=artifact_path)
-        else:
-            self.mlflow.log_artifact(path, artifact_path=artifact_path)
+        if self.artifact_uri is not None:
+            # Context is ignored → artifact path only depends on dest
+            artifact_path = dest or ""
+            if os.path.isdir(path):
+                self.mlflow.log_artifacts(path, artifact_path=artifact_path)
+            else:
+                self.mlflow.log_artifact(path, artifact_path=artifact_path)
 
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         # MLflow has no progress bar concept
+        return NullProgress()
+
+
+class LocalArtifactSink:
+    def __init__(self, base_path: str):
+        self.base_path = Path(base_path)
+
+    def start(self, run_name, params, tags):
+        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    def end(self, status="FINISHED"):
+        pass
+
+    def event(self, level, message, context: str):
+        pass
+
+    def metric(self, name, value, step, context: str):
+        pass
+
+    def hparams(self, values: Dict[str, Any], context: str):
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        path = self.base_path / "hparams.yml"
+        try:
+            import yaml  # type: ignore
+
+            with path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(values, f, sort_keys=False, allow_unicode=True)
+        except ModuleNotFoundError:
+            with path.open("w", encoding="utf-8") as f:
+                f.write(json.dumps(values, ensure_ascii=False, indent=2) + "\n")
+
+    def _dest_path(self, name: str, dest: Optional[str]) -> Path:
+        if dest:
+            return self.base_path / dest / name
+        return self.base_path / name
+
+    def figure(self, name: str, figure: Any, context: str):
+        figure_path = self.base_path / "figures" / f"{name}.png"
+        figure_path.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(figure, "savefig"):
+            figure.savefig(figure_path, bbox_inches="tight")
+        elif callable(figure):
+            figure(str(figure_path))
+        else:
+            raise TypeError("figure must be matplotlib.Figure or callable(path)")
+
+    def artifact(self, path: str, dest: Optional[str], context: str):
+        source = Path(path)
+        if not source.exists():
+            raise FileNotFoundError(path)
+        target = self._dest_path(source.name, dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+
+    def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         return NullProgress()
 
 
@@ -320,6 +416,22 @@ class UnifiedLogger:
         return self._level
 
     def add_sink(self, sink: Sink): self._sinks.append(sink)
+
+    def remove_sinks_by_type(self, sink_type: type) -> None:
+        self._sinks = [sink for sink in self._sinks if not isinstance(sink, sink_type)]
+
+    def set_log_file(self, path: str) -> None:
+        for sink in self._sinks:
+            if isinstance(sink, StdLogSink):
+                sink.set_path(path)
+                return
+        raise RuntimeError("UnifiedLogger has no StdLogSink configured.")
+
+    def get_log_file(self) -> Optional[str]:
+        for sink in self._sinks:
+            if isinstance(sink, StdLogSink):
+                return sink.get_path()
+        return None
 
     # ---- Context management ----
     def context(self, label: str): self._context.push(label)
@@ -365,6 +477,12 @@ class UnifiedLogger:
         ctx = self._ctx_str()
         for s in self._sinks:
             try: s.metric(name, float(value), step=step, context=ctx)
+            except Exception: pass
+
+    def hparams(self, values: Dict[str, Any]):
+        ctx = self._ctx_str()
+        for s in self._sinks:
+            try: s.hparams(values, context=ctx)
             except Exception: pass
 
     # ---- Figures / Artifacts ----

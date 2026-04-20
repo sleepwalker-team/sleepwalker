@@ -2,24 +2,22 @@
 
 The training scripts in the repository prepare datasets, models, trainers, and
 experiment metadata, then hand the assembled configuration to ``run(...)``.
-This module centralizes loader construction, training invocation, optional
-prediction-package export, and jsonl logging of test results.
+This module centralizes loader construction, training invocation, and jsonl
+logging of test results.
 """
-
-from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 from torchinfo import summary
 
-from sleepwalker.deployment import export_prediction_package
 from sleepwalker.trainer.utils.disk import append_to_jsonl
 from sleepwalker.trainer.utils.splits import combine_datasets
-from sleepwalker.utils import logger
+from sleepwalker.utils import LocalArtifactSink, MlflowSink, logger
 
 
 @dataclass
@@ -47,12 +45,7 @@ class RunCfg:
             tracker.
         tags: Logging tags forwarded to the repository logger.
         collate_fn: Required collate function used for all loaders.
-        export_package_path: Optional ``.swmodel`` export path.
-        export_package_unlabelled_dataset: Optional explicit dataset template to
-            export for inference.
-        export_package_model_card_md: Markdown stored in the exported package.
-        export_package_metadata: Extra metadata merged into the exported
-            package manifest.
+        meta_data: Optional structured run metadata logged as hparams.
     """
 
     experiment_name: str
@@ -67,12 +60,11 @@ class RunCfg:
     num_workers_dataloader: int
     test_repeats: list[int] = field(default_factory=lambda: [1])
     use_energy_tracker: bool = False
+    use_mlflow: bool = False
+    log_path: str = "sleepwalker"
     tags: dict[str, str] = field(default_factory=dict)
     collate_fn: Any = None
-    export_package_path: str | None = None
-    export_package_unlabelled_dataset: Any = None
-    export_package_model_card_md: str = ""
-    export_package_metadata: dict[str, Any] = field(default_factory=dict)
+    meta_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -143,21 +135,14 @@ def build_loader(
 def _infer_summary_input_size(train_dataset):
     try:
         ts_len = train_dataset.get_timeseries_len()
+        n_channels = len(train_dataset.get_input_channels())
+        return ts_len, n_channels
     except Exception:
         return None
 
-    if hasattr(train_dataset, "channels"):
-        n_channels = len(train_dataset.channels)
-    elif hasattr(train_dataset, "get_input_channels"):
-        n_channels = len(train_dataset.get_input_channels())
-    else:
-        return None
-
-    return ts_len, n_channels
-
 
 def run(cfg: RunCfg) -> RunResult:
-    """Execute a prepared training run and optional post-training export.
+    """Execute a prepared training run.
 
     Args:
         cfg: Fully prepared run configuration.
@@ -167,8 +152,8 @@ def run(cfg: RunCfg) -> RunResult:
         training result, and per-dataset test records.
 
     Raises:
-        ValueError: If required configuration such as ``collate_fn`` or export
-            dataset selection is missing.
+        ValueError: If required configuration such as ``collate_fn`` is
+            missing.
     """
     if cfg.collate_fn is None:
         raise ValueError("RunCfg.collate_fn must not be None.")
@@ -183,10 +168,16 @@ def run(cfg: RunCfg) -> RunResult:
         tracker = EnergyTracker(project_name=cfg.experiment_name)
         tracker.start()
 
-    logger.start_run(run_name=cfg.experiment_name, tags=cfg.tags)
+    os.makedirs(cfg.log_path, exist_ok=True)
+    local_artifact_path = os.path.join(cfg.log_path, cfg.experiment_name)
+    logger.add_sink(LocalArtifactSink(local_artifact_path))
 
-    if os.path.exists("sleepwalker.log"):
-        os.remove("sleepwalker.log")
+    if cfg.use_mlflow:
+        logger.add_sink(MlflowSink(tracking_uri=f"sqlite:///{os.path.join(cfg.log_path, 'mlflow.sqlite')}", experiment=cfg.experiment_name, artifact_uri=None))
+    logger.start_run(run_name=cfg.experiment_name, tags=cfg.tags)
+    
+    if cfg.meta_data:
+        logger.hparams(cfg.meta_data)
 
     logger.info(f"Loaded {train_dataset.get_n_patients()} for training")
     if val_dataset is not None:
@@ -218,28 +209,14 @@ def run(cfg: RunCfg) -> RunResult:
 
     train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
     if "checkpoint" in train_result:
+        logger.artifact(path=os.path.join(train_result["checkpoint"], "model.pt"), dest=f"final")
+        logger.artifact(path=os.path.join(train_result["checkpoint"], "optimizer.pt"), dest=f"final")
+        if Path(os.path.join(train_result["checkpoint"], "scheduler.pt")).is_file():
+            logger.artifact(path=os.path.join(train_result["checkpoint"], "scheduler.pt"), dest=f"final")
+
         with torch.inference_mode():
             state_dict = torch.load(os.path.join(train_result["checkpoint"], "model.pt"), map_location="cpu")
             cfg.model.load_state_dict(state_dict)
-
-    if cfg.export_package_path is not None:
-        export_dataset = cfg.export_package_unlabelled_dataset
-        if export_dataset is None:
-            if len(cfg.train_datasets) == 1:
-                export_dataset = cfg.train_datasets[0]
-            else:
-                raise ValueError(
-                    "RunCfg.export_package_unlabelled_dataset must be provided when exporting a prediction package "
-                    "from multiple training datasets."
-                )
-        export_prediction_package(
-            cfg.export_package_path,
-            model=cfg.model,
-            trainer=cfg.trainer,
-            dataset=export_dataset,
-            model_card_md=cfg.export_package_model_card_md,
-            metadata=cfg.export_package_metadata,
-        )
 
     test_records: list[dict[str, Any]] = []
     for dataset_name, test_dataset in cfg.test_datasets:
@@ -258,6 +235,7 @@ def run(cfg: RunCfg) -> RunResult:
             )
             test_loss, test_cm = cfg.trainer.test(cfg.model, test_loader)
             record = {
+                "name":cfg.experiment_name,
                 "model": cfg.model_name,
                 "test_loss": test_loss,
                 "test_cm": test_cm,
@@ -265,13 +243,13 @@ def run(cfg: RunCfg) -> RunResult:
                 "train_cm": train_result["outputs"],
                 "dataset": dataset_name,
                 "classes": train_dataset.get_classes(),
-                "artifact_root": train_result["checkpoint"] if "checkpoint" in train_result else "",
+                "path": os.path.join(cfg.log_path, cfg.experiment_name),
             }
             if len(cfg.test_repeats) > 1:
                 record["repeat"] = repeat
             if "best_model" in train_result:
                 record["best_model"] = train_result["best_model"]
-            append_to_jsonl(cfg.experiment_name, record)
+            append_to_jsonl(os.path.join(cfg.log_path, "results"), record)
             test_records.append(record)
             logger.uncontext()
 

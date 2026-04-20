@@ -10,14 +10,14 @@ class Normalize(Preprocessor):
     standardizes later inputs using those estimates.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, channels=None):
+        super().__init__(channels=channels)
         self.register_buffer("mean", None)
         self.register_buffer("M2", None)
         self.count = 0
         # self.register_buffer("count", torch.tensor(0.0))
 
-    def update(self, data: torch.Tensor):
+    def _update(self, data: torch.Tensor):
         """Update running mean and second-moment statistics from one batch."""
         # Batch statistics
         batch_count = data.shape[0]
@@ -46,7 +46,7 @@ class Normalize(Preprocessor):
         """Return whether this preprocessor requires warmup."""
         return True
 
-    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+    def _transform(self, data: torch.Tensor) -> torch.Tensor:
         """Normalize a tensor using the accumulated running statistics."""
         if self.mean is not None and self.M2 is not None and self.count > 1:
             var = self.M2 / (self.count - 1)

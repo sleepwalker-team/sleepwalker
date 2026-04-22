@@ -22,6 +22,13 @@ def masked_mse(y_pred, y_true, mask):
     mask_expanded = mask.expand_as(sq_err)
     return (sq_err * mask_expanded).sum() / mask_expanded.sum().clamp(min=1)
 
+def center_per_patient(X: np.ndarray, patient_ids: np.ndarray) -> np.ndarray:
+    unique_ids = np.unique(patient_ids)
+    for uid in unique_ids:
+        mask = patient_ids == uid
+        X[mask] -= X[mask].mean(axis=0)
+    return X
+
 class MaskedAutoencoderTrainer(ABC):
     def __init__(
         self,
@@ -140,37 +147,47 @@ class MaskedAutoencoderTrainer(ABC):
         # Embed the training data for the downstream model
         X = []
         y = []
+        patient_ids = []
         for batch in val_loader:
             x = batch['data'].to(self.device)
+            pids = batch['patient']
             class_label = batch['target'].argmax(-1)
             embeddings = model.embed(x)
 
             X.append(embeddings)
             y.append(class_label)
+            patient_ids.append(pids)
             logger.progress_advance(val_loader.batch_size)
 
         logger.progress_close()
 
         X_train = torch.cat(X, 0).cpu().numpy()
         y_train = torch.cat(y, 0).cpu().numpy()
+        patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
+        X_train = center_per_patient(X_train, patient_ids)
 
         # Embed the test data for the downstream model
         logger.progress_start(total=len(test_loader) * test_loader.batch_size, desc='Embed TEST', leave=True)
         X = []
         y = []
+        patient_ids = []
         for batch in test_loader:
             x = batch['data'].to(self.device)
             class_label = batch['target'].argmax(-1)
+            pids = batch['patient']
             embeddings = model.embed(x)
 
             X.append(embeddings)
             y.append(class_label)
+            patient_ids.append(pids)
             logger.progress_advance(test_loader.batch_size)
 
         logger.progress_close()
 
         X_test = torch.cat(X, 0).cpu().numpy()
         y_test = torch.cat(y, 0).cpu().numpy()
+        patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
+        X_test = center_per_patient(X_test, patient_ids)
 
         self.run_sleep_classification(X_train, X_test, y_train, y_test, model, middle_slices=50)
 
@@ -186,6 +203,11 @@ class MaskedAutoencoderTrainer(ABC):
 
         X_train = X_train[:, _from:_to].mean(1).mean(-1)
         X_test = X_test[:, _from:_to].mean(1).mean(-1)
+
+        # np.save('embeddings/X_train.npy', X_train)
+        # np.save('embeddings/X_test.npy', X_test)
+        # np.save('embeddings/y_train.npy', y_train)
+        # np.save('embeddings/y_test.npy', y_test)
 
         #clf = Pipeline([('l2', Normalizer(norm='l2')), ('scaler', StandardScaler()), ('clf', LogisticRegression(max_iter=10000))])
         clf = LogisticRegression(max_iter=10000)

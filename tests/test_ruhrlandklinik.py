@@ -1,6 +1,7 @@
 import pandas as pd
 
 from sleepwalker.datasets import Ruhrlandklinik
+from sleepwalker.datasets.Ruhrlandklinik import get_channels
 
 
 def make_dataset() -> Ruhrlandklinik:
@@ -86,3 +87,26 @@ def test_expand_change_based_body_positions_ignores_duplicate_changes():
         pd.Timestamp("2020-01-01 00:20:00"),
         pd.Timestamp("2020-01-01 00:30:00"),
     ]
+
+
+def test_get_channels_grouped_keeps_candidates_but_exposes_grouped_inputs():
+    channels = get_channels(
+        ["eeg", "chin_emg"],
+        grouped=True,
+        include_quality=False,
+        normalize=False,
+        sample_frequency=100,
+    )
+
+    assert len(channels) == 9
+
+    dataset = Ruhrlandklinik(
+        channels=channels,
+        sample_frequency=100,
+        total_input="30s",
+        target_resolution="1s",
+        event_mapping={},
+        remove_unmapped_events=False,
+    )
+
+    assert dataset.get_input_channels() == ["EEG", "Chin EMG"]

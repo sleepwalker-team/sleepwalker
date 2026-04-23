@@ -17,8 +17,8 @@ class Spectrogram(Preprocessor):
             into several shorter spectrogram examples.
     """
 
-    def __init__(self, n_fft=256, hop_length=64, win_length=None, epoch_len_samples=None):
-        super().__init__()
+    def __init__(self, n_fft=256, hop_length=64, win_length=None, epoch_len_samples=None, channels=None):
+        super().__init__(channels=channels)
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length or n_fft
@@ -28,7 +28,7 @@ class Spectrogram(Preprocessor):
         window = torch.hamming_window(self.win_length, periodic=False)
         self.register_buffer("window", window)
  
-    def update(self, data: torch.Tensor):
+    def _update(self, data: torch.Tensor):
         """No-op warmup hook because spectrogram extraction is stateless."""
         pass
 
@@ -37,7 +37,7 @@ class Spectrogram(Preprocessor):
         return False
 
     @torch.inference_mode()
-    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+    def _transform(self, data: torch.Tensor) -> torch.Tensor:
         """Convert batched signals into batched spectrogram tensors.
 
         Args:

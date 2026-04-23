@@ -15,7 +15,267 @@ from sleepwalker.utils import logger
 import pandas as pd
 import xlrd
 
-from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig
+from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
+from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
+from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
+from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
+
+
+RUHRLAND_CHANNEL_GROUPS = {
+    "eeg": ["C3-M2", "C4-M1", "F3-M2", "F4-M1", "O1-M2", "O2-M1"],
+    "eog": ["E1-M2", "E2-M1"],
+    "chin_emg": ["1-2", "1-F", "2-F"],
+    "leg_emg": ["Right Leg", "Left Leg"],
+    "emg": ["1-2", "1-F", "2-F", "Right Leg", "Left Leg"],
+    "respiratory": [
+        "RIP Flow",
+        "RIP Sum",
+        "RIP-Phase",
+        "RIP Flow Cal",
+        "RIP Sum Cal",
+        "Abdomen",
+        "Abdomen CaL",
+        "Inductance Abdom",
+        "Chest",
+        "Inductance Thora",
+        "Saturation",
+        "SpO2 B-B",
+    ],
+    "pulse": ["Pulse Waveform", "Pulse", "Heart Rate"],
+}
+
+RUHRLAND_QUALITY_CHANNELS = {
+    "C3-M2": "C3 Impedanz",
+    "C4-M1": "C4 Impedanz",
+    "F3-M2": "F3 Impedanz",
+    "F4-M1": "F4 Impedanz",
+    "O1-M2": "O1 Impedanz",
+    "O2-M1": "O2 Impedanz",
+    "E1-M2": "E1 Impedanz",
+    "E2-M1": "E2 Impedanz",
+    "1-2": "1 Impedanz",
+    "1-F": "1 Impedanz",
+    "2-F": "2 Impedanz",
+    "Right Leg": "Rechtes Bein Imp",
+    "Left Leg": "Linkes Bein Impe",
+}
+
+
+def ruhrland_normalizer(channel_name: str, sample_frequency: float):
+    """Return a convenience normalizer for a Ruhrland channel.
+
+    The mappings below are pragmatic defaults for current lab scripts. They
+    are intentionally lightweight and should not be treated as validated
+    clinical preprocessing settings.
+    """
+    if channel_name in RUHRLAND_CHANNEL_GROUPS["eeg"] or channel_name in RUHRLAND_CHANNEL_GROUPS["eog"]:
+        return EEGFilterNormalizer(fs=sample_frequency)
+    if channel_name in RUHRLAND_CHANNEL_GROUPS["chin_emg"] or channel_name in RUHRLAND_CHANNEL_GROUPS["leg_emg"]:
+        return SignalFilterNormalizer(fs=sample_frequency, lowcut=10.0, highcut=45.0, notch_freq=50.0)
+    if channel_name in {"RIP Flow", "RIP Sum", "RIP-Phase", "RIP Flow Cal", "RIP Sum Cal", "Abdomen", "Abdomen CaL", "Inductance Abdom", "Chest", "Inductance Thora"}:
+        return RespirationFilterNormalizer(fs=sample_frequency)
+    if channel_name in {"Saturation", "SpO2 B-B"}:
+        return SaturationFilterNormalizer(fs=sample_frequency)
+    if channel_name == "Pulse Waveform":
+        return PulseFilterNormalizer(fs=sample_frequency)
+    if channel_name in {"Pulse", "Heart Rate"}:
+        return SignalFilterNormalizer(fs=sample_frequency, lowcut=0.5, highcut=8.0)
+    return None
+
+
+def ruhrland_group_name(subgroup: str, grouped: bool) -> str | None:
+    """Resolve the logical group label used for grouped channel sampling."""
+    if not grouped:
+        return None
+    if subgroup == "eeg":
+        return "EEG"
+    if subgroup == "eog":
+        return "EOG"
+    if subgroup == "chin_emg":
+        return "Chin EMG"
+    if subgroup == "leg_emg":
+        return "Leg EMG"
+    return None
+
+
+def resolve_normalizer(
+    channel_name: str,
+    group_name: str | None,
+    normalize: bool,
+    override_normalize: dict[str, object | None] | None,
+    sample_frequency: float,
+):
+    """Resolve the effective normalizer for one Ruhrland channel.
+
+    Exact channel overrides win over group overrides. When no override matches,
+    ``normalize`` controls whether the inferred Ruhrland default is used.
+    """
+    if override_normalize is not None:
+        if channel_name in override_normalize:
+            return override_normalize[channel_name]
+        if group_name is not None and group_name in override_normalize:
+            return override_normalize[group_name]
+    if not normalize:
+        return None
+    return ruhrland_normalizer(channel_name, sample_frequency)
+
+
+def resolve_quality(
+    channel_name: str,
+    group_name: str | None,
+    include_quality: bool,
+    override_quality: dict[str, str | None] | None,
+):
+    """Resolve the effective quality channel for one Ruhrland channel.
+
+    Exact channel overrides win over group overrides. When no override matches,
+    ``include_quality`` controls whether the inferred Ruhrland quality mapping
+    is used.
+    """
+    if override_quality is not None:
+        if channel_name in override_quality:
+            return override_quality[channel_name]
+        if group_name is not None and group_name in override_quality:
+            return override_quality[group_name]
+    if not include_quality:
+        return None
+    return RUHRLAND_QUALITY_CHANNELS.get(channel_name)
+
+
+def get_channels(
+    group_names: list[str],
+    grouped: bool,
+    include_quality: bool,
+    normalize: bool,
+    sample_frequency: float,
+    override_normalize: dict[str, object | None] | None = None,
+    override_quality: dict[str, str | None] | None = None,
+) -> list[ChannelConfig]:
+    """Build Ruhrland channel configurations from groups and/or channel names.
+
+    The channel names were cross-referenced against the Ruhrlandklinik dataset
+    summary in this module's docstring. The helper favors referenced EEG, EOG,
+    and EMG channels because those are the most plausible defaults from the
+    currently documented channel inventory.
+
+    Supported group names:
+        - ``eeg``
+        - ``eog``
+        - ``chin_emg``
+        - ``leg_emg``
+        - ``emg``: expands to chin and leg EMG defaults
+        - ``respiratory``
+        - ``pulse``
+
+    Items that do not match a known group name are treated as literal channel
+    names. Group matching takes precedence over literal channel lookup.
+
+    Args:
+        group_names: Semantic channel groups and/or literal channel names to
+            include.
+        grouped: Whether alternative channels within EEG, EOG, chin EMG, and
+            leg EMG should be exposed under a shared group name.
+        include_quality: Whether impedance or companion quality channels should
+            be attached when visible in the Ruhrland channel inventory.
+        normalize: Whether to attach inferred default normalizers.
+        override_normalize: Optional normalizer overrides keyed by exact
+            channel name or group name. Exact channel keys win over group keys.
+            Use ``None`` to disable normalization explicitly.
+        override_quality: Optional quality-channel overrides keyed by exact
+            channel name or group name. Exact channel keys win over group keys.
+            Use ``None`` to disable quality explicitly.
+        sample_frequency: Sampling frequency forwarded to the normalizers.
+
+    Returns:
+        A list of :class:`ChannelConfig` objects that can be passed to
+        ``BaseDataset`` subclasses such as :class:`Ruhrlandklinik`.
+
+    Examples:
+        Use inferred defaults everywhere:
+
+        >>> get_channels(["eeg", "Pulse Waveform"], grouped=True, include_quality=True, normalize=True)
+
+        Disable normalization for all EEG channels while using a custom
+        normalizer for one literal channel:
+
+        >>> get_channels(
+        ...     ["eeg", "Pulse Waveform"],
+        ...     grouped=True,
+        ...     include_quality=True,
+        ...     normalize=True,
+        ...     override_normalize={
+        ...         "eeg": None,
+        ...         "Pulse Waveform": PulseFilterNormalizer(fs=100),
+        ...     },
+        ... )
+    """
+    requested = []
+    seen_names = set()
+    valid_groups = set(RUHRLAND_CHANNEL_GROUPS.keys())
+
+    for raw_group_name in group_names:
+        group_name = raw_group_name.lower().strip()
+        if group_name in valid_groups:
+            if group_name == "emg":
+                subgroups = ["chin_emg", "leg_emg"]
+            else:
+                subgroups = [group_name]
+
+            for subgroup in subgroups:
+                logical_group = ruhrland_group_name(subgroup, grouped)
+
+                for channel_name in RUHRLAND_CHANNEL_GROUPS[subgroup]:
+                    if channel_name in seen_names:
+                        continue
+                    seen_names.add(channel_name)
+                    requested.append(
+                        ChannelConfig(
+                            name=channel_name,
+                            normalizer=resolve_normalizer(
+                                channel_name=channel_name,
+                                group_name=subgroup,
+                                normalize=normalize,
+                                override_normalize=override_normalize,
+                                sample_frequency=sample_frequency,
+                            ),
+                            group=logical_group,
+                            quality_name=resolve_quality(
+                                channel_name=channel_name,
+                                group_name=subgroup,
+                                include_quality=include_quality,
+                                override_quality=override_quality,
+                            ),
+                        )
+                    )
+            continue
+
+        channel_name = raw_group_name
+        if channel_name in seen_names:
+            continue
+        seen_names.add(channel_name)
+        requested.append(
+            ChannelConfig(
+                name=channel_name,
+                normalizer=resolve_normalizer(
+                    channel_name=channel_name,
+                    group_name=None,
+                    normalize=normalize,
+                    override_normalize=override_normalize,
+                    sample_frequency=sample_frequency,
+                ),
+                group=None,
+                quality_name=resolve_quality(
+                    channel_name=channel_name,
+                    group_name=None,
+                    include_quality=include_quality,
+                    override_quality=override_quality,
+                ),
+            )
+        )
+
+    return requested
 
 class Ruhrlandklinik(BaseDataset):
     """Dataset adapter for Ruhrlandklinik recordings and annotations.

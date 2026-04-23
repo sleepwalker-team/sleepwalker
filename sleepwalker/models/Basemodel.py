@@ -49,7 +49,7 @@ class BaseModel(nn.Module, ABC):
             up = 0
             
         for p in self.preprocessors[:up]:
-            x = p(x)
+            x = p.transform(x) if hasattr(p, "transform") else p(x)
         return x
 
     def features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract

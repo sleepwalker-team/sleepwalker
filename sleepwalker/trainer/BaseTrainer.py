@@ -340,7 +340,7 @@ class BaseTrainer(ABC):
         self.best_checkpoint = None
         self.steps = {"train": 0, "val": 0, "test": 0}
         self.epoch_step = 0
-        self.last_folder = None
+        last_folder = None
 
         for epoch in range(self.epochs):
             self._set_loader_epoch(train_loader, epoch)
@@ -351,11 +351,11 @@ class BaseTrainer(ABC):
 
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
-                self.last_folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
-                logger.artifact(path=os.path.join(self.last_folder, "model.pt"), dest=f"{epoch}")
-                logger.artifact(path=os.path.join(self.last_folder, "optimizer.pt"), dest=f"{epoch}")
+                last_folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
+                logger.artifact(path=os.path.join(last_folder, "model.pt"), dest=f"{epoch}")
+                logger.artifact(path=os.path.join(last_folder, "optimizer.pt"), dest=f"{epoch}")
                 if lr_scheduler:
-                    logger.artifact(path=os.path.join(self.last_folder, "scheduler.pt"), dest=f"{epoch}")
+                    logger.artifact(path=os.path.join(last_folder, "scheduler.pt"), dest=f"{epoch}")
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -388,8 +388,8 @@ class BaseTrainer(ABC):
 
             self.epoch_step += 1
 
-        if self.last_folder is not None:
-            return {"losses": losses, "outputs": outputs, "checkpoint": self.last_folder}
+        if last_folder is not None:
+            return {"losses": losses, "outputs": outputs, "checkpoint": last_folder}
         return {"losses": losses, "outputs": outputs}
 
     @abstractmethod

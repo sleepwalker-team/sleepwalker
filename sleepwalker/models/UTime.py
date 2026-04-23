@@ -13,6 +13,7 @@ Notes:
 """
 
 import random
+from typing import Iterable, Optional
 import numpy as np
 import pandas as pd
 import torch
@@ -243,9 +244,10 @@ class UTime(BaseModel):
         kernel=5, 
         mlp_size = 32, 
         conv = "regular", 
-        epoch_len = None
+        epoch_len = None,
+        preprocessors: Optional[Iterable] = None
         ):
-        super(UTime, self).__init__()
+        super(UTime, self).__init__(preprocessors)
 
         self.classes = list(classes) if classes is not None else None
         self.ts_len = ts_len

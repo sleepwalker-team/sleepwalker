@@ -167,17 +167,15 @@ def test_export_prediction_package_appends_swmodel_extension_when_missing():
         assert (Path(tmpdir) / "test_package.swmodel").is_file()
 
 
-def test_run_can_export_prediction_package():
+def test_run_writes_meta_data_into_run_folder():
     model = TinyModel()
     trainer = StubTrainer()
     train_dataset = RunDataset()
-    export_unlabelled_dataset = MinimalDataset().to_unlabelled()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        package_path = os.path.join(tmpdir, "unit-run-export.swmodel")
         result = run(
             RunCfg(
-                experiment_name="unit-run-export",
+                experiment_name="unit-run-meta",
                 model_name="TinyModel",
                 model=model,
                 trainer=trainer,
@@ -188,16 +186,17 @@ def test_run_can_export_prediction_package():
                 n_samples=None,
                 num_workers_dataloader=0,
                 collate_fn=batch_collate,
-                export_package_path=package_path,
-                export_package_unlabelled_dataset=export_unlabelled_dataset,
-                export_package_model_card_md="# exported\n",
-                export_package_metadata={"source": "run"},
+                log_path=tmpdir,
+                meta_data={"source": "run", "kind": "test"},
             )
         )
 
-        package = load_prediction_package(package_path, map_location="cpu")
-        assert result.experiment_name == "unit-run-export"
-        assert package.metadata["source"] == "run"
+        meta_path = Path(tmpdir) / "unit-run-meta" / "meta_data.yml"
+        assert result.experiment_name == "unit-run-meta"
+        assert meta_path.is_file()
+        content = meta_path.read_text(encoding="utf-8")
+        assert "source" in content
+        assert "run" in content
 
 
 def test_export_prediction_package_accepts_numpy_dataset_and_exports_unlabelled_dataset():

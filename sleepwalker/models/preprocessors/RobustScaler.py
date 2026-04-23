@@ -12,8 +12,8 @@ class RobustScaler(Preprocessor):
         upper_quantile: Upper quantile used for the IQR estimate.
     """
 
-    def __init__(self, lower_quantile: float = 0.25, upper_quantile: float = 0.75, **kwargs):
-        super().__init__()
+    def __init__(self, lower_quantile: float = 0.25, upper_quantile: float = 0.75, channels=None, **kwargs):
+        super().__init__(channels=channels)
 
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile
@@ -109,12 +109,12 @@ class RobustScaler(Preprocessor):
         self.marker_heights[feature, k] += parabolic_adjustment.mean()  # Use mean adjustment for the batch
         self.marker_positions[feature, k] += values.size(0)  # Shift marker position by the batch size
 
-    def update(self, data: torch.Tensor):
+    def _update(self, data: torch.Tensor):
         """Alias `push` and increment the update counter."""
         self.push(data)
         self.cnt += 1
 
-    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+    def _transform(self, data: torch.Tensor) -> torch.Tensor:
         """Scale data using the current median and IQR estimates."""
         if self.is_initialized: #and self.cnt > 100
             batch_size, num_samples, num_features = data.shape

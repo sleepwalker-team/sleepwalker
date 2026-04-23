@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import random
 import pytest
 from unittest.mock import Mock
 
@@ -349,6 +350,34 @@ def test_grouped_multiclass_trainer_test_wraps_loader_with_repeat_sampler():
     assert loss >= 0
     assert cm.sum() == 2
     assert cm.trace() == 2
+
+
+def test_multiclass_trainer_balance_gamma_changes_acceptance_strength(monkeypatch):
+    trainer_default = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
+        classes=["majority", "minority"],
+        loss_function=torch.nn.functional.cross_entropy,
+        device="cpu",
+        balance_batches=True,
+        balance_gamma=1.0,
+    )
+    trainer_stronger = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
+        classes=["majority", "minority"],
+        loss_function=torch.nn.functional.cross_entropy,
+        device="cpu",
+        balance_batches=True,
+        balance_gamma=2.0,
+    )
+
+    target = torch.tensor([1.0, 0.0])
+    class_cnts = [9.0, 1.0]
+
+    monkeypatch.setattr(random, "random", lambda: 0.05)
+    assert trainer_default._keep_balanced_target(target, class_cnts) is True
+    assert trainer_stronger._keep_balanced_target(target, class_cnts) is False
 
 def test_synthetic_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))

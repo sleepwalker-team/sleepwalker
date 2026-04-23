@@ -367,9 +367,6 @@ def main():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
 
-    if os.path.exists("sleepwalker.log"):
-        os.remove("sleepwalker.log")
-
     logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
 
     logger.context("Train")

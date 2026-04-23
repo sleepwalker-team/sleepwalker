@@ -201,7 +201,7 @@ class MulticlassTrainer(BaseTrainer):
         if total == 0:  
             return  
         
-        acc = cm.trace() / total * 100.0  
+        acc = cm.trace() / total  
         f1_micro = f1_score_from_confusion_matrix(cm, macro=False)  
         f1_macro = f1_score_from_confusion_matrix(cm, macro=True)  
         kappa = cohen_kappa_from_confusion_matrix(cm)  

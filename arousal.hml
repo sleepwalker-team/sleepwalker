@@ -1,0 +1,9 @@
+script: python train_arousal.py
+args:
+    grouped: True
+    scaler: True
+    clean: True
+    arousal_weight: {{ 10 || 12 || 15}}
+    channels: ["eeg", "eog", "chin_emg", "ECG"]
+    model: {{ "utime-huge" || "utime-big" || "multi"}}
+    total_input: {{ "60s" || "90s" || "120s" }}

@@ -7,6 +7,7 @@ from collections import defaultdict
 import os
 from functools import partial
 
+import pandas as pd
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 
 os.environ["OMP_NUM_THREADS"] = "2"
@@ -47,11 +48,21 @@ N_SAMPLES = 100_000
 NUM_WORKERS_DATASET = 8
 NUM_WORKERS_DATALOADER = 8
 SAMPLE_FREQUENCY = 100
-TOTAL_INPUT = "30s" #120s
+# TOTAL_INPUT = "30s" #120s
 TARGET_RESOLUTION = "1s" #0.5s
 STRIDE = "1s"            #0.5s
 SLEEP_PERCENTAGE = 0.5
 TARGET_CLASSES = ["no_arousal", "arousal"]
+
+
+def infer_sleeptransformer_epoch_seq_len(total_input: str) -> int:
+    total_input_seconds = pd.to_timedelta(total_input).total_seconds()
+    approx_seq_len = total_input_seconds / 21
+    epoch_seq_len = max(1, int(round(approx_seq_len)))
+    if epoch_seq_len % 2 == 0:
+        epoch_seq_len += 1 if approx_seq_len >= epoch_seq_len else -1
+    # Keep the 630s -> 29 SleepTransformer anchor while preserving an odd center token.
+    return min(epoch_seq_len, 29)
 
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
     trimmed = trim_wake(data_df, label_df, label_extra_df)
@@ -90,7 +101,7 @@ def prepare_sample(
         item["target_extra"] = target_extra
     return item
 
-def build_dataset(patients: list[str], channels: list[str], clean:bool, grouped: bool):
+def build_dataset(patients: list[str], channels: list[str], clean:bool, grouped: bool, total_input:str):
     EVENT_MAPPING = {
         "arousal": "arousal",
         #"rera": "arousal", 
@@ -130,7 +141,7 @@ def build_dataset(patients: list[str], channels: list[str], clean:bool, grouped:
         prepare_patient=prepare_patient,
         prepare_target=prepare_arousal_target,
         prepare_sample=prepare_sample,
-        total_input=TOTAL_INPUT,
+        total_input=total_input,
         target_resolution=TARGET_RESOLUTION,
     )
     dataset.classes = list(TARGET_CLASSES)
@@ -186,7 +197,7 @@ def list_patients(source_root: str, channels: list[str], grouped: bool, dry_run:
     ]
     return patients[:2] if dry_run else patients
 
-def build_model_and_trainer(train_dataset, model, scaler, grouped,arousal_weight, dry):
+def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weight, dry, total_input):
     n_channels = len(train_dataset.get_input_channels())
     if model == "utime-big":
         model = UTime(
@@ -200,6 +211,21 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped,arousal_weight
             norm="channel",
             activation="elu",
             mlp_size=512,
+            dropout_p=0,
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not grouped else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None
+        )
+    elif model == "utime-huge":
+        model = UTime(
+            ts_len=train_dataset.get_timeseries_len(),
+            n_channels=n_channels,
+            classes=TARGET_CLASSES, #["arousal"],
+            sampling_frequency=SAMPLE_FREQUENCY,
+            channel = [32, 64, 128, 128, 256],
+            kernel = [5, 5, 3, 3, 3],
+            maxpool = [5, 5, 3, 3, 3],
+            norm="channel",
+            activation="elu",
+            mlp_size=1024,
             dropout_p=0,
             preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not grouped else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None
         )
@@ -225,7 +251,7 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped,arousal_weight
             eeg_channels = ["C3-M2", "C4-M1", "F3-M2", "F4-M1", "O1-M2", "O2-M1"]
         
         aux_channels = [channel for channel in train_dataset.get_input_channels() if channel not in eeg_channels]
-        if "EEG" not in train_dataset.get_input_channels() or len(aux_channels) == 0:
+        if len(eeg_channels) == 0 or len(aux_channels) == 0:
             raise ValueError("Multimodel requires at least one EEG and one non-EEG input channel.")
 
         aux_model = UTime(
@@ -240,12 +266,12 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped,arousal_weight
             mlp_size=64,
             dropout_p=0,
             activation="elu",
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None 
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels-1)])] if scaler else None 
         )
         eeg_model = SleepTransformer(
             classes=None,
             n_channels=len(eeg_channels),
-            epoch_seq_len=5
+            epoch_seq_len=infer_sleeptransformer_epoch_seq_len(total_input),
         )
         model = MultiModel(
             classes=TARGET_CLASSES,
@@ -284,7 +310,8 @@ def main():
     parser.add_argument("--arousal_weight", type=int, default=1, help="Weight of arousals.")
     parser.add_argument("--model", type=str, default="utime-big", help="What model to use.")
     parser.add_argument("--id", type=str, default="", help="ID of the experiment")
-    parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
+    parser.add_argument("--total_input", type=str, default="30s", help="Total input size")
+    parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
@@ -312,6 +339,7 @@ def main():
         args.channels,
         args.clean,
         args.grouped,
+        args.total_input
     )
     logger.uncontext()
     if len(val_patients) > 0:
@@ -321,6 +349,7 @@ def main():
             args.channels,
             args.clean,
             args.grouped,
+            args.total_input
         )
         logger.uncontext()
     logger.context("TEST")
@@ -329,10 +358,19 @@ def main():
         args.channels,
         args.clean,
         args.grouped,
+        args.total_input
     )
     logger.uncontext()
 
-    model, trainer = build_model_and_trainer(train_dataset, args.model, args.scaler, args.grouped, args.arousal_weight, args.dry)
+    model, trainer = build_model_and_trainer(
+        train_dataset,
+        args.model,
+        args.scaler,
+        args.grouped,
+        args.arousal_weight,
+        args.dry,
+        args.total_input,
+    )
 
     run_result = run(
         RunCfg(
@@ -342,7 +380,7 @@ def main():
             trainer=trainer,
             train_datasets=[train_dataset],
             val_datasets=[] if val_dataset is None else [val_dataset],
-            test_datasets=[("test", test_dataset)],
+            test_datasets=[("Ruhrland2024", test_dataset)],
             batch_size=BATCH_SIZE,
             n_samples=N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,

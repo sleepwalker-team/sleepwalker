@@ -6,6 +6,8 @@ import argparse
 import os
 from functools import partial
 
+from sleepwalker.deployment.package import export_prediction_package
+
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
 os.environ["OPENBLAS_NUM_THREADS"] = "2"
@@ -23,6 +25,7 @@ from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import Respirat
 from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
+from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.filtering import trim_wake
@@ -36,19 +39,11 @@ mp.set_sharing_strategy("file_system")
 TRAIN_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/train-test-2023"
 TEST_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/val-2024"
 EXPERIMENT_NAME = "desaturation"
-BATCH_SIZE = 128
-EPOCHS = 100
-N_SAMPLES = 250_000
 NUM_WORKERS_DATASET = 16
 NUM_WORKERS_DATALOADER = 16
-SAMPLE_FREQUENCY = 75
-TOTAL_INPUT = "100s"
-TARGET_RESOLUTION = "10s"
-STRIDE = "2s"
 SLEEP_PERCENTAGE = 0.5
 TARGET_CLASSES = ["desaturation", "no desaturation"]
 SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
-CHANNELS = ["Saturation", "SpO2 B-B", "Pulse Waveform", "PWA", "Pulse"]
 
 EVENT_MAPPING = {
     "wach": "wake",
@@ -59,20 +54,24 @@ EVENT_MAPPING = {
     "entsättigung": "desaturation",
 }
 
-prepare_desaturation_target = partial(
-    prepare_multiclass_target,
-    target_classes=TARGET_CLASSES,
-    filters=[{"columns": SLEEP_LABELS, "percentage": SLEEP_PERCENTAGE, "mode": "min"}],
-)
+def build_channel_config(channel_name: str, sample_frequency: int) -> ChannelConfig:
+    if channel_name == "Chest":
+        return ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None)
+    if channel_name == "Abdomen":
+        return ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None)
+    if channel_name == "Saturation":
+        return ChannelConfig(
+            name="Saturation",
+            normalizer=SaturationFilterNormalizer(fs=sample_frequency, clip_range=None),
+            group=None,
+        )
+    if channel_name == "Pulse Waveform":
+        return ChannelConfig(name="Pulse Waveform", normalizer=PulseFilterNormalizer(fs=sample_frequency), group=None)
+    raise ValueError(f"Did not recognize channel {channel_name}")
 
-def build_channels():
-    channels = [
-        ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY), group=None),
-        ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY), group=None),
-        ChannelConfig(name="Saturation", normalizer=SaturationFilterNormalizer(fs=SAMPLE_FREQUENCY, clip_range=None), group=None),
-        ChannelConfig(name="Pulse Waveform", normalizer=PulseFilterNormalizer(fs=SAMPLE_FREQUENCY), group=None),
-    ]
-    return channels
+
+def build_channels(channel_names: list[str], sample_frequency: int) -> list[ChannelConfig]:
+    return [build_channel_config(channel_name, sample_frequency) for channel_name in channel_names]
 
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
     trimmed = trim_wake(data_df, label_df, label_extra_df)
@@ -104,17 +103,31 @@ def prepare_sample(data, quality_data=None, target=None, target_extra=None, pati
         item["target_extra"] = target_extra
     return item
 
-def build_dataset(patients: list[str]):
+def build_dataset(
+    patients: list[str],
+    channels: list[str],
+    sample_frequency: int,
+    stride: str,
+    total_input: str,
+    target_resolution: str,
+    sleep_percentage: float,
+):
+    prepare_desaturation_target = partial(
+        prepare_multiclass_target,
+        target_classes=TARGET_CLASSES,
+        filters=[{"columns": SLEEP_LABELS, "percentage": sleep_percentage, "mode": "min"}],
+    )
+    
     dataset = Ruhrlandklinik(
-        channels=build_channels(),
-        sample_frequency=SAMPLE_FREQUENCY,
+        channels=build_channels(channels, sample_frequency),
+        sample_frequency=sample_frequency,
         event_mapping=EVENT_MAPPING,
-        stride=STRIDE,
+        stride=stride,
         prepare_patient=prepare_patient,
         prepare_target=prepare_desaturation_target,
         prepare_sample=prepare_sample,
-        total_input=TOTAL_INPUT,
-        target_resolution=TARGET_RESOLUTION,
+        total_input=total_input,
+        target_resolution=target_resolution,
     )
     dataset.classes = list(TARGET_CLASSES)
     dataset.initialize(patients, NUM_WORKERS_DATASET)
@@ -142,47 +155,104 @@ def is_pap_patient(edf_path: str) -> bool:
     ]
     return any(ch in available_channels for ch in PAP_CHANNEL_PATTERNS)
 
-def load_split_dataset(patients: list[str]):
-    return build_dataset(patients)
+def has_required_channels(edf_path: str, channels: list[str]) -> bool:
+    meta = read_edf_meta(edf_path)
+    available_channels = set(meta["signals"])
+    return all(channel in available_channels for channel in channels)
 
-def build_model_and_trainer(train_dataset):
-    model = UTime(
-        ts_len=train_dataset.get_timeseries_len(),
-        n_channels=len(train_dataset.get_input_channels()),
-        classes=TARGET_CLASSES,
-        sampling_frequency=SAMPLE_FREQUENCY,
-        channel=[16, 32, 64, 128, 256],
-        maxpool=[8, 6, 4, 4, 2],
-        kernel=[5, 5, 5, 5, 5],
-        norm="channel",
-        mlp_size=64,
-    )
+
+def list_patients(source_root: str, channels: list[str], dry_run: bool) -> list[str]:
+    patients = [
+        patient
+        for patient in get_edf_files_in_repo(source_root, recursive=True)
+        if not is_pap_patient(patient) and has_required_channels(patient, channels)
+    ]
+    return patients[:2] if dry_run else patients
+
+def build_model_and_trainer(
+    train_dataset,
+    model_name: str,
+    sample_frequency: int,
+    epochs: int,
+    scaler: bool,
+    desaturation_weight: int,
+):
+    n_channels = len(train_dataset.get_input_channels())
+    preprocessors = [RobustScaler(lower_quantile=0.1, upper_quantile=0.9, channels=[i for i in range(n_channels)])] if scaler else None
+
+    if model_name == "utime-big":
+        model = UTime(
+            ts_len=train_dataset.get_timeseries_len(),
+            n_channels=n_channels,
+            classes=TARGET_CLASSES,
+            sampling_frequency=sample_frequency,
+            channel=[16, 32, 64, 128, 256],
+            maxpool=[8, 6, 4, 4, 2],
+            kernel=[5, 5, 5, 5, 5],
+            norm="channel",
+            mlp_size=256,
+            preprocessors=preprocessors,
+        )
+    elif model_name == "utime-small":
+        model = UTime(
+            ts_len=train_dataset.get_timeseries_len(),
+            n_channels=n_channels,
+            classes=TARGET_CLASSES,
+            sampling_frequency=sample_frequency,
+            channel=[16, 32, 64],
+            maxpool=[8, 6, 4],
+            kernel=[5, 5, 5],
+            norm="channel",
+            mlp_size=64,
+            preprocessors=preprocessors,
+        )
+    else:
+        raise ValueError(f"Did not recognize model {model_name}")
     trainer = MulticlassTrainer(
-        epochs=EPOCHS,
+        epochs=epochs,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1, end_factor=1e-2, total_iters=75
+            optimizer, start_factor=1, end_factor=1e-2, total_iters=50
         ),
         classes=TARGET_CLASSES,
         loss_function=torch.nn.functional.cross_entropy,
         save_every=10,
         loss_mode="inverse",
-        early_stopping=5
+        early_stopping=5,
+        class_weights={"no desaturation": 1, "desaturation": desaturation_weight},
     )
     return model, trainer
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate a desaturation model.")
-    parser.add_argument("--val-frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
+    parser.add_argument("--id", type=str, default="", help="ID of the experiment.")
+    parser.add_argument("--channels", nargs='+', default=["Chest", "Abdomen", "Saturation", "Pulse Waveform"], help="List of channels.")
+    parser.add_argument("--scaler", action="store_true", help="If RobustScaler should be used.")
+    parser.add_argument("--desaturation_weight", type=int, default=1, help="Weight of desaturation class.")
+    parser.add_argument("--model", type=str, default="utime-big", help="What model to use.")
+    parser.add_argument("--sample_frequency", type=int, default=75, help="Input sample frequency in Hz.")
+    parser.add_argument("--total_input", type=str, default="100s", help="Total input size.")
+    parser.add_argument("--target_resolution", type=str, default="10s", help="Target resolution.")
+    parser.add_argument("--sleep_percentage", type=float, default=0.5, help="Sleep percentage for filtering.")
+    parser.add_argument("--stride", type=str, default="2s", help="Stride between samples.")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
+    parser.add_argument("--n_samples", type=int, default=250_000, help="Number of training samples per epoch.")
+    parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
-    train_patients = [p for p in get_edf_files_in_repo(TRAIN_ROOT, recursive=True) if not is_pap_patient(p)]
-    test_patients = [p for p in get_edf_files_in_repo(TEST_ROOT, recursive=True) if not is_pap_patient(p)]
+    experiment_name = f"{EXPERIMENT_NAME}_{args.id}"
     if args.dry:
-        train_patients = train_patients[:2]
-        test_patients = test_patients[:2]
+        logger.info("Performing dry run to test pipeline!")
+        experiment_name += "-dev"
+
+    os.makedirs(os.path.join("results", "desaturation", experiment_name), exist_ok=True)
+    logger.set_log_file(os.path.join("results", "desaturation", experiment_name, "output.log"))
+
+    train_patients = list_patients(TRAIN_ROOT, args.channels, args.dry)
+    test_patients = list_patients(TEST_ROOT, args.channels, args.dry)
 
     val_dataset = None
     if args.val_frac is not None and args.val_frac > 0:
@@ -192,40 +262,77 @@ def main():
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
-        train_dataset = load_split_dataset(train_patients)
+        train_dataset = build_dataset(
+            train_patients,
+            args.channels,
+            args.sample_frequency,
+            args.stride,
+            args.total_input,
+            args.target_resolution,
+            args.sleep_percentage
+        )
         logger.uncontext()
         if len(val_patients) > 0:
             logger.context("VAL")
-            val_dataset = load_split_dataset(val_patients)
+            val_dataset = build_dataset(
+                val_patients,
+                args.channels,
+                args.sample_frequency,
+                args.stride,
+                args.total_input,
+                args.target_resolution,
+                args.sleep_percentage
+            )
             logger.uncontext()
         logger.context("TEST")
-        test_dataset = load_split_dataset(test_patients)
+        test_dataset = build_dataset(
+            test_patients,
+            args.channels,
+            args.sample_frequency,
+            args.stride,
+            args.total_input,
+            args.target_resolution,
+            args.sleep_percentage
+        )
         logger.uncontext()
 
-    model, trainer = build_model_and_trainer(train_dataset)
-    experiment_name = f"{EXPERIMENT_NAME}" 
-    if args.dry:
-        logger.info("Performing dry run to test pipeline!")
-        experiment_name += "-dev"
+    model, trainer = build_model_and_trainer(
+        train_dataset,
+        args.model,
+        args.sample_frequency,
+        2 if args.dry else args.epochs,
+        args.scaler,
+        args.desaturation_weight,
+    )
 
-    run(
+    run_result = run(
         RunCfg(
             experiment_name=experiment_name,
-            model_name="UTime",
+            model_name=args.model,
             model=model,
             trainer=trainer,
             train_datasets=[train_dataset],
             val_datasets=[] if val_dataset is None else [val_dataset],
-            test_datasets=[("test", test_dataset)],
-            batch_size=BATCH_SIZE,
-            n_samples=1_000 if args.dry else N_SAMPLES,
+            test_datasets=[("Ruhrland2024", test_dataset)],
+            batch_size=args.batch_size,
+            n_samples=1_000 if args.dry else args.n_samples,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
             test_repeats=[1],
             use_energy_tracker=False,
-            tags={"model": "UTime"},
+            tags={"model": args.model},
             collate_fn=batch_collate,
-            log_path=os.path.join("deployment", "desaturation"),
+            use_mlflow=True,
+            log_path=os.path.join("results", "desaturation"),
+            meta_data=vars(args),
         )
+    )
+
+    export_prediction_package(
+        os.path.join("results", "desaturation", experiment_name, "deploy", experiment_name, ".swmodel"),
+        model=run_result.model,
+        trainer=run_result.trainer,
+        dataset=train_dataset.to_unlabelled(),
+        metadata={"experiment_name": experiment_name, **vars(args)},
     )
 
 

@@ -62,11 +62,10 @@ class RepeatSampler(Sampler[int]):
 def summarize_dataset(
     dataset_clazz,
     edf_files,
-    channel_name=None,
     batch_size=128,
     estimate_class_frequencies=False,
 ):
-    """Summarize a dataset: durations, channel coverage, and optionally class frequencies.
+    """Summarize a dataset: durations, signal inventory, and optionally class frequencies.
 
     Parameters
     ----------
@@ -74,8 +73,6 @@ def summarize_dataset(
         Dataset class implementing `get_event_df()` and optionally `get_extra_event_df()`.
     edf_files : list[str]
         List of EDF file paths.
-    channel_name : str, optional
-        Channel to load for event statistics. If None, only metadata & signals are summarized.
     batch_size : int, default=128
         Batch size for iteration when estimating class frequencies.
     estimate_class_frequencies : bool, default=False
@@ -90,6 +87,7 @@ def summarize_dataset(
                 "duration_stats": {...},
                 "duration_histogram": {...},
                 "signal_coverage": DataFrame,
+                "signal_summary": DataFrame,
                 "dataset_classes": list[str] | None,
                 "class_distribution": dict[str, int] | None,
                 "extra_class_distribution": dict[str, int] | None,
@@ -97,7 +95,9 @@ def summarize_dataset(
         }
     """
     meta_data = []
-    signals = []
+    signal_counter = Counter()
+    signal_sample_rates: dict[str, set[float]] = {}
+    first_channel_name = None
     files_read = 0
 
     logger.info(f"Found a total of {len(edf_files)} EDF files")
@@ -111,7 +111,11 @@ def summarize_dataset(
                 "end": meta["end"],
                 "duration[s]": meta["duration_s"],
             })
-            signals.extend(meta["signals"])
+            for signal in meta["signals"]:
+                if first_channel_name is None:
+                    first_channel_name = signal
+                signal_counter[signal] += 1
+                signal_sample_rates.setdefault(signal, set()).add(float(meta["fs"][signal]))
             files_read += 1
         except Exception as ex:
             logger.warning(f"Skipping {e}: {ex}")
@@ -146,27 +150,28 @@ def summarize_dataset(
 
     # --- (2) Channel coverage ---
     if files_read > 0:
-        dff = pd.DataFrame([Counter(signals)]).transpose()
+        dff = pd.DataFrame([signal_counter]).transpose()
         dff.columns = ["count"]
         dff["coverage[%]"] = dff["count"] / files_read * 100.0
         signal_coverage = dff.sort_values("coverage[%]", ascending=False)
+
+        signal_summary = signal_coverage.copy()
+        signal_summary["sample_rate"] = [
+            sample_rates[0] if len(sample_rates) == 1 else sample_rates
+            for sample_rates in (
+                sorted(signal_sample_rates[signal]) for signal in signal_summary.index
+            )
+        ]
     else:
         signal_coverage = pd.DataFrame(columns=["count", "coverage[%]"])
+        signal_summary = pd.DataFrame(columns=["count", "coverage[%]", "sample_rate"])
 
-    # If no channel provided → return only metadata + coverage
-    if channel_name is None:
-        return {
-            "duration_stats": duration_stats,
-            "duration_histogram": duration_hist,
-            "signal_coverage": signal_coverage,
-            "dataset_classes": None,
-            "class_distribution": None,
-            "extra_class_distribution": None,
-        }
+    if first_channel_name is None:
+        raise ValueError("Could not determine a channel name from the provided EDF files.")
 
     # --- (3) Dataset setup ---
     dataset = dataset_clazz(
-        channels=[ChannelConfig(name=channel_name, normalizer=None)],
+        channels=[ChannelConfig(name=first_channel_name, normalizer=None)],
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,
@@ -182,6 +187,7 @@ def summarize_dataset(
             "duration_stats": duration_stats,
             "duration_histogram": duration_hist,
             "signal_coverage": signal_coverage,
+            "signal_summary": signal_summary,
             "dataset_classes": dataset_classes,
             "class_distribution": None,
             "extra_class_distribution": None,
@@ -224,6 +230,7 @@ def summarize_dataset(
         "duration_stats": duration_stats,
         "duration_histogram": duration_hist,
         "signal_coverage": signal_coverage,
+        "signal_summary": signal_summary,
         "dataset_classes": dataset_classes,
         "class_distribution": dict(label_counter),
         "extra_class_distribution": (

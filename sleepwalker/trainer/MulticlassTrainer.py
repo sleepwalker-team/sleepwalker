@@ -260,7 +260,7 @@ class MulticlassTrainer(BaseTrainer):
 
                 logits_sum = None 
                 for repeat_idx in range(n_repeat):
-                    current_logits = model(x_grouped[:, repeat_idx])
+                    current_logits = model(x_grouped[:, repeat_idx].contiguous())
                     logits_sum = current_logits if logits_sum is None else logits_sum + current_logits
                 logits = logits_sum / n_repeat
             else:

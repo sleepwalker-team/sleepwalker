@@ -33,3 +33,4 @@ copy_data.sh
 .env
 cache/*
 results/*
+docs/

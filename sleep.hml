@@ -1,0 +1,14 @@
+script: python train_sleep.py
+args:
+    train: ruhrland2023
+    test: ruhrland2024
+    grouped: {{ True || False }}
+    model: {{ 
+        "sleeptransformer" || 
+        "sleeptransformer-aug" || 
+        "attnsleep" || 
+        "seqsleepnet" || 
+        "tinysleepnet" || 
+        "usleep" || 
+        "mrasleepnet"
+    }}

@@ -28,7 +28,7 @@ from sleepwalker.models import MetaModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
-from sleepwalker.trainer.utils.filtering import trim_wake
+from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.utils import MlflowSink, logger
 
 # TODO METAMODEL
@@ -145,7 +145,7 @@ normalized_task_config = MultiLabelTrainer.normalize_task_config(task_config)
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=None):
     """Trim leading and trailing wake before multitask target extraction."""
-    trimmed = trim_wake(data_df, label_df, label_extra_df)
+    trimmed = trim_event(data_df, label_df, label_extra_df)
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed

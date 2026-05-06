@@ -28,7 +28,7 @@ from sleepwalker.models.UTime import UTime
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
-from sleepwalker.trainer.utils.filtering import trim_wake
+from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
@@ -43,14 +43,13 @@ NUM_WORKERS_DATASET = 16
 NUM_WORKERS_DATALOADER = 16
 SLEEP_PERCENTAGE = 0.5
 TARGET_CLASSES = ["desaturation", "no desaturation"]
-SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
 
 EVENT_MAPPING = {
     "wach": "wake",
-    "n1": "n1",
-    "n2": "n2",
-    "n3": "n3",
-    "rem": "rem",
+    "n1": "sleep",
+    "n2": "sleep",
+    "n3": "sleep",
+    "rem": "sleep",
     "entsättigung": "desaturation",
 }
 
@@ -74,7 +73,7 @@ def build_channels(channel_names: list[str], sample_frequency: int) -> list[Chan
     return [build_channel_config(channel_name, sample_frequency) for channel_name in channel_names]
 
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
-    trimmed = trim_wake(data_df, label_df, label_extra_df)
+    trimmed = trim_event(data_df, label_df, label_extra_df, ["sleep"])
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
@@ -115,7 +114,7 @@ def build_dataset(
     prepare_desaturation_target = partial(
         prepare_multiclass_target,
         target_classes=TARGET_CLASSES,
-        filters=[{"columns": SLEEP_LABELS, "percentage": sleep_percentage, "mode": "min"}],
+        filters=[{"columns": ["sleep"], "percentage": sleep_percentage, "mode": "min"}],
     )
     
     dataset = Ruhrlandklinik(

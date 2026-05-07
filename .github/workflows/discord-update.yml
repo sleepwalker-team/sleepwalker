@@ -1,0 +1,40 @@
+name: Post Discord update
+
+on:
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read update text
+        id: update
+        run: |
+          if [ ! -s .discord_update.md ]; then
+            echo "No .discord_update.md found or file is empty"
+            exit 1
+          fi
+
+          {
+            echo 'body<<EOF'
+            cat .discord_update.md
+            echo
+            echo "---"
+            echo "Commit: $GITHUB_SHA"
+            echo "Repo: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post to Discord
+        run: |
+          jq -n \
+            --arg content "${{ steps.update.outputs.body }}" \
+            '{content: $content}' > payload.json
+
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d @payload.json \
+               "${{ secrets.DISCORD_WEBHOOK_URL }}"

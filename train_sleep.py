@@ -46,7 +46,7 @@ from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.losses import dice_loss
 from sleepwalker.trainer.utils.filtering import trim_event
-from sleepwalker.trainer.utils.splits import combine_datasets
+from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 

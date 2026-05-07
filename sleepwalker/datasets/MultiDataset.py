@@ -105,3 +105,20 @@ class MultiDataset(Dataset):
         new_idx = idx - self.lower_bound[d_idx]
 
         return {"dataset":d_idx, **self.datasets[d_idx].__getitem__(new_idx)}
+
+
+def combine_datasets(parts: Sequence[object]):
+    """Return one dataset-like object from one or more parts.
+
+    Args:
+        parts: Dataset objects to combine.
+
+    Returns:
+        The single dataset unchanged when only one part is provided, otherwise
+        a `MultiDataset` wrapper.
+    """
+    if len(parts) == 0:
+        raise ValueError("Cannot combine an empty dataset list.")
+    if len(parts) == 1:
+        return parts[0]
+    return MultiDataset(list(parts))

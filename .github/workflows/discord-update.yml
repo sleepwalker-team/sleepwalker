@@ -8,33 +8,55 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Read update text
-        id: update
-        run: |
-          if [ ! -s .discord_update.md ]; then
-            echo "No .discord_update.md found or file is empty"
-            exit 1
-          fi
-
-          {
-            echo 'body<<EOF'
-            cat .discord_update.md
-            echo
-            echo "---"
-            echo "Commit: $GITHUB_SHA"
-            echo "Repo: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
 
       - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          jq -n \
-            --arg content "${{ steps.update.outputs.body }}" \
-            '{content: $content}' > payload.json
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
 
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d @payload.json \
-               "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          path = Path(".discord_update.md")
+          if not path.exists() or not path.read_text().strip():
+              raise SystemExit(".discord_update.md missing or empty")
+
+          text = path.read_text()
+          text += f"\n\n---\nCommit: {os.environ['GITHUB_SHA']}\n"
+          text += f"Repo: {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}\n"
+          text += f"Branch: {os.environ['GITHUB_REF_NAME']}\n"
+
+          limit = 1900
+          chunks = []
+          while text:
+              if len(text) <= limit:
+                  chunks.append(text)
+                  break
+              cut = text.rfind("\n", 0, limit)
+              if cut == -1:
+                  cut = limit
+              chunks.append(text[:cut])
+              text = text[cut:].lstrip()
+
+          url = os.environ["DISCORD_WEBHOOK_URL"]
+
+          for i, chunk in enumerate(chunks, start=1):
+              if len(chunks) > 1:
+                  chunk = f"**Sleepwalker update ({i}/{len(chunks)})**\n\n{chunk}"
+
+              payload = json.dumps({"content": chunk})
+              subprocess.run(
+                  [
+                      "curl",
+                      "-sS",
+                      "-H", "Content-Type: application/json",
+                      "-X", "POST",
+                      "-d", payload,
+                      url,
+                  ],
+                  check=True,
+              )
+          PY

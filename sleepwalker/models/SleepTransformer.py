@@ -99,6 +99,7 @@ class SleepTransformer(BaseModel):
     def __init__(
         self,
         *,
+        ts_len=None,
         classes=None,         # class names (C)
         n_channels,           # input channels (from dataset)
         ndim=128,             # spectral bins (F)
@@ -147,6 +148,8 @@ class SleepTransformer(BaseModel):
         self.classes = list(classes) if classes is not None else None
 
         self.ndim = ndim
+        self.ts_len = ts_len
+        self.n_channels = n_channels
         self.nchannel = n_channels
         self.nclass = len(self.classes) if self.classes is not None else 0
         self.frame_seq_len = frame_seq_len
@@ -232,6 +235,13 @@ class SleepTransformer(BaseModel):
     def feature_dim(self) -> int:
         """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
+
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
+        """Describe the raw BTC input shape expected by ``forward``."""
+        return (
+            (1, self.ts_len, self.n_channels),
+            {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
+        )
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         """Map features to logits for the configured class set."""

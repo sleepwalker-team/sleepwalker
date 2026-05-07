@@ -6,7 +6,7 @@ slicing, embedding fusion, and nested preprocessor warmup behavior.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -108,6 +108,16 @@ class MultiModel(BaseModel):
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the shared linear head to fused embeddings."""
         return self.head(x)
+
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, Any]]:
+        """Describe the composite raw input shape expected by ``forward``."""
+        if len(self.model_entries) == 0:
+            raise NotImplementedError("MultiModel without submodels cannot infer an input spec.")
+        first_shape, _ = self.model_entries[0]["model"].input_spec()
+        return (
+            (1, first_shape[1], len(self.input_channels)),
+            {"layout": "BTC", "ts_len": first_shape[1], "n_channels": len(self.input_channels)},
+        )
 
     def _warmup_preprocessors(self, data_loader: DataLoader, device: str = "cuda"):
         """Warm composite preprocessors and then nested submodel preprocessors.

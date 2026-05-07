@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from torchinfo import summary
 
 from sleepwalker.trainer.utils.disk import append_to_jsonl
-from sleepwalker.trainer.utils.splits import combine_datasets
+from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.utils import LocalArtifactSink, MlflowSink, logger
 
 
@@ -131,16 +131,6 @@ def build_loader(
         **loader_kwargs,
     )
 
-
-def _infer_summary_input_size(train_dataset):
-    try:
-        ts_len = train_dataset.get_timeseries_len()
-        n_channels = len(train_dataset.get_input_channels())
-        return ts_len, n_channels
-    except Exception:
-        return None
-
-
 def run(cfg: RunCfg) -> RunResult:
     """Execute a prepared training run.
 
@@ -183,10 +173,10 @@ def run(cfg: RunCfg) -> RunResult:
     if val_dataset is not None:
         logger.info(f"Loaded {val_dataset.get_n_patients()} for validation")
     logger.info(f"Prepared {len(cfg.test_datasets)} test dataset(s)")
-    summary_input = _infer_summary_input_size(train_dataset)
+    summary_input, _ =  cfg.model.input_spec() 
     if summary_input is not None:
-        logger.info(f"Input data is {summary_input[0]} x {summary_input[1]}")
-        summary(cfg.model, input_size=(1, summary_input[0], summary_input[1]), depth=5, row_settings=["hide_recursive_layers"])
+        logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
+        summary(cfg.model, input_size=summary_input, depth=5, row_settings=["hide_recursive_layers"])
 
     train_loader = build_loader(
         train_dataset,

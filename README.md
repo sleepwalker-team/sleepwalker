@@ -46,9 +46,76 @@ At a high level, the repository follows this flow:
 - `predict.py` exists and is tested in parts, but actual deployment behavior is still best treated as lab-internal and evolving.
 - The repository contains generated artifacts, notebooks, logs, and likely experimental files alongside maintained source.
 
-## Where To Read Next
+# Discord Update Workflow
 
-- [Architecture Overview](docs/architecture.md)
-- [Module Overview](docs/module_overview.md)
-- [Development Notes](docs/development.md)
-- [Testing Notes](docs/testing.md)
+This repository supports manual Discord update posts via GitHub Actions and Discord webhooks.
+
+## Overview
+
+Updates are written into:
+
+```text
+.discord_update.md
+```
+
+and can then be posted to the Sleepwalker Discord channel using a manually triggered GitHub Action.
+
+This avoids noisy commit spam while still allowing curated project updates.
+
+## Usage
+
+### 1. Write an update
+
+Edit:
+
+```text
+.discord_update.md
+```
+
+### 2. Commit and push
+
+```bash
+git add .discord_update.md
+git commit -m "Add Discord update"
+git push
+```
+
+---
+
+### 3. Trigger the GitHub Action
+
+From the terminal:
+
+```bash
+gh workflow run discord-update.yml --ref "$(git branch --show-current)"
+```
+
+or manually from GitHub:
+
+```text
+Actions
+→ Post Discord update
+→ Run workflow
+```
+
+---
+
+## Behavior
+
+The workflow automatically:
+
+* reads `.discord_update.md`
+* appends:
+  * commit SHA
+  * repository URL
+  * branch name
+* splits long messages into multiple Discord posts
+* posts everything to the configured Discord channel
+
+---
+
+## Notes
+
+* The workflow is intentionally manual (`workflow_dispatch`) to avoid channel spam.
+* Long updates are automatically chunked to satisfy Discord message limits.
+* The workflow file is located at:

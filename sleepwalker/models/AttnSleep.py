@@ -211,6 +211,8 @@ class AttnSleep(BaseModel):
             preprocessors: Optional externally supplied preprocessors.
         """
         super().__init__(preprocessors=preprocessors)
+        self.ts_len = ts_len
+        self.n_channels = n_channels
         self.mrcnn = MRCNN(n_channels, afr_reduced_cnn_size)
         self.h = h
         self.classes = list(classes) if classes is not None else None
@@ -247,6 +249,13 @@ class AttnSleep(BaseModel):
     def feature_dim(self) -> int:
         """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
+
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
+        """Describe the raw BTC input shape expected by ``forward``."""
+        return (
+            (1, self.ts_len, self.n_channels),
+            {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
+        )
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         """Map features to class logits."""

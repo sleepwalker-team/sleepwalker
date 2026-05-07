@@ -67,6 +67,7 @@ class EDFFile:
     channels: List[str]
     path: str
     start_date: pd.Timestamp
+    start_offsets: Optional[np.ndarray] = None
     handle: Optional[pyedflib.EdfReader] = None
     length: int = 0
     X: Optional[pd.DataFrame] = None
@@ -282,6 +283,18 @@ class BaseDataset(Dataset, ABC):
       patient, but they still need the full patient signal to be loaded during
       preparation
 
+    Sparse window indexing
+    ----------------------
+    After `prepare_patient` returns its possibly filtered `label_df`,
+    `BaseDataset` no longer assumes that valid windows form one continuous
+    `[start, end]` region. Instead, it scans the remaining label intervals for
+    timestamp discontinuities and builds a sparse per-patient index of valid
+    stride offsets.
+
+    This means user code can trim labels down to several disjoint retained
+    regions and the dataset will sample only windows fully contained in those
+    connected components, instead of densely sampling the gaps in between.
+
     Preparation hooks
     -----------------
     There are three optional hooks. They are ordered from expensive to cheap to
@@ -429,7 +442,7 @@ class BaseDataset(Dataset, ABC):
 
     ```python
     def prepare_patient(data_df, label_df, label_extra_df, patient=None):
-        trimmed = trim_wake(data_df, label_df, label_extra_df)
+        trimmed = trim_event(data_df, label_df, label_extra_df)
         if trimmed is None:
             return None
         label_df, label_extra_df = trimmed
@@ -608,6 +621,76 @@ class BaseDataset(Dataset, ABC):
     def __len__(self):
         return sum([f.length for f in self.edf_files])
 
+    def _build_connected_segments(self, label_df: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+        """Collapse filtered labels into connected timestamp segments.
+
+        The function treats intervals as connected when they overlap in time.
+        It intentionally does not merge merely nearby intervals with a gap.
+        """
+        if len(label_df) == 0:
+            return []
+
+        df = label_df.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)
+
+        segments: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        seg_start = cast(pd.Timestamp, df.iloc[0]["Starttime"])
+        seg_end = cast(pd.Timestamp, df.iloc[0]["Endtime"])
+
+        for i in range(1, len(df)):
+            row_start = cast(pd.Timestamp, df.iloc[i]["Starttime"])
+            row_end = cast(pd.Timestamp, df.iloc[i]["Endtime"])
+            if row_start <= seg_end:
+                seg_end = max(seg_end, row_end)
+            else:
+                segments.append((seg_start, seg_end))
+                seg_start = row_start
+                seg_end = row_end
+
+        segments.append((seg_start, seg_end))
+        return segments
+
+    def _segment_to_offsets(
+        self,
+        base_start: pd.Timestamp,
+        seg_start: pd.Timestamp,
+        seg_end: pd.Timestamp,
+    ) -> np.ndarray:
+        """Convert one connected time segment into candidate stride offsets.
+
+        The filtered ``label_df`` defines where targets may be valid. We
+        therefore keep windows whose target interval can overlap the retained
+        segment, rather than requiring the full input context to fit inside the
+        segment as well.
+        """
+        target_offset = self.total_input // 2 - self.target_resolution // 2
+        earliest_valid_start = seg_start - target_offset - self.target_resolution
+        latest_valid_start = seg_end - target_offset
+        if latest_valid_start < earliest_valid_start:
+            return np.empty(0, dtype=np.int64)
+
+        first_offset = max(0, int(np.ceil((earliest_valid_start - base_start) / self.stride)))
+        last_offset = int(np.floor((latest_valid_start - base_start) / self.stride))
+        if last_offset < first_offset:
+            return np.empty(0, dtype=np.int64)
+
+        return np.arange(first_offset, last_offset + 1, dtype=np.int64)
+
+    def _build_start_offsets(
+        self,
+        base_start: pd.Timestamp,
+        label_df: pd.DataFrame,
+    ) -> np.ndarray:
+        """Build sparse valid window starts from the filtered patient labels."""
+        segments = self._build_connected_segments(label_df)
+        offsets = [
+            self._segment_to_offsets(base_start=base_start, seg_start=seg_start, seg_end=seg_end)
+            for seg_start, seg_end in segments
+        ]
+        offsets = [arr for arr in offsets if len(arr) > 0]
+        if len(offsets) == 0:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(offsets)
+
     def _prepare_patient_artifacts(self, edf_path):
         channel_names = []
         for cfg in self.channels:
@@ -718,7 +801,17 @@ class BaseDataset(Dataset, ABC):
             if artifacts is None:
                 return None
 
-            n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.stride)
+            label_df = artifacts["label_df"]
+            label_extra_df = artifacts["label_extra_df"]
+            start_offsets = None
+            if label_df is not None and len(label_df) > 0:
+                start_offsets = self._build_start_offsets(
+                    base_start=artifacts["start"],
+                    label_df=label_df,
+                )
+                n_items = len(start_offsets)
+            else:
+                n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.stride)
 
             if n_items <= 0:
                 raise ValueError(
@@ -726,12 +819,11 @@ class BaseDataset(Dataset, ABC):
                     f"with a total signal length of {artifacts['end'] - artifacts['start']}s"
                 )
 
-            label_df = artifacts["label_df"]
-            label_extra_df = artifacts["label_extra_df"]
             return EDFFile(
                 path=edf_path,
                 X=None,
                 channels=list(artifacts["data_df"].columns),
+                start_offsets=start_offsets,
                 length=n_items,
                 labels=EventIndex(label_df) if label_df is not None else None,
                 labels_extra=EventIndex(label_extra_df) if label_extra_df is not None else None,
@@ -1010,7 +1102,10 @@ class BaseDataset(Dataset, ABC):
             file = self.edf_files[pidx]
 
             new_idx = idx - self.lower_bounds[pidx] 
-            cur_date = file.start_date + self.stride * new_idx 
+            if file.start_offsets is not None:
+                cur_date = file.start_date + self.stride * int(file.start_offsets[new_idx])
+            else:
+                cur_date = file.start_date + self.stride * new_idx 
             
             try:
                 item = self.get_item(file, cur_date)

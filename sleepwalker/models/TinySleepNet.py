@@ -178,6 +178,13 @@ class TinySleepNet(BaseModel):
         """Return the feature size produced by :meth:`_features`."""
         return self._feature_dim
 
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
+        """Describe the raw BTC input shape expected by ``forward``."""
+        return (
+            (1, self.ts_len, self.n_channels),
+            {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
+        )
+
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         """Project extracted features into class logits.
 

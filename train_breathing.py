@@ -42,35 +42,91 @@ mp.set_sharing_strategy("file_system")
 
 TRAIN_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/train-test-2023"
 TEST_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/val-2024"
-BATCH_SIZE = 128
-EPOCHS = 35
+BATCH_SIZE = 64
+EPOCHS = 50
 N_SAMPLES = 100_000
 NUM_WORKERS_DATASET = 8
 NUM_WORKERS_DATALOADER = 8
-SAMPLE_FREQUENCY = 100
-# TOTAL_INPUT = "30s" #120s
-TARGET_RESOLUTION = "1s" #0.5s
-STRIDE = "1s"            #0.5s
-SLEEP_PERCENTAGE = 0.5
-TARGET_CLASSES = ["no_arousal", "arousal"]
+SAMPLE_FREQUENCY = 25
+TARGET_RESOLUTION = "5s" 
+STRIDE = "1s"            
+TARGET_CLASSES = ["apnea", "hypopnea", "regular breathing"]
+MIN_DESAT_SLEEP_OVERLAP_S = 1.0
 
+def _clip_to_intervals(df: pd.DataFrame | None, intervals: list[tuple[pd.Timestamp, pd.Timestamp]]) -> pd.DataFrame | None:
+    if df is None or len(df) == 0 or len(intervals) == 0:
+        return None
 
-def infer_sleeptransformer_epoch_seq_len(total_input: str) -> int:
-    total_input_seconds = pd.to_timedelta(total_input).total_seconds()
-    approx_seq_len = total_input_seconds / 21
-    epoch_seq_len = max(1, int(round(approx_seq_len)))
-    if epoch_seq_len % 2 == 0:
-        epoch_seq_len += 1 if approx_seq_len >= epoch_seq_len else -1
-    # Keep the 630s -> 29 SleepTransformer anchor while preserving an odd center token.
-    return min(epoch_seq_len, 29)
+    clipped_rows = []
+    for row in df.itertuples(index=False):
+        row_start = pd.Timestamp(row.Starttime)
+        row_end = pd.Timestamp(row.Endtime)
+        for keep_start, keep_end in intervals:
+            clipped_start = max(row_start, keep_start)
+            clipped_end = min(row_end, keep_end)
+            if clipped_start >= clipped_end:
+                continue
+            clipped_row = dict(zip(df.columns, row))
+            clipped_row["Starttime"] = clipped_start
+            clipped_row["Endtime"] = clipped_end
+            clipped_rows.append(clipped_row)
+
+    if len(clipped_rows) == 0:
+        return None
+
+    return pd.DataFrame(clipped_rows, columns=df.columns)
 
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
-    trimmed = trim_event(data_df, label_df, label_extra_df, ["sleep"])
+    trimmed = trim_event(data_df, label_df, label_extra_df,["sleep"])
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
-    return data_df, label_df, label_extra_df
 
+    trimmed = trim_event(data_df, label_df, label_extra_df, ["desaturation"])
+    if trimmed is None:
+        return None
+    label_df, label_extra_df = trimmed
+
+    df = label_df.copy()
+    df["Starttime"] = pd.to_datetime(df["Starttime"])
+    df["Endtime"] = pd.to_datetime(df["Endtime"])
+
+    desat = df[df["Label"].eq("desaturation")].sort_values(["Starttime", "Endtime"])
+    sleep = df[df["Label"].eq("sleep")].sort_values(["Starttime", "Endtime"])
+    if len(desat) == 0 or len(sleep) == 0:
+        return None
+
+    overlap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    sleep_rows = list(sleep.itertuples(index=False))
+    sleep_idx = 0
+    for desat_row in desat.itertuples(index=False):
+        desat_start = pd.Timestamp(desat_row.Starttime)
+        desat_end = pd.Timestamp(desat_row.Endtime)
+
+        while sleep_idx < len(sleep_rows) and pd.Timestamp(sleep_rows[sleep_idx].Endtime) <= desat_start:
+            sleep_idx += 1
+
+        cur_idx = sleep_idx
+        while cur_idx < len(sleep_rows):
+            sleep_start = pd.Timestamp(sleep_rows[cur_idx].Starttime)
+            sleep_end = pd.Timestamp(sleep_rows[cur_idx].Endtime)
+            if sleep_start >= desat_end:
+                break
+
+            overlap_start = max(desat_start, sleep_start)
+            overlap_end = min(desat_end, sleep_end)
+            if overlap_end > overlap_start and (overlap_end - overlap_start).total_seconds() >= MIN_DESAT_SLEEP_OVERLAP_S:
+                overlap_intervals.append((overlap_start, overlap_end))
+            cur_idx += 1
+
+    if len(overlap_intervals) == 0:
+        return None
+
+    label_df = _clip_to_intervals(df, overlap_intervals)
+    if label_df is None or len(label_df) == 0:
+        return None
+
+    return data_df, label_df, label_extra_df
 
 def prepare_sample(
     data,
@@ -80,17 +136,6 @@ def prepare_sample(
     patient=None,
     time=None,
 ):
-    # if quality_data is not None and "EEG" in quality_data.columns:
-    #     if float(quality_data["EEG"].astype(float).mean()) > impedance_cutoff_ohm:
-    #         return None
-
-    # if float(data.isna().mean().mean()) > 0.05:
-    #     return None
-
-    # for col in ["EEG", "C3-M2", "ECG", "Pulse Waveform"]:
-    #     if col in data.columns and float(data[col].std()) < 1e-3:
-    #         return None
-
     item = {
         "data": torch.from_numpy(data.values).float(),
         "target": target,
@@ -101,40 +146,45 @@ def prepare_sample(
         item["target_extra"] = target_extra
     return item
 
-def build_dataset(patients: list[str], channels: list[str], clean:bool, grouped: bool, total_input:str):
+def build_dataset(patients: list[str], channels: list[str], total_input:str, include_pap:bool):
     EVENT_MAPPING = {
-        "arousal": "arousal",
+        "entsättigung": "desaturation",
+        "wach":"wake",
         "n1": "sleep",
         "n2": "sleep",
         "n3": "sleep",
         "rem": "sleep",
-        #"rera": "arousal", 
-        #"plm-arousal": "arousal", 
+        "a. gemischt": "apnea",
+        "a. obstruktiv": "apnea",
+        "a. zentral": "apnea",
+        "apnoe": "apnea",
+        "h. obstruktiv": "hypopnea",
+        "h. zentral": "hypopnea",
+        "hypopnea-gemischt": "hypopnea",
+        "hypopnoe": "hypopnea",
     }
 
-    if clean:
-        EVENT_MAPPING["artefakt"] = "artifact"
-        prepare_arousal_target = partial(
-            prepare_multiclass_target,
-            target_classes=TARGET_CLASSES,
-            filters=[
-                {"columns": ["wake"], "percentage": 0.5, "mode": "max"},
-                {"columns": ["artifact"], "percentage": 0.0, "mode": "max"},
-            ],
-        )
-    else:
-        prepare_arousal_target = partial(
-            prepare_multiclass_target,
-            target_classes=TARGET_CLASSES,
-        )
+    if include_pap:
+        EVENT_MAPPING["fg apnoe geschlossen"] = "apnea"
+        EVENT_MAPPING["fg apnoe geöffnet"] = "apnea"
+        EVENT_MAPPING["fg-apnoe unbekannt"] = "apnea"
+        EVENT_MAPPING["fg hypopnoe"] = "hypopnea"
+
+    prepare_breathing_target = partial(
+        prepare_multiclass_target,
+        target_classes=TARGET_CLASSES,
+        filters=[
+            {"columns": ["desaturation"], "percentage": 0.5, "mode": "min"},
+            {"columns": ["sleep"], "percentage": 0.5, "mode": "min"},
+        ],
+    )
 
     channel_configs = get_channels(
         channels,
-        grouped=grouped,
+        grouped=False,
         include_quality=False,
         normalize=True,
         sample_frequency=SAMPLE_FREQUENCY,
-        override_normalize={"chin_emg": None, "ECG": None},
     )
     dataset = Ruhrlandklinik(
         channels=channel_configs,
@@ -142,10 +192,10 @@ def build_dataset(patients: list[str], channels: list[str], clean:bool, grouped:
         event_mapping=EVENT_MAPPING,
         stride=STRIDE,
         prepare_patient=prepare_patient,
-        prepare_target=prepare_arousal_target,
+        prepare_target=prepare_breathing_target,
         prepare_sample=prepare_sample,
         total_input=total_input,
-        target_resolution=TARGET_RESOLUTION,
+        target_resolution=TARGET_RESOLUTION
     )
     dataset.classes = list(TARGET_CLASSES)
     logger.info(
@@ -178,10 +228,10 @@ def is_pap_patient(edf_path: str) -> bool:
     return any(ch in available_channels for ch in pap_channel_patterns)
 
 
-def has_required_channels(edf_path: str, channels:list[str], grouped: bool) -> bool:
+def has_required_channels(edf_path: str, channels:list[str]) -> bool:
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
-    requested = get_channels(channels, grouped=grouped, include_quality=False, normalize=True, sample_frequency=SAMPLE_FREQUENCY, override_normalize={"chin_emg":None, "ECG":None, "Pulse Waveform":None}) # TODO this has to be set in two places now
+    requested = get_channels(channels, grouped=False, include_quality=False, normalize=False, sample_frequency=SAMPLE_FREQUENCY) 
     channel_by_group = defaultdict(list)
     for cfg in requested:
         if cfg.group:
@@ -194,19 +244,23 @@ def has_required_channels(edf_path: str, channels:list[str], grouped: bool) -> b
             return False
     return True
 
-def list_patients(source_root: str, channels: list[str], grouped: bool, dry_run: bool) -> list[str]:
+def list_patients(source_root: str, channels: list[str], dry_run: bool, pap: bool) -> list[str]:
     patients = [
-        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(patient) and has_required_channels(patient, channels, grouped)
+        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if has_required_channels(patient, channels) 
     ]
+
+    if not pap:
+        patients = [p for p in patients if not is_pap_patient(p)]
+
     return patients[:2] if dry_run else patients
 
-def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weight, dry, total_input):
+def build_model_and_trainer(train_dataset, model, scaler, class_weights, dry):
     n_channels = len(train_dataset.get_input_channels())
     if model == "utime-big":
         model = UTime(
             ts_len=train_dataset.get_timeseries_len(),
             n_channels=n_channels,
-            classes=TARGET_CLASSES, #["arousal"],
+            classes=TARGET_CLASSES, 
             sampling_frequency=SAMPLE_FREQUENCY,
             channel = [64, 128, 128, 256],
             kernel = [5, 5, 3, 3],
@@ -215,13 +269,13 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weigh
             activation="elu",
             mlp_size=512,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not grouped else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels)])] if scaler else None
         )
     elif model == "utime-huge":
         model = UTime(
             ts_len=train_dataset.get_timeseries_len(),
             n_channels=n_channels,
-            classes=TARGET_CLASSES, #["arousal"],
+            classes=TARGET_CLASSES, 
             sampling_frequency=SAMPLE_FREQUENCY,
             channel = [32, 64, 128, 128, 256],
             kernel = [5, 5, 3, 3, 3],
@@ -230,13 +284,13 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weigh
             activation="elu",
             mlp_size=1024,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not grouped else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels)])] if scaler else None
         )
     elif model == "utime-small":
         model = UTime(
             ts_len=train_dataset.get_timeseries_len(),
             n_channels=n_channels,
-            classes=TARGET_CLASSES, #["arousal"],
+            classes=TARGET_CLASSES, 
             sampling_frequency=SAMPLE_FREQUENCY,
             channel = [64, 128, 256],
             kernel = [5, 3, 3],
@@ -245,44 +299,7 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weigh
             activation="elu",
             mlp_size=64,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not grouped else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if scaler else None 
-        )
-    elif model == "multi":
-        if grouped:
-            eeg_channels = ["EEG"]
-        else:
-            eeg_channels = ["C3-M2", "C4-M1", "F3-M2", "F4-M1", "O1-M2", "O2-M1"]
-        
-        aux_channels = [channel for channel in train_dataset.get_input_channels() if channel not in eeg_channels]
-        if len(eeg_channels) == 0 or len(aux_channels) == 0:
-            raise ValueError("Multimodel requires at least one EEG and one non-EEG input channel.")
-
-        aux_model = UTime(
-            ts_len=train_dataset.get_timeseries_len(),
-            n_channels=len(aux_channels),
-            classes=None,
-            sampling_frequency=SAMPLE_FREQUENCY,
-            channel=[32, 64, 128],
-            maxpool=[8, 6, 4],
-            kernel=[5, 3, 3],
-            norm="channel",
-            mlp_size=64,
-            dropout_p=0,
-            activation="elu",
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels-1)])] if scaler else None 
-        )
-        eeg_model = SleepTransformer(
-            classes=None,
-            n_channels=len(eeg_channels),
-            epoch_seq_len=infer_sleeptransformer_epoch_seq_len(total_input),
-        )
-        model = MultiModel(
-            classes=TARGET_CLASSES,
-            input_channels=train_dataset.get_input_channels(),
-            models=[
-                MetaModelEntry(aux_model, aux_channels),
-                MetaModelEntry(eeg_model, eeg_channels),
-            ],
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels)])] if scaler else None
         )
     else:
         raise ValueError(f"Did not recoginize model {model}")
@@ -296,38 +313,38 @@ def build_model_and_trainer(train_dataset, model, scaler, grouped, arousal_weigh
         classes=TARGET_CLASSES,
         loss_function=torch.nn.functional.cross_entropy,#torch.nn.functional.binary_cross_entropy_with_logits,
         save_every=10,
-        # loss_mode="inverse",
+        #loss_mode="inverse",
         balance_batches=True,
         balance_gamma=0.75,
-        class_weights={"no_arousal":1, "arousal":arousal_weight}
+        class_weights=class_weights
     )
     return model, trainer
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train and evaluate an arousal model.")
-    parser.add_argument("--grouped", action="store_true", help="Randomly sample one available EEG/EOG channel into a grouped EEG input.")
-    parser.add_argument("--channels", nargs='+', default=["eeg", "eog", "chin_emg", "ECG"], help="List of channels.")
+    parser = argparse.ArgumentParser(description="Train and evaluate an breathing model.")
+    parser.add_argument("--channels", nargs='+', default=["RIP Flow", "RIP Sum", "Chest", "Abdomen", "Saturation"], help="List of channels.")
     parser.add_argument("--scaler", action="store_true", help="If RobustScaler should be used.")
-    parser.add_argument("--clean", action="store_true", help="If data should be filtered for artifacts / wake.")
-    parser.add_argument("--arousal_weight", type=int, default=1, help="Weight of arousals.")
+    parser.add_argument("--pap", action="store_true", help="Include PAP patients.")
+    parser.add_argument("--apnea_weight", type=int, default=1, help="Weight of breathing classes (apnea/hypopnea).")
+    parser.add_argument("--hypopnea_weight", type=int, default=1, help="Weight of breathing classes (apnea/hypopnea).")
     parser.add_argument("--model", type=str, default="utime-big", help="What model to use.")
     parser.add_argument("--id", type=str, default="", help="ID of the experiment")
-    parser.add_argument("--total_input", type=str, default="30s", help="Total input size")
+    parser.add_argument("--total_input", type=str, default="60s", help="Total input size")
     parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
-    experiment_name = f"arousal_{args.id}" 
+    experiment_name = f"breathing_{args.id}" 
     if args.dry:
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
     
-    os.makedirs(os.path.join("results", "arousal", experiment_name), exist_ok=True)
-    logger.set_log_file(os.path.join("results", "arousal", experiment_name, "output.log"))
+    os.makedirs(os.path.join("results", "breathing", experiment_name), exist_ok=True)
+    logger.set_log_file(os.path.join("results", "breathing", experiment_name, "output.log"))
 
-    train_patients = list_patients(TRAIN_ROOT, args.channels, args.grouped, args.dry)
-    test_patients = list_patients(TEST_ROOT, args.channels, args.grouped, args.dry)
+    train_patients = list_patients(TRAIN_ROOT, args.channels, args.dry, args.pap)
+    test_patients = list_patients(TEST_ROOT, args.channels, args.dry, args.pap)
 
     val_dataset = None
     if args.val_frac is not None and args.val_frac > 0:
@@ -340,9 +357,8 @@ def main():
     train_dataset = build_dataset(
         train_patients,
         args.channels,
-        args.clean,
-        args.grouped,
-        args.total_input
+        args.total_input,
+        args.pap
     )
     logger.uncontext()
     if len(val_patients) > 0:
@@ -350,18 +366,16 @@ def main():
         val_dataset = build_dataset(
             val_patients,
             args.channels,
-            args.clean,
-            args.grouped,
-            args.total_input
+            args.total_input,
+            args.pap
         )
         logger.uncontext()
     logger.context("TEST")
     test_dataset = build_dataset(
         test_patients,
         args.channels,
-        args.clean,
-        args.grouped,
-        args.total_input
+        args.total_input,
+        args.pap
     )
     logger.uncontext()
 
@@ -369,10 +383,8 @@ def main():
         train_dataset,
         args.model,
         args.scaler,
-        args.grouped,
-        args.arousal_weight,
+        {"apnea":args.apnea_weight, "hypopnea":args.hypopnea_weight, "regular":1.0},
         args.dry,
-        args.total_input,
     )
 
     run_result = run(
@@ -387,18 +399,18 @@ def main():
             batch_size=BATCH_SIZE,
             n_samples=N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
-            test_repeats=[1,2] if args.grouped else [1],
+            test_repeats=[1],
             use_energy_tracker=False,
             tags={"model": args.model},
             collate_fn=batch_collate,
             use_mlflow=True,
-            log_path=os.path.join("results", "arousal"),
+            log_path=os.path.join("results", "breathing"),
             meta_data=vars(args)
         )
     )
 
     export_prediction_package(
-        os.path.join("results", "arousal", experiment_name, "deploy", experiment_name, ".swmodel"),
+        os.path.join("results", "breathing", experiment_name, "deploy", experiment_name, ".swmodel"),
         model=run_result.model,
         trainer=run_result.trainer,
         dataset=train_dataset.to_unlabelled(),

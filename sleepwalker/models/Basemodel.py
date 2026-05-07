@@ -9,7 +9,7 @@ preprocessors are warmed externally by trainer code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import torch
 from torch import nn
@@ -68,6 +68,28 @@ class BaseModel(nn.Module, ABC):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the full model from raw inputs to logits or task outputs."""
         return self.classifier(self.features(x))
+
+    @abstractmethod
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, Any]]:  # pragma: no cover - abstract
+        """Describe the positional input shape expected by ``forward``.
+
+        Returns:
+            A tuple ``(shape, meta)`` where ``shape`` is directly usable as a
+            torchinfo-style input shape and ``meta`` carries semantic details
+            such as layout and channel/time dimensions.
+
+        Notes:
+            ``shape`` should include the batch dimension and must describe what
+            :meth:`forward` actually expects, which may differ from the raw
+            dataset window when a model-specific adaptation is applied before
+            feature extraction.
+
+            ``meta`` should normally include at least:
+            - ``layout``: tensor axis convention such as ``"BTC"``
+            - ``ts_len``: time-axis length expected by the model
+            - ``n_channels``: effective number of input channels
+        """
+        ...
 
     @abstractmethod
     def _features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract

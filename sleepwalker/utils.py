@@ -554,7 +554,11 @@ def suppress_stdout_logging(logger: UnifiedLogger):
     for sink in logger._sinks:
         if isinstance(sink, StdLogSink):
             for handler in sink._logger.handlers:
-                handler._old_level = handler.level
+                levels = getattr(handler, "_suppressed_levels", None)
+                if levels is None:
+                    levels = []
+                    handler._suppressed_levels = levels
+                levels.append(handler.level)
                 handler.setLevel(logging.CRITICAL + 1)
     try:
         yield
@@ -562,8 +566,12 @@ def suppress_stdout_logging(logger: UnifiedLogger):
         for sink in logger._sinks:
             if isinstance(sink, StdLogSink):
                 for handler in sink._logger.handlers:
-                    handler.setLevel(handler._old_level)
-                    del handler._old_level
+                    levels = getattr(handler, "_suppressed_levels", None)
+                    if not levels:
+                        continue
+                    handler.setLevel(levels.pop())
+                    if len(levels) == 0:
+                        del handler._suppressed_levels
 
 # ---------------------------
 # Singleton

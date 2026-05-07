@@ -90,6 +90,7 @@ class SeqSleepNet(BaseModel):
         super().__init__(preprocessors=spec)
 
         self.ts_len = ts_len
+        self.n_channels = n_channels
         T = self.ts_len
         if T % self.epoch_len_samples != 0:
             raise ValueError(f"Input length T={T} is not divisible by epoch_len={self.epoch_len_samples} samples → expected multiple of {self.epoch_len_samples} samples per epoch.")
@@ -226,6 +227,13 @@ class SeqSleepNet(BaseModel):
     def feature_dim(self) -> int:
         """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
+
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
+        """Describe the raw BTC input shape expected by ``forward``."""
+        return (
+            (1, self.ts_len, self.n_channels),
+            {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
+        )
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         """Map features to logits for the configured class set."""

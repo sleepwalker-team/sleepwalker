@@ -4,10 +4,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
+
+# SSH + tmux often supports truecolor while Rich/Textual only auto-detect 256 colors.
+if not os.environ.get("COLORTERM"):
+    os.environ["COLORTERM"] = "truecolor"
+if not os.environ.get("TEXTUAL_COLOR_SYSTEM"):
+    os.environ["TEXTUAL_COLOR_SYSTEM"] = "truecolor"
 
 from rich import box
 from rich.console import Group
@@ -16,7 +25,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Static
@@ -25,6 +34,7 @@ from textual_plotext import PlotextPlot
 
 SUPPORTED_MODES = ("train", "val", "test")
 PLOT_METRICS = ("loss", "accuracy", "f1_macro", "coehns_kappa")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SORT_OPTIONS = [
     ("runid", "Run ID"),
@@ -251,14 +261,29 @@ def load_text(path: Path, missing_message: str) -> str:
         return f"Could not read {path.name}: {exc}"
 
 
-def resolve_run_folder(results_jsonl: Path, folder_value: Any) -> Path:
-    candidate = Path(str(folder_value)) if folder_value not in (None, "") else Path(".")
+def resolve_existing_path(candidate: Path, anchors: list[Path]) -> Path:
     if candidate.is_absolute():
         return candidate
-    cwd_path = (Path.cwd() / candidate).resolve()
-    if cwd_path.exists():
-        return cwd_path
-    return (results_jsonl.parent / candidate).resolve()
+    for anchor in anchors:
+        resolved = (anchor / candidate).resolve()
+        if resolved.exists():
+            return resolved
+    return (anchors[0] / candidate).resolve()
+
+
+def resolve_run_folder(results_jsonl: Path, folder_value: Any) -> Path:
+    candidate = Path(str(folder_value)) if folder_value not in (None, "") else Path(".")
+    anchors = [results_jsonl.parent, REPO_ROOT]
+    return resolve_existing_path(candidate, anchors)
+
+
+def resolve_artifact_folder(mlflow_path: Path, artifact_uri: str) -> Path:
+    parsed = urlparse(artifact_uri)
+    if parsed.scheme == "file":
+        return Path(parsed.path)
+    candidate = Path(artifact_uri)
+    anchors = [mlflow_path.parent, REPO_ROOT]
+    return resolve_existing_path(candidate, anchors)
 
 
 def sanitize_cm(value: Any) -> list[list[float]] | None:
@@ -347,7 +372,8 @@ def load_mlflow_runs(mlflow_path: Path) -> dict[str, MlflowRun]:
         runs: dict[str, MlflowRun] = {}
         for row in backend.list_runs():
             artifact_uri = str(row.get("artifact_uri") or "")
-            hparams_path = Path(artifact_uri) / "hparams.json"
+            artifact_folder = resolve_artifact_folder(mlflow_path, artifact_uri)
+            hparams_path = artifact_folder / "hparams.json"
             hparams_text = load_text(hparams_path, "No hparams.json found for this MLflow run.")
             _, hparams_lookup = parse_hparams_text(hparams_text)
             run = MlflowRun(
@@ -790,12 +816,22 @@ class ResultsFolderApp(App[None]):
 
     #matrix-stack {
         height: 1fr;
+        layout: vertical;
     }
 
     .cm-view {
         height: auto;
         padding: 0;
         margin: 0;
+    }
+
+    .cm-scroll {
+        height: 1fr;
+        margin-bottom: 1;
+    }
+
+    .cm-scroll:last-child {
+        margin-bottom: 0;
     }
     """
 
@@ -828,9 +864,9 @@ class ResultsFolderApp(App[None]):
             Vertical(
                 VerticalScroll(Static(id="selection-summary"), id="selection-scroll"),
                 Vertical(
-                    Static(id="cm-test", classes="cm-view"),
-                    Static(id="cm-val", classes="cm-view"),
-                    Static(id="cm-train", classes="cm-view"),
+                    ScrollableContainer(Static(id="cm-test", classes="cm-view"), classes="cm-scroll"),
+                    ScrollableContainer(Static(id="cm-val", classes="cm-view"), classes="cm-scroll"),
+                    ScrollableContainer(Static(id="cm-train", classes="cm-view"), classes="cm-scroll"),
                     id="matrix-stack",
                 ),
                 id="right-pane",
@@ -977,13 +1013,29 @@ class ResultsFolderApp(App[None]):
         self.plot_series_for_run(run)
 
 
+def color_debug_line(app: App[Any]) -> str:
+    return " ".join(
+        [
+            "[explore_multiclass colors]",
+            f"term={os.environ.get('TERM', '')}",
+            f"colorterm={os.environ.get('COLORTERM', '')}",
+            f"textual_color_system={os.environ.get('TEXTUAL_COLOR_SYSTEM', '')}",
+            f"tmux={'yes' if os.environ.get('TMUX') else 'no'}",
+            f"rich={app.console.color_system}",
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explore a results folder containing results.jsonl and optional mlflow.sqlite.")
     parser.add_argument("results_folder", type=Path, help="Folder that contains results.jsonl")
+    parser.add_argument("--debug-colors", action="store_true", help="Print startup color detection details to stderr.")
     args = parser.parse_args()
     if not args.results_folder.exists():
         raise SystemExit(f"Results folder not found: {args.results_folder}")
     app = ResultsFolderApp(args.results_folder.resolve())
+    if args.debug_colors:
+        print(color_debug_line(app), file=sys.stderr)
     app.run()
     return 0
 

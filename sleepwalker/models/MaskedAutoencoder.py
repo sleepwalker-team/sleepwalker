@@ -27,7 +27,7 @@ class MaskedAutoencoder(BaseModel):
         dec_dropout=0.1,
         dec_mlp_ratio=4,
         mask_fraction=0.5,
-        use_cls=True,
+        use_cls=False,
     ):
         spec = [
             WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),

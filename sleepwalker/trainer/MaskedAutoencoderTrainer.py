@@ -38,6 +38,7 @@ class MaskedAutoencoderTrainer(ABC):
         device: str = "cuda:0",
         warmup_device: str = "cpu",
         save_every: int = 1,
+        downstream_tasks = None,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
     ):
@@ -55,6 +56,10 @@ class MaskedAutoencoderTrainer(ABC):
         self.num_classes = len(classes)  
         
         self.loss_function = masked_mse
+        if downstream_tasks is None:
+            self.downstream_tasks = {}
+        else:
+            self.downstream_tasks = downstream_tasks 
 
     def _log_from_cm(self, cm: np.ndarray, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
@@ -70,6 +75,8 @@ class MaskedAutoencoderTrainer(ABC):
         logger.metric(f"{scope}/{mode}/f1_micro", f1_micro, step=step)  
         logger.metric(f"{scope}/{mode}/f1_macro", f1_macro, step=step)  
         logger.metric(f"{scope}/{mode}/coehns_kappa", kappa, step=step)  
+        if scope == 'epoch':
+            print(f'{step} | {mode} kappa {kappa:.3f}   f1_macro {f1_macro:.3f}')
 
     def _log_loss(self, loss, mode, scope='batch', step=0):
         logger.metric(f"{scope}/{mode}/loss", loss, step=step) 
@@ -107,7 +114,6 @@ class MaskedAutoencoderTrainer(ABC):
 
         for batch in loader:
             x = batch['data'].to(self.device)
-            #class_label = batch['target'].to(self.device)
             y_true = model.apply_preprocessors(x, len(model.preprocessors)+1)
 
             if opt is not None:
@@ -145,54 +151,60 @@ class MaskedAutoencoderTrainer(ABC):
         logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL', leave=True)
 
         # Embed the training data for the downstream model
-        X = []
-        y = []
+        X_train = []
+        y_train = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in val_loader:
             x = batch['data'].to(self.device)
             pids = batch['patient']
-            class_label = batch['target'].argmax(-1)
-            embeddings = model.embed(x)
+            embeddings = model.embed(x).mean(-1)
 
-            X.append(embeddings)
-            y.append(class_label)
+            X_train.append(embeddings)
+            for k in self.downstream_tasks.keys():
+                y_train[k].append(batch[f'target_{k}'].argmax(-1))
             patient_ids.append(pids)
             logger.progress_advance(val_loader.batch_size)
 
         logger.progress_close()
 
-        X_train = torch.cat(X, 0).cpu().numpy()
-        y_train = torch.cat(y, 0).cpu().numpy()
+        X_train = torch.cat(X_train, 0).cpu().numpy()
+        y_train = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_train.items()}
         patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
         X_train = center_per_patient(X_train, patient_ids)
 
         # Embed the test data for the downstream model
         logger.progress_start(total=len(test_loader) * test_loader.batch_size, desc='Embed TEST', leave=True)
-        X = []
-        y = []
+        X_test = []
+        y_test = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in test_loader:
             x = batch['data'].to(self.device)
-            class_label = batch['target'].argmax(-1)
             pids = batch['patient']
-            embeddings = model.embed(x)
+            embeddings = model.embed(x).mean(-1)
 
-            X.append(embeddings)
-            y.append(class_label)
+            X_test.append(embeddings)
+            for k in self.downstream_tasks.keys():
+                y_test[k].append(batch[f'target_{k}'].argmax(-1))
             patient_ids.append(pids)
             logger.progress_advance(test_loader.batch_size)
 
         logger.progress_close()
 
-        X_test = torch.cat(X, 0).cpu().numpy()
-        y_test = torch.cat(y, 0).cpu().numpy()
+        X_test = torch.cat(X_test, 0).cpu().numpy()
+        y_test = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_test.items()}
         patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
         X_test = center_per_patient(X_test, patient_ids)
 
-        self.run_sleep_classification(X_train, X_test, y_train, y_test, model, middle_slices=50)
+        slices = {
+            'sleep': 50,
+            'arousal': 10,
+        }
+
+        for k in self.downstream_tasks.keys():
+            self.run_classification(X_train, X_test, y_train[k], y_test[k], model, label=k, middle_slices=slices[k])
 
     @torch.inference_mode
-    def run_sleep_classification(self, X_train, X_test, y_train, y_test, model, label='sleep', middle_slices=150):
+    def run_classification(self, X_train, X_test, y_train, y_test, model, label='sleep', middle_slices=150):
         # Slice out middle fo prediction
         T = X_train.shape[1]
         _from = T//2 - middle_slices // 2
@@ -201,16 +213,13 @@ class MaskedAutoencoderTrainer(ABC):
             _from += 1 
             _to += 1
 
-        X_train = X_train[:, _from:_to].mean(1).mean(-1)
-        X_test = X_test[:, _from:_to].mean(1).mean(-1)
+        X_train = X_train[:, _from:_to].mean(1)
+        X_test = X_test[:, _from:_to].mean(1)
 
-        # np.save('embeddings/X_train.npy', X_train)
-        # np.save('embeddings/X_test.npy', X_test)
-        # np.save('embeddings/y_train.npy', y_train)
-        # np.save('embeddings/y_test.npy', y_test)
-
-        #clf = Pipeline([('l2', Normalizer(norm='l2')), ('scaler', StandardScaler()), ('clf', LogisticRegression(max_iter=10000))])
-        clf = LogisticRegression(max_iter=10000)
+        if label == 'arousal':
+            clf = LogisticRegression(max_iter=10000, class_weight={0: 10, 1: 1})
+        else:
+            clf = LogisticRegression(max_iter=10000)
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)

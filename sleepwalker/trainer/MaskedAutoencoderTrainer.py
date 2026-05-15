@@ -93,8 +93,8 @@ class MaskedAutoencoderTrainer(ABC):
             raise ValueError(f"batch_size should not be None here.")
 
         for modality in self.groups:
-            for idx in range(len(model.preprocessors)):
-                logger.progress_start(total_batches*batch_size, desc=f"{modality} {idx}/{len(model.preprocessors) - 1}", leave=True)
+            for idx in range(len(model.preprocessors[modality])):
+                logger.progress_start(total_batches*batch_size, desc=f"{modality} {idx}/{len(model.preprocessors[modality]) - 1}", leave=True)
                 if model.preprocessors[modality][idx].requires_warmup():
                     for batch in data_loader:
                         x = batch[f'data_{modality}'] 
@@ -217,8 +217,8 @@ class MaskedAutoencoderTrainer(ABC):
         X_test = {k: center_per_patient(X_test[k], patient_ids) for k in X_test}
 
         for k, cfg in self.downstream_tasks.items():
-            X_train_embeddings = np.stack([X_train[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']]).mean(0)
-            X_test_embeddings =np.stack([X_test[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']]).mean(0)
+            X_train_embeddings = np.concatenate([X_train[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']], -1)
+            X_test_embeddings = np.concatenate([X_test[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']], -1)
             self.run_classification(X_train_embeddings, X_test_embeddings, y_train[k], y_test[k], cfg, label=k)
 
     @torch.inference_mode

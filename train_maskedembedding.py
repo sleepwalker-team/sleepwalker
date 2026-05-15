@@ -75,7 +75,7 @@ task_config = {
         'default': 'regular',
         'percentage': 0.5,
         'target_resolution': '10s',
-        'embeddings': ['RIP'],
+        'embeddings': ['RIP', 'Airflow'],
         'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
         'loss_mode': 'inverse',
@@ -104,7 +104,7 @@ task_config = {
         'default': None,
         'percentage': 0.5,
         'target_resolution': '30s',
-        'embeddings': ['EEG'],
+        'embeddings': ['EEG', 'EOG'],
         'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
         'loss_mode': 'inverse',
@@ -118,21 +118,20 @@ def get_datasets():
     train_patients, rest = random_split(all_patients, test_frac=0.33, seed=1912817)
     val_patients, test_patients = random_split(rest, test_frac=0.5, seed=918171)
 
-    train_patients = all_patients[0:3]
-    val_patients = all_patients[3:6]
-    test_patients = all_patients[6:9]
-
     channels = [
     	ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
         ChannelConfig(name='F4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
         ChannelConfig(name='O2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-        # ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-        # ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-        # ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
         ChannelConfig(name='RIP Flow', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.01, highcut=3.0, band_order=4, notch_freq=None), group='RIP'), # TODO: Most of the frequency bins will be zero, right?
-        ChannelConfig(name='RIP Sum', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.01, highcut=3.0, band_order=4, notch_freq=None), group='RIP')
-        #ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        #ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+        ChannelConfig(name='RIP Sum', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.01, highcut=3.0, band_order=4, notch_freq=None), group='RIP'),
+        ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
+        ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
+        #Nasal Pressure, Airflow
+        ChannelConfig(name='Nasal Pressure', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.1, highcut=15.0, band_order=4, notch_freq=None), group='Airflow'), 
+        ChannelConfig(name='Airflow', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.1, highcut=15.0, band_order=4, notch_freq=None), group='Airflow'), 
         
         # ChannelConfig(name='Nasal Pressure)
         # ChannelConfig(name='RIP Flow Cal'),

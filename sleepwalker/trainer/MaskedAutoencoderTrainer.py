@@ -92,19 +92,16 @@ class MaskedAutoencoderTrainer(ABC):
         if batch_size is None:
             raise ValueError(f"batch_size should not be None here.")
 
-        for modality in self.groups:
-            for idx in range(len(model.preprocessors[modality])):
-                logger.progress_start(total_batches*batch_size, desc=f"{modality} {idx}/{len(model.preprocessors[modality]) - 1}", leave=True)
-                if model.preprocessors[modality][idx].requires_warmup():
-                    for batch in data_loader:
-                        x = batch[f'data_{modality}'] 
-                        x = model.apply_preprocessors(x, modality, idx)
-                        model.preprocessors[modality][idx].update(x)
-                        logger.progress_advance(batch_size)
-                else:
-                    # No warmup required -> Set tqdm bar to final value directly                
-                    logger.progress_advance(total_batches*batch_size)
-                logger.progress_close()
+        logger.progress_start(total_batches*batch_size, leave=True)
+        for batch in data_loader:
+            for modality in self.groups:
+                for idx in range(len(model.preprocessors[modality])):
+                    if model.preprocessors[modality][idx].requires_warmup():
+                            x = batch[f'data_{modality}'] 
+                            x = model.apply_preprocessors(x, modality, idx)
+                            model.preprocessors[modality][idx].update(x)
+            logger.progress_advance(batch_size)
+        logger.progress_close()
 
         return model
 

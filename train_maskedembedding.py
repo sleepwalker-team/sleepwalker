@@ -8,13 +8,13 @@ from os.path import join, exists
 from functools import partial
 
 from sleepwalker.models.MaskedAutoencoder import MaskedAutoencoder
-from sleepwalker.models.MaskedSingleEmbeddingEncoder import MaskedSingleEmbeddingEncoder
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split, export_dataloader_to_numpy_dir
 from sleepwalker.datasets.Ruhrlandklinik import Ruhrlandklinik
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
 from sleepwalker.trainer.utils import trim_wake
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
@@ -46,43 +46,51 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
     return data_df, label_df, label_extra_df
 
 def get_collate_ignore_list(dataset) -> list[str]:
-    return ['time', 'dataset', 'target'] if isinstance(dataset, MultiDataset) else ['time', 'target']
+    return ['time', 'dataset', 'target', 'data'] if isinstance(dataset, MultiDataset) else ['time', 'target', 'data']
 
 def prepare_multiclass_sample(data, target, task_config, **item):
     new_item = {}
-    new_item['data'] = torch.from_numpy(data.values).float()
+    new_item['patient'] = torch.tensor(int(hashlib.sha256(item['patient'].encode('utf-8')).hexdigest(), 16) % 10**8).long()
+
+    # Build individual data modalities
+    for modality_name in dict.fromkeys(data.columns):  
+        modality_df = data.loc[:, data.columns == modality_name]
+        new_item[f'data_{modality_name}'] = torch.from_numpy(modality_df.values).float()
+
+    # Build all different target annotations
     t = MultiLabelTrainer.build_multitask_target(target, task_config)
     for task_name, cfg, labels in zip(task_config.keys(), task_config.values(), t):
-        if task_name == 'arousal':
-            # Take middle slice
-            middle = len(labels) // 2
-            _target = torch.zeros((len(cfg['labels'])))
-            _target[int(labels[middle])] = 1
-        elif task_name == 'sleep':
-            # Take first
-            _target = torch.zeros((len(cfg['labels'])))
-            _target[int(labels[0])] = 1
+        labels = labels[:cfg['n_steps']]
+        # Take middle slice
+        middle = len(labels) // 2
+        _target = torch.zeros((len(cfg['labels'])))
+        _target[int(labels[middle])] = 1
         new_item[f'target_{task_name}'] = _target.float()
-    new_item['patient'] = torch.tensor(int(hashlib.sha256(item['patient'].encode('utf-8')).hexdigest(), 16) % 10**8).long()
+
     return new_item
 
 task_config = {
-    # 'breathing': {
-    #     'labels': ['obstruction', 'regular'],
-    #     'default': 'regular',
-    #     'percentage': 0.5,
-    #     'target_resolution': '10s',
-    #     'loss_function': torch.nn.functional.cross_entropy,
-    #     'loss_mode': 'inverse',
-    # },
-    'arousal': {
-        'labels': ['arousal', 'no arousal'],
-        'default': 'no arousal',
+    'breathing': {
+        'labels': ['apnea', 'hypopnea', 'regular'],
+        'default': 'regular',
         'percentage': 0.5,
-        'target_resolution': '1s',
+        'target_resolution': '10s',
+        'embeddings': ['RIP'],
+        'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
         'loss_mode': 'inverse',
     },
+    # 'arousal': {
+    #     'labels': ['arousal', 'no arousal'],
+    #     'default': 'no arousal',
+    #     'percentage': 0.5,
+    #     'target_resolution': '1s',
+    #     'embeddings': ['EEG'],
+    #     'class_weights': {0: 10, 1: 1},
+    #     'n_slices': 10,
+    #     'loss_function': torch.nn.functional.cross_entropy,
+    #     'loss_mode': 'inverse',
+    # },
     # 'desat': {
     #     'labels': ['desaturation', 'no desaturation'],
     #     'default': 'no desaturation',
@@ -96,6 +104,8 @@ task_config = {
         'default': None,
         'percentage': 0.5,
         'target_resolution': '30s',
+        'embeddings': ['EEG'],
+        'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
         'loss_mode': 'inverse',
     },
@@ -108,17 +118,19 @@ def get_datasets():
     train_patients, rest = random_split(all_patients, test_frac=0.33, seed=1912817)
     val_patients, test_patients = random_split(rest, test_frac=0.5, seed=918171)
 
-    # train_patients = all_patients[0:3]
-    # val_patients = all_patients[10:13]
-    # test_patients = all_patients[20:23]
+    train_patients = all_patients[0:3]
+    val_patients = all_patients[3:6]
+    test_patients = all_patients[6:9]
 
     channels = [
-    	ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        ChannelConfig(name='F4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        ChannelConfig(name='O2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
-        ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+    	ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='F4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='O2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        # ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        # ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        # ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
+        ChannelConfig(name='RIP Flow', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.01, highcut=3.0, band_order=4, notch_freq=None), group='RIP'), # TODO: Most of the frequency bins will be zero, right?
+        ChannelConfig(name='RIP Sum', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=0.01, highcut=3.0, band_order=4, notch_freq=None), group='RIP')
         #ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
         #ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
         
@@ -136,6 +148,14 @@ def get_datasets():
         'n3': 'n3',
         'rem': 'rem',
         'arousal': 'arousal',
+        'a. gemischt': 'apnea',
+        'a. obstruktiv': 'apnea',
+        'a. zentral': 'apnea',
+        'apnoe': 'apnea',
+        'h. obstruktiv': 'hypopnea',
+        'h. zentral': 'hypopnea',
+        'hypopnea-gemischt': 'hypopnea',
+        'hypopnoe': 'hypopnea',
     }
     logger.context('TRAIN')
     train_ds = Ruhrlandklinik(
@@ -147,6 +167,7 @@ def get_datasets():
         total_input='330s',
         target_resolution='30s',
         return_nox=False,
+        group_sampling_strategy='none',
     )
     train_ds.initialize(patients=train_patients, num_workers=N_WORKERS_DATASET)
     logger.uncontext()
@@ -161,6 +182,7 @@ def get_datasets():
         total_input='330s',
         target_resolution='30s',
         return_nox=False,
+        group_sampling_strategy='none',
     )
     val_ds.initialize(patients=val_patients, num_workers=N_WORKERS_DATASET)
     logger.uncontext()
@@ -175,6 +197,7 @@ def get_datasets():
         total_input='330s',
         target_resolution='30s',
         return_nox=False,
+        group_sampling_strategy='none',
     )
     test_ds.initialize(patients=test_patients, num_workers=N_WORKERS_DATASET)
     logger.uncontext()
@@ -227,7 +250,9 @@ def main():
     train_ds, val_ds, test_ds = get_datasets()
     train_dl, val_dl, test_dl = get_dataloader(train_ds, val_ds, test_ds)
 
-    model = MaskedAutoencoder()
+    model = MaskedAutoencoder(
+        groups=train_ds.channel_groups,
+    )
     print('Number of parameters:', count_parameters(model))
     model_hp = model.get_hyperparameters()
 
@@ -235,8 +260,9 @@ def main():
     logger.add_sink(MlflowSink(tracking_uri=os.environ['MLFLOW_URL'], experiment='debug', artifact_uri=None))
     logger.start_run(run_name='testrun-330s', params=model_hp)
 
-    EPOCHS=5
+    EPOCHS=1
     trainer = MaskedAutoencoderTrainer(
+        groups=train_ds.channel_groups,
         epochs=EPOCHS,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=2e-3),
         #lr_scheduler = lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=EPOCHS),

@@ -27,13 +27,21 @@ class MaskedAutoencoder(BaseModel):
         dec_dropout=0.1,
         dec_mlp_ratio=4,
         mask_fraction=0.5,
-        use_cls=False,
+        groups=None,
     ):
-        spec = [
-            WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
-            Normalize(stat_dims=(1,3))
-        ]
-        super().__init__(preprocessors=spec)
+        super().__init__(preprocessors=None)
+
+        if not groups:
+            groups = {'FEAT' : []}
+
+        self.preprocessors = nn.ModuleDict({
+            modality: 
+            nn.ModuleList([
+                WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
+                Normalize(stat_dims=(1,3))
+            ])
+            for modality in groups.keys()
+        })
 
         self.token_size = token_size
         self.window_size = window_size
@@ -51,12 +59,10 @@ class MaskedAutoencoder(BaseModel):
         self.dec_dropout = dec_dropout
         self.dec_mlp_ratio = dec_mlp_ratio
 
-        self.use_cls = use_cls
-
         # Project inputs into unified transformer embedding space (and project back, later)
         F = self.window_size//2 + 1
-        self.input_projection = nn.Linear(F, self.enc_dim)
-        self.output_projection = nn.Linear(self.dec_dim, F)
+        self.input_projection = nn.ModuleDict({modality: nn.Linear(F, self.enc_dim) for modality in groups})
+        self.output_projection = nn.ModuleDict({modality: nn.Linear(self.dec_dim, F) for modality in groups})
 
         # Define positional encodings
         self.encoder_positional_encoding = SinusoidalPositionalEncoding(dim=self.enc_dim)
@@ -89,9 +95,14 @@ class MaskedAutoencoder(BaseModel):
         # Define tokens
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.dec_dim))
         nn.init.trunc_normal_(self.mask_token, std=0.02)
-        if self.use_cls:
-            self.cls_token = nn.Parameter(torch.zeros(1,1,self.enc_dim))
-            nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+    def apply_preprocessors(self, x, modality, up = 0):
+        if up < 0:
+            up = 0
+            
+        for p in self.preprocessors[modality][:up]:
+            x = p(x)
+        return x
 
     def get_hyperparameters(self):
         hp = {
@@ -109,7 +120,6 @@ class MaskedAutoencoder(BaseModel):
             'dec_dim': self.dec_dim,
             'dec_dropout': self.dec_dropout,
             'dec_mlp_ratio': self.dec_mlp_ratio,
-            'use_cls': self.use_cls,
         }
         return hp
 
@@ -130,21 +140,15 @@ class MaskedAutoencoder(BaseModel):
         return super()._classifier(x)
 
     def embed(self, x):
-        x = self.apply_preprocessors(x, len(self.preprocessors)+1)
+        #x = self.apply_preprocessors(x, len(self.preprocessors)+1)
         return self._features(x)
 
-    def _features(self, x):
+    def _features(self, x, modality):
         # Project into transformer space
         B, _, N, D = x.shape
         x = rearrange(x, 'B F N D -> (B D) N F')
-        x = self.input_projection(x)
+        x = self.input_projection[modality](x)
         x = x + self.encoder_positional_encoding.pe[1:N+1].unsqueeze(0)
-
-        if self.use_cls:
-            pe = self.encoder_positional_encoding.pe[0]
-            cls = pe + self.cls_token
-            cls = cls.expand(B*D, -1, -1)
-            x = torch.cat((cls, x), dim=1)
 
         z = self.encoder(x)
         z = self.encoder_norm(z)
@@ -152,14 +156,14 @@ class MaskedAutoencoder(BaseModel):
         return z
 
     def forward(self, x):
-        x = self.apply_preprocessors(x, len(self.preprocessors)+1)
+        #x = self.apply_preprocessors(x, len(self.preprocessors)+1)
         return self._forward(x)
 
-    def _forward(self, x):
+    def _forward(self, x, modality):
         # Project into transformer space
         B, _, N, D = x.shape
         x = rearrange(x, 'B F N D -> (B D) N F')
-        x = self.input_projection(x)
+        x = self.input_projection[modality](x)
         x = x + self.encoder_positional_encoding.pe[1:N+1].unsqueeze(0)
 
         # Apply masking (one mask per batch item, shared across channels)
@@ -174,23 +178,14 @@ class MaskedAutoencoder(BaseModel):
         mask = torch.zeros((B, N)).to(x.device)
         mask[_Bb, ids_discard] = 1
 
-        if self.use_cls:
-            pe = self.encoder_positional_encoding.pe[0]
-            cls = pe + self.cls_token
-            cls = cls.expand(B*D, -1, -1)
-            x = torch.cat((cls, x), dim=1)
-
         z = self.encoder(x)
         z = self.encoder_norm(z)
         dec_keep = self.enc_to_dec_projection(z)
 
         # Create full tokens again, filling dropped-out tokens with masking token
-        offset = 1 if self.use_cls else 0
-        dec_tokens = torch.zeros(B*D, N+offset, self.dec_dim).to(z.device)
-        dec_tokens[_B, ids_keep_bd+offset] = dec_keep[:, 1:] if self.use_cls else dec_keep
-        dec_tokens[_B, ids_discard_bd+offset] = self.mask_token.expand(B*D, ids_discard_bd.shape[-1], -1)
-        if self.use_cls:
-            dec_tokens[:, 0] = dec_keep[:, 0]
+        dec_tokens = torch.zeros(B*D, N, self.dec_dim).to(z.device)
+        dec_tokens[_B, ids_keep_bd] = dec_keep
+        dec_tokens[_B, ids_discard_bd] = self.mask_token.expand(B*D, ids_discard_bd.shape[-1], -1)
 
         dec_tokens = self.decoder_positional_encoding(dec_tokens)
         dec_tokens = self.decoder(dec_tokens)
@@ -198,9 +193,7 @@ class MaskedAutoencoder(BaseModel):
 
         # This projection can be channel-specific. For now, we have just one
         dec_tokens = rearrange(dec_tokens, '(B D) N dec_dim -> B N D dec_dim', B=B, D=D)
-        if self.use_cls:
-            dec_tokens = dec_tokens[:, 1:]
-        patches = self.output_projection(dec_tokens)
+        patches = self.output_projection[modality](dec_tokens)
         patches = rearrange(patches, 'B N D F -> B F N D')
         mask = mask.unsqueeze(1).unsqueeze(-1).expand(B, 1, N, D)
 

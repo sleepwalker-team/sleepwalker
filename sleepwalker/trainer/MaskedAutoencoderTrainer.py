@@ -41,6 +41,7 @@ class MaskedAutoencoderTrainer(ABC):
         downstream_tasks = None,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
+        groups=None,
     ):
         self.epochs = epochs
         self.save_every = save_every
@@ -60,6 +61,8 @@ class MaskedAutoencoderTrainer(ABC):
             self.downstream_tasks = {}
         else:
             self.downstream_tasks = downstream_tasks 
+
+        self.groups = groups
 
     def _log_from_cm(self, cm: np.ndarray, mode: str, scope: str = "batch", step:int = 0):
         """Centralized metric logging from confusion matrix."""  
@@ -89,18 +92,19 @@ class MaskedAutoencoderTrainer(ABC):
         if batch_size is None:
             raise ValueError(f"batch_size should not be None here.")
 
-        for idx in range(len(model.preprocessors)):
-            logger.progress_start(total_batches*batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
-            if model.preprocessors[idx].requires_warmup():
-                for batch in data_loader:
-                    x = batch["data"].to(device)
-                    x = model.apply_preprocessors(x, idx)
-                    model.preprocessors[idx].update(x)
-                    logger.progress_advance(batch_size)
-            else:
-                # No warmup required -> Set tqdm bar to final value directly                
-                logger.progress_advance(total_batches*batch_size)
-            logger.progress_close()
+        for modality in self.groups:
+            for idx in range(len(model.preprocessors)):
+                logger.progress_start(total_batches*batch_size, desc=f"{modality} {idx}/{len(model.preprocessors) - 1}", leave=True)
+                if model.preprocessors[modality][idx].requires_warmup():
+                    for batch in data_loader:
+                        x = batch[f'data_{modality}'] 
+                        x = model.apply_preprocessors(x, modality, idx)
+                        model.preprocessors[modality][idx].update(x)
+                        logger.progress_advance(batch_size)
+                else:
+                    # No warmup required -> Set tqdm bar to final value directly                
+                    logger.progress_advance(total_batches*batch_size)
+                logger.progress_close()
 
         return model
 
@@ -113,13 +117,24 @@ class MaskedAutoencoderTrainer(ABC):
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
 
         for batch in loader:
-            x = batch['data'].to(self.device)
-            y_true = model.apply_preprocessors(x, len(model.preprocessors)+1)
-
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 
-            y_pred, mask = model(x)
+            y_true = []
+            y_pred = []
+            mask = []
+            for modality in self.groups:
+                _x = batch[f'data_{modality}'].to(self.device)
+                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
+                _y_pred, _mask = model._forward(_x, modality)
+
+                y_pred.append(_y_pred)
+                mask.append(_mask)
+                y_true.append(_x.clone())
+
+            y_true = torch.cat(y_true, -1)
+            y_pred = torch.cat(y_pred, -1)
+            mask = torch.cat(mask, -1)
             loss = self.loss_function(y_pred, y_true, mask)
             
             if opt is not None:
@@ -155,9 +170,12 @@ class MaskedAutoencoderTrainer(ABC):
         y_train = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in val_loader:
-            x = batch['data'].to(self.device)
             pids = batch['patient']
-            embeddings = model.embed(x).mean(-1)
+            embeddings = {}
+            for modality in self.groups:
+                _x = batch[f'data_{modality}'].to(self.device)
+                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
+                embeddings[modality] = model._features(_x, modality).mean(-1)
 
             X_train.append(embeddings)
             for k in self.downstream_tasks.keys():
@@ -167,10 +185,10 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        X_train = torch.cat(X_train, 0).cpu().numpy()
+        X_train = {k: torch.cat([d[k] for d in X_train], 0).cpu().numpy() for k in X_train[0]}
         y_train = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_train.items()}
         patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
-        X_train = center_per_patient(X_train, patient_ids)
+        X_train = {k: center_per_patient(X_train[k], patient_ids) for k in X_train}
 
         # Embed the test data for the downstream model
         logger.progress_start(total=len(test_loader) * test_loader.batch_size, desc='Embed TEST', leave=True)
@@ -178,9 +196,12 @@ class MaskedAutoencoderTrainer(ABC):
         y_test = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in test_loader:
-            x = batch['data'].to(self.device)
             pids = batch['patient']
-            embeddings = model.embed(x).mean(-1)
+            embeddings = {}
+            for modality in self.groups:
+                _x = batch[f'data_{modality}'].to(self.device)
+                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
+                embeddings[modality] = model._features(_x, modality).mean(-1)
 
             X_test.append(embeddings)
             for k in self.downstream_tasks.keys():
@@ -190,34 +211,29 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        X_test = torch.cat(X_test, 0).cpu().numpy()
+        X_test = {k: torch.cat([d[k] for d in X_test], 0).cpu().numpy() for k in X_test[0]}
         y_test = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_test.items()}
         patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
-        X_test = center_per_patient(X_test, patient_ids)
+        X_test = {k: center_per_patient(X_test[k], patient_ids) for k in X_test}
 
-        slices = {
-            'sleep': 50,
-            'arousal': 10,
-        }
-
-        for k in self.downstream_tasks.keys():
-            self.run_classification(X_train, X_test, y_train[k], y_test[k], model, label=k, middle_slices=slices[k])
+        for k, cfg in self.downstream_tasks.items():
+            X_train_embeddings = np.stack([X_train[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']]).mean(0)
+            X_test_embeddings =np.stack([X_test[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']]).mean(0)
+            self.run_classification(X_train_embeddings, X_test_embeddings, y_train[k], y_test[k], cfg, label=k)
 
     @torch.inference_mode
-    def run_classification(self, X_train, X_test, y_train, y_test, model, label='sleep', middle_slices=150):
+    def run_classification(self, X_train, X_test, y_train, y_test, cfg, label='sleep'):
+        middle_slices = cfg['n_slices']
         # Slice out middle fo prediction
         T = X_train.shape[1]
         _from = T//2 - middle_slices // 2
         _to = T//2 + middle_slices // 2
-        if model.use_cls:
-            _from += 1 
-            _to += 1
 
         X_train = X_train[:, _from:_to].mean(1)
         X_test = X_test[:, _from:_to].mean(1)
 
-        if label == 'arousal':
-            clf = LogisticRegression(max_iter=10000, class_weight={0: 10, 1: 1})
+        if len(cfg['class_weights']) > 0:
+            clf = LogisticRegression(max_iter=10000, class_weight=cfg['class_weights'])
         else:
             clf = LogisticRegression(max_iter=10000)
         clf.fit(X_train, y_train)

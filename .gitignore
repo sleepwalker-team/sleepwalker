@@ -32,3 +32,6 @@ copy_data.sh
 *.sqlite-journal
 .env
 cache/*
+embeddings
+logs
+checkpoint.pt

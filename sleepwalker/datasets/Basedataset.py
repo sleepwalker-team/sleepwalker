@@ -883,7 +883,7 @@ class BaseDataset(Dataset, ABC):
             if self.group_sampling_strategy == 'random':
                 renamed_columns = list(self.channel_groups.keys())
             elif self.group_sampling_strategy == 'none':
-                renamed_columns = sum([[f'{k}' for _ in range(len(v))] for k, v in self.channel_groups.items()], [])
+                renamed_columns = sum([[f'{k}' for _ in range(len([channel for channel in v if channel in available_columns]))] for k, v in self.channel_groups.items()], [])
             else:
                 raise NotImplementedError('Cannot rename columns for group_sampling_strategy', self.group_sampling_strategy)
             selected_quality = {}

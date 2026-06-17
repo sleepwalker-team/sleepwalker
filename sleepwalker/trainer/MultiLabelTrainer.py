@@ -273,6 +273,8 @@ class MultiLabelTrainer(BaseTrainer):
                 "percentage": percentage,
                 "target_resolution": target_resolution,
                 "n_steps": int(ratio),
+                "embeddings": cfg.get("embeddings", "EEG"),
+                "n_slices": cfg.get("n_slices", 50),
                 "loss_function": cfg.get("loss_function"),
                 "loss_mode": cfg.get("loss_mode", "none"),
                 "class_weights": dict(cfg.get("class_weights", {})),

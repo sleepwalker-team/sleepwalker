@@ -356,7 +356,8 @@ class BaseDataset(Dataset, ABC):
     channels
         Sequence of `ChannelConfig` objects describing which EDF channels to
         load. If multiple channels share the same `group`, one representative is
-        sampled per group in grouped-channel settings.
+        sampled per group in grouped-channel settings if group_sampling_strategy == 'random', 
+        else the group is returned as-is ('none')
 
     sample_frequency
         Target sampling frequency in Hz used when loading signal windows and
@@ -483,6 +484,7 @@ class BaseDataset(Dataset, ABC):
         online_max_tries:int = 128,
         force_one_day: bool = True,
         rereference: Optional[List[List[str]]] = None, # [ ["C3-A1", "C4-A2"] ]
+        group_sampling_strategy: Optional[str] = 'random', # [random, None]
     ) -> None:
         super().__init__()
         
@@ -522,6 +524,7 @@ class BaseDataset(Dataset, ABC):
             else:
                 self.channel_groups[cfg.name].append(cfg.name)
                 self.channel_configs_by_group[cfg.name].append(cfg)
+        self.group_sampling_strategy = group_sampling_strategy
 
         # Events/classes
         if event_mapping is not None:
@@ -877,7 +880,12 @@ class BaseDataset(Dataset, ABC):
         if len(self.channel_groups) > 0:
             available_columns = list(x_df.columns)
             selected_columns = []
-            renamed_columns = list(self.channel_groups.keys())
+            if self.group_sampling_strategy == 'random':
+                renamed_columns = list(self.channel_groups.keys())
+            elif self.group_sampling_strategy == 'none':
+                renamed_columns = sum([[f'{k}' for _ in range(len([channel for channel in v if channel in available_columns]))] for k, v in self.channel_groups.items()], [])
+            else:
+                raise NotImplementedError('Cannot rename columns for group_sampling_strategy', self.group_sampling_strategy)
             selected_quality = {}
 
             # Emit one sampled representative per configured group and rename the
@@ -887,14 +895,20 @@ class BaseDataset(Dataset, ABC):
                 if len(available) == 0:
                     raise ValueError(f"No available channels found for group '{group}'.")
 
-                selected_cfg = available[int(np.random.choice(len(available)))]
-                selected_columns.append(selected_cfg.name)
-                if selected_cfg.quality_name is not None:
-                    if selected_cfg.quality_name not in x_df.columns:
-                        raise ValueError(
-                            f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
-                        )
-                    selected_quality[group] = x_df[selected_cfg.quality_name].copy()
+                if self.group_sampling_strategy == 'random':
+                    selected_cfg = available[int(np.random.choice(len(available)))]
+                    selected_columns.append(selected_cfg.name)
+                    if selected_cfg.quality_name is not None:
+                        if selected_cfg.quality_name not in x_df.columns:
+                            raise ValueError(
+                                f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
+                            )
+                        selected_quality[group] = x_df[selected_cfg.quality_name].copy()
+                elif self.group_sampling_strategy == 'none':
+                    # TODO: Quality not supported right now
+                    selected_columns.extend([c.name for c in available])
+                else:
+                    raise NotImplementedError('Cannot sample for group_sampling_strategy', self.group_sampling_strategy)
 
             x_selected = x_df.loc[:, selected_columns].copy()
             x_selected.columns = renamed_columns

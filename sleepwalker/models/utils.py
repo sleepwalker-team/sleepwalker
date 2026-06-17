@@ -21,15 +21,16 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[: x.size(1)].unsqueeze(0)
 
 class AttentionPooling(nn.Module):
-    def __init__(self, dim, attn_size):
+    def __init__(self, dim, attn_size, along_dimension=1):
         super().__init__()
         self.Wa = nn.Linear(dim, attn_size)
         self.ae = nn.Parameter(torch.randn(attn_size))
         self.ba = nn.Parameter(torch.zeros(attn_size))
+        self.along_dimension = along_dimension
 
     def forward(self, x):
         a_t = torch.tanh(self.Wa(x) + self.ba)
         e_t = torch.matmul(a_t, self.ae)
-        alpha = torch.softmax(e_t, dim=1)
-        out = torch.sum(x * alpha.unsqueeze(-1), dim=1)
+        alpha = torch.softmax(e_t, dim=self.along_dimension)
+        out = torch.sum(x * alpha.unsqueeze(-1), dim=self.along_dimension)
         return out, alpha

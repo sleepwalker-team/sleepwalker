@@ -22,8 +22,14 @@ def masked_mse(y_pred, y_true, mask):
     mask_expanded = mask.expand_as(sq_err)
     return (sq_err * mask_expanded).sum() / mask_expanded.sum().clamp(min=1)
 
-def center_per_patient(X: np.ndarray, patient_ids: np.ndarray) -> np.ndarray:
-    unique_ids = np.unique(patient_ids)
+def masked_mean(feats, channel_mask):
+    while channel_mask.dim() < feats.dim():
+        channel_mask = channel_mask.unsqueeze(1)
+    mask = channel_mask.to(feats.dtype)
+    return (feats * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+
+def center_per_patient(X, patient_ids):
+    unique_ids = torch.unique(patient_ids)
     for uid in unique_ids:
         mask = patient_ids == uid
         X[mask] -= X[mask].mean(axis=0)
@@ -122,8 +128,11 @@ class MaskedAutoencoderTrainer(ABC):
             mask = []
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
+                channel_mask = batch[f'mask_{modality}'].to(self.device)
                 _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
                 _y_pred, _mask = model._forward(_x, modality)
+                # Mask the output mask with whatever channels are present
+                _mask = _mask * channel_mask[:, None, None, :]
 
                 y_pred.append(_y_pred)
                 mask.append(_mask)
@@ -171,8 +180,10 @@ class MaskedAutoencoderTrainer(ABC):
             embeddings = {}
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
+                channel_mask = batch[f'mask_{modality}'].to(self.device)  # (B, C)
                 _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
-                embeddings[modality] = model._features(_x, modality).mean(-1)
+                feats = model._features(_x, modality)  
+                embeddings[modality] = masked_mean(feats, channel_mask)
 
             X_train.append(embeddings)
             for k in self.downstream_tasks.keys():
@@ -182,9 +193,9 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        X_train = {k: torch.cat([d[k] for d in X_train], 0).cpu().numpy() for k in X_train[0]}
-        y_train = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_train.items()}
-        patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
+        X_train = {k: torch.cat([d[k] for d in X_train], 0) for k in X_train[0]}
+        y_train = {k: torch.cat(v, 0) for k, v in y_train.items()}
+        patient_ids = torch.cat(patient_ids, 0)
         X_train = {k: center_per_patient(X_train[k], patient_ids) for k in X_train}
 
         # Embed the test data for the downstream model
@@ -197,8 +208,10 @@ class MaskedAutoencoderTrainer(ABC):
             embeddings = {}
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
+                channel_mask = batch[f'mask_{modality}'].to(self.device)  # (B, C)
                 _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
-                embeddings[modality] = model._features(_x, modality).mean(-1)
+                feats = model._features(_x, modality)  
+                embeddings[modality] = masked_mean(feats, channel_mask)
 
             X_test.append(embeddings)
             for k in self.downstream_tasks.keys():
@@ -208,27 +221,24 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
 
-        X_test = {k: torch.cat([d[k] for d in X_test], 0).cpu().numpy() for k in X_test[0]}
-        y_test = {k: torch.cat(v, 0).cpu().numpy() for k, v in y_test.items()}
-        patient_ids = torch.cat(patient_ids, 0).cpu().numpy()
+        X_test = {k: torch.cat([d[k] for d in X_test], 0) for k in X_test[0]}
+        y_test = {k: torch.cat(v, 0) for k, v in y_test.items()}
+        patient_ids = torch.cat(patient_ids, 0)
         X_test = {k: center_per_patient(X_test[k], patient_ids) for k in X_test}
 
         for k, cfg in self.downstream_tasks.items():
-            X_train_embeddings = np.concatenate([X_train[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']], -1)
-            X_test_embeddings = np.concatenate([X_test[emb_key] for emb_key in self.downstream_tasks[k]['embeddings']], -1)
+            middle_slices = cfg['n_slices']
+            # Slice out middle fo prediction
+            T = X_train[cfg['embeddings'][0]].shape[1]
+            _from = T//2 - middle_slices // 2
+            _to = T//2 + middle_slices // 2
+
+            X_train_embeddings = np.concatenate([X_train[emb_key][:, _from:_to].mean(1).cpu().numpy() for emb_key in self.downstream_tasks[k]['embeddings']], -1)
+            X_test_embeddings = np.concatenate([X_test[emb_key][:, _from:_to].mean(1).cpu().numpy() for emb_key in self.downstream_tasks[k]['embeddings']], -1)
             self.run_classification(X_train_embeddings, X_test_embeddings, y_train[k], y_test[k], cfg, label=k)
 
     @torch.inference_mode
     def run_classification(self, X_train, X_test, y_train, y_test, cfg, label='sleep'):
-        middle_slices = cfg['n_slices']
-        # Slice out middle fo prediction
-        T = X_train.shape[1]
-        _from = T//2 - middle_slices // 2
-        _to = T//2 + middle_slices // 2
-
-        X_train = X_train[:, _from:_to].mean(1)
-        X_test = X_test[:, _from:_to].mean(1)
-
         if len(cfg['class_weights']) > 0:
             clf = LogisticRegression(max_iter=10000, class_weight=cfg['class_weights'])
         else:
@@ -238,7 +248,7 @@ class MaskedAutoencoderTrainer(ABC):
         cm = confusion_matrix(y_test, y_pred)
         self._log_from_cm(cm, mode=label, scope='epoch', step=self.epoch_step)
     
-    def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None):
+    def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None, warmup_loader=None):
         opt = self.optimizer_fn(model)
 
         if self.lr_scheduler_fn is not None:
@@ -253,7 +263,9 @@ class MaskedAutoencoderTrainer(ABC):
             self.early_stopping_patience = None
 
         logger.context("Warmup preprocessors")
-        self.warmup_preprocessors(model, train_loader, self.warmup_device) 
+        if warmup_loader is None:
+            warmup_loader = train_loader
+        self.warmup_preprocessors(model, warmup_loader, self.warmup_device) 
         logger.uncontext()
 
         model = model.to(self.device)

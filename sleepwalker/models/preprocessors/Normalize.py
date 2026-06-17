@@ -18,7 +18,7 @@ class Normalize(Preprocessor):
         super().__init__()
         self.register_buffer("mean", None)
         self.register_buffer("M2", None)
-        self.count = 0
+        self.register_buffer("count", torch.tensor(0, dtype=torch.long))
         self.stat_dims = stat_dims
 
     def _reduce_dims(self, ndim):
@@ -49,17 +49,17 @@ class Normalize(Preprocessor):
         if self.mean is None:
             self.mean = batch_mean
             self.M2 = batch_M2
-            self.count = batch_count
+            self.count.fill_(batch_count)
         else:
             delta = batch_mean - self.mean
-            total_count = self.count + batch_count
+            total_count = self.count.item() + batch_count
 
             new_mean = self.mean + delta * batch_count / total_count
             new_M2 = self.M2 + batch_M2 + delta**2 * self.count * batch_count / total_count
 
             self.mean.copy_(new_mean)
             self.M2.copy_(new_M2)
-            self.count = total_count
+            self.count.fill_(total_count)
 
     def requires_warmup(self) -> bool:
         """Return whether this preprocessor requires warmup."""

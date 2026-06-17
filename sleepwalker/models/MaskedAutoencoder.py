@@ -28,25 +28,36 @@ class MaskedAutoencoder(BaseModel):
         dec_mlp_ratio=4,
         mask_fraction=0.5,
         groups=None,
+        normalize=False,
     ):
         super().__init__(preprocessors=None)
 
         if not groups:
             groups = {'FEAT' : []}
 
-        self.preprocessors = nn.ModuleDict({
-            modality: 
-            nn.ModuleList([
-                WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
-                Normalize(stat_dims=(1,3))
-            ])
-            for modality in groups.keys()
-        })
+        if normalize:
+            self.preprocessors = nn.ModuleDict({
+                modality: 
+                nn.ModuleList([
+                    WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
+                    Normalize(stat_dims=(1,3))
+                ])
+                for modality in groups.keys()
+            })
+        else:
+            self.preprocessors = nn.ModuleDict({
+                modality: 
+                nn.ModuleList([
+                    WindowedSpectrogram(hop_length=window_step_size, win_length=window_size, token_length=token_size),
+                ])
+                for modality in groups.keys()
+            })
 
         self.token_size = token_size
         self.window_size = window_size
         self.window_step_size = window_step_size
         self.mask_fraction = mask_fraction
+        self.normalize = normalize
         
         self.enc_heads = enc_heads
         self.enc_depth = enc_depth
@@ -120,6 +131,7 @@ class MaskedAutoencoder(BaseModel):
             'dec_dim': self.dec_dim,
             'dec_dropout': self.dec_dropout,
             'dec_mlp_ratio': self.dec_mlp_ratio,
+            'normalize': self.normalize,
         }
         return hp
 

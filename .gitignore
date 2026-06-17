@@ -34,3 +34,7 @@ copy_data.sh
 cache/*
 results/*
 docs/
+embeddings
+logs
+checkpoint.pt
+wandb

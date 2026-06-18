@@ -1,0 +1,2 @@
+script: python train_arousal.py
+pass_config: true

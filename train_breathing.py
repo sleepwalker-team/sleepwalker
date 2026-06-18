@@ -29,7 +29,6 @@ from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterN
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
-from sleepwalker.deployment import export_prediction_package
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.utils.filtering import trim_event
@@ -405,16 +404,10 @@ def main():
             collate_fn=batch_collate,
             use_mlflow=True,
             log_path=os.path.join("results", "breathing"),
-            meta_data=vars(args)
+            meta_data=vars(args),
+            expert_name=experiment_name,
+            expert_task="breathing",
         )
-    )
-
-    export_prediction_package(
-        os.path.join("results", "breathing", experiment_name, "deploy", experiment_name, ".swmodel"),
-        model=run_result.model,
-        trainer=run_result.trainer,
-        dataset=train_dataset.to_unlabelled(),
-        metadata={"experiment_name": experiment_name, **vars(args)},
     )
 
 

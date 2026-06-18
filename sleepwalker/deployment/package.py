@@ -1,32 +1,44 @@
-"""Prediction-package export and loading for Sleepwalker models.
+"""Expert package save/load path for repo-local research handoff.
 
-This module packages a trained model together with a trainer and an
-unlabelled-dataset template so inference can later be run without reconstructing
-the original training script. Tests in ``tests/test_deployment.py`` cover the
-main round-trip behavior and the current ``.swmodel`` file format.
+An expert package is a directory-based snapshot containing two kinds of data:
+
+1. Binary training artifacts:
+   model parameters and, optionally, optimizer/scheduler state.
+2. A JSON manifest:
+   a structured explanation of what the snapshot expects at inference/load
+   time and how to reconstruct the supporting Python objects.
+
+The design intentionally favors explicitness over full portability. A package
+is meant to be understandable and reusable inside a compatible Sleepwalker
+checkout, not a standalone model interchange format. In particular:
+
+- The package stores tensor state, not source code.
+- Reload uses a builder function from the repository to reconstruct the model,
+  trainer, and dataset template.
+- The manifest records input/output and preprocessing contracts so callers can
+  validate whether a dataset or batch matches the saved expert.
+
+This module owns the filesystem layout and torch serialization mechanics,
+whereas :mod:`sleepwalker.deployment.manifest` owns the manifest schema. The
+modules remain separate because the schema is useful as a pure contract layer
+without dragging in package I/O code, but together they define one deployment
+story.
 """
 
 from __future__ import annotations
 
-import copy
-import io
+from dataclasses import dataclass
+import importlib
 import json
 import os
-import platform
+from pathlib import Path
 import subprocess
-import sys
-import zipfile
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Optional
 
-import cloudpickle
-import numpy as np
-import pandas as pd
 import torch
 
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+from sleepwalker.deployment.manifest import BuilderSpec, ExpertManifest, serialize_callable
 
 
 def _safe_git_commit() -> Optional[str]:
@@ -42,84 +54,178 @@ def _safe_git_commit() -> Optional[str]:
         return None
 
 
-def _normalize_device_string(device: str | torch.device) -> str:
-    return str(device)
+def _normalize_path(path: str | os.PathLike) -> Path:
+    out = Path(path)
+    if out.exists() and out.is_file():
+        raise ValueError(f"Expected expert package directory path, got existing file: {out}")
+    return out
 
 
-def _torch_save_bytes(obj: Any) -> bytes:
-    buf = io.BytesIO()
-    torch.save(obj, buf)
-    return buf.getvalue()
+def _load_builder(spec: BuilderSpec):
+    module = importlib.import_module(spec.module)
+    func = getattr(module, spec.function)
+    return func
 
 
-def _sanitize_trainer_for_export(trainer):
-    trainer_copy = copy.copy(trainer)
-    if hasattr(trainer_copy, "device"):
-        trainer_copy.device = "cpu"
-    if hasattr(trainer_copy, "warmup_device"):
-        trainer_copy.warmup_device = "cpu"
-    for attr in [
-        "optimizer_fn",
-        "lr_scheduler_fn",
-        "loss_function",
-        "base_loss_function",
-        "train_transform",
-        "task_loss_functions",
-        "domain_head",
-    ]:
-        if hasattr(trainer_copy, attr):
-            value = {} if attr == "task_loss_functions" else None
-            setattr(trainer_copy, attr, value)
-    return trainer_copy
+def _class_path(obj: Any) -> str:
+    return f"{obj.__class__.__module__}.{obj.__class__.__name__}"
 
 
-def _model_copy_for_export(model):
-    return copy.deepcopy(model).to("cpu")
+def _dataset_side_contract(dataset: Any) -> dict[str, Any]:
+    return {
+        "resample_type": getattr(dataset, "resample_type", None),
+        "rereference": getattr(dataset, "rereference", None),
+        "prepare_patient": serialize_callable(getattr(dataset, "prepare_patient_callback", None)),
+        "prepare_target": serialize_callable(getattr(dataset, "prepare_target_callback", None)),
+        "prepare_sample": serialize_callable(getattr(dataset, "prepare_sample_callback", None)),
+    }
 
 
-def _normalize_export_path(path: str) -> str:
-    normalized = os.fspath(path)
-    if normalized.endswith(os.sep):
-        raise ValueError("Prediction package export path must be a file path, not a directory path.")
-    root, ext = os.path.splitext(normalized)
-    if ext != ".swmodel":
-        return normalized + ".swmodel"
-    else:
-        return normalized
+def _model_side_contract(model: Any) -> list[dict[str, Any]]:
+    preprocessors = []
+    for preprocessor in getattr(model, "preprocessors", []):
+        preprocessors.append(
+            {
+                "class_name": _class_path(preprocessor),
+            }
+        )
+    return preprocessors
 
-def _to_unlabelled_dataset(dataset):
-    if isinstance(dataset, UnlabelledDataset):
-        return dataset.clone()
-    if hasattr(dataset, "to_unlabelled"):
-        return dataset.to_unlabelled()
-    raise ValueError(
-        f"Dataset of type {type(dataset).__name__} does not support export to an UnlabelledDataset."
-    )
+
+def _input_contract(model: Any, dataset_template: Any) -> dict[str, Any]:
+    shape, meta = model.input_spec()
+    return {
+        "tensor_layout": meta.get("layout", "BTC"),
+        "channels": list(dataset_template.get_input_channels()) if hasattr(dataset_template, "get_input_channels") else [],
+        "sample_frequency": float(getattr(dataset_template, "sample_frequency")),
+        "total_input": str(getattr(dataset_template, "total_input")),
+        "target_resolution": str(getattr(dataset_template, "target_resolution", getattr(dataset_template, "total_input"))),
+        "stride": str(getattr(dataset_template, "stride", getattr(dataset_template, "target_resolution", getattr(dataset_template, "total_input")))),
+        "ts_len": int(shape[1]),
+        "n_channels": int(shape[2]),
+    }
+
+
+def _output_contract(model: Any, trainer: Any) -> dict[str, Any]:
+    if hasattr(trainer, "task_config"):
+        return {
+            "type": "multitask",
+            "keys": list(trainer.task_config.keys()),
+            "task_config": {
+                task: {
+                    "labels": list(cfg["labels"]),
+                    "n_steps": int(cfg["n_steps"]),
+                    "target_resolution": str(cfg["target_resolution"]),
+                }
+                for task, cfg in trainer.task_config.items()
+            },
+        }
+    return {
+        "type": "single-head-multiclass",
+        "keys": ["logits"],
+        "classes": list(getattr(trainer, "classes", [])),
+    }
 
 
 @dataclass
-class PredictionPackage:
-    """In-memory representation of an exported prediction package.
+class LoadedExpert:
+    """Live objects reconstructed from an expert package.
 
-    Attributes:
-        model: Loaded model instance with weights restored.
-        trainer: Loaded trainer instance configured for inference.
-        unlabelled_dataset: Dataset template used to initialize EDF files at
-            prediction time.
-        metadata: Export metadata loaded from ``meta.json``.
+    ``LoadedExpert`` is the in-memory view of a package directory after
+    rehydration. It provides the rebuilt model/trainer/template objects plus
+    the parsed manifest and any optional optimizer/scheduler state.
+
+    What callers can expect:
+
+    - ``model`` is loaded with persisted weights.
+    - ``trainer`` and ``dataset_template`` are rebuilt through the package
+      builder when available.
+    - ``manifest`` remains the primary source of structural expectations and
+      metadata.
+
+    What callers should not expect:
+
+    - The object is not a generic training session checkpoint. Only the pieces
+      explicitly persisted into the package are available.
+    - Arbitrary runtime state outside the saved tensor files and manifest is
+      not restored.
     """
 
     model: Any
     trainer: Any
-    unlabelled_dataset: Any
-    metadata: dict[str, Any]
+    dataset_template: Any
+    manifest: ExpertManifest
+    optimizer_state: Optional[dict[str, Any]] = None
+    scheduler_state: Optional[dict[str, Any]] = None
 
-    def predict_window(self, batch, n_repeat: int = 1) -> pd.DataFrame:
-        """Run inference for one already-collated batch."""
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self.manifest.metadata
+
+    def freeze(self) -> None:
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def unfreeze(self) -> None:
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+    def forward(self, batch_or_tensor):
+        if isinstance(batch_or_tensor, dict):
+            self.validate_batch(batch_or_tensor)
+            x = batch_or_tensor["data"]
+        else:
+            x = batch_or_tensor
+        return self.model(x)
+
+    def validate_batch(self, batch: dict[str, Any]) -> None:
+        if "data" not in batch:
+            raise ValueError("Batch must contain 'data'.")
+        x = batch["data"]
+        expected = self.manifest.input_contract
+        if x.ndim != 3:
+            raise ValueError(f"Expected BTC tensor with ndim=3, got shape {tuple(x.shape)}.")
+        if int(x.shape[1]) != int(expected["ts_len"]):
+            raise ValueError(f"Expected time axis {expected['ts_len']}, got {x.shape[1]}.")
+        if int(x.shape[2]) != int(expected["n_channels"]):
+            raise ValueError(f"Expected channel axis {expected['n_channels']}, got {x.shape[2]}.")
+
+    def validate_dataset(self, dataset: Any) -> None:
+        expected = self.manifest.input_contract
+        channels = list(dataset.get_input_channels()) if hasattr(dataset, "get_input_channels") else []
+        if channels != list(expected["channels"]):
+            raise ValueError(f"Expected channels {expected['channels']}, got {channels}.")
+        if float(getattr(dataset, "sample_frequency")) != float(expected["sample_frequency"]):
+            raise ValueError(
+                f"Expected sample_frequency={expected['sample_frequency']}, got {getattr(dataset, 'sample_frequency')}."
+            )
+        if str(getattr(dataset, "total_input")) != str(expected["total_input"]):
+            raise ValueError(f"Expected total_input={expected['total_input']}, got {getattr(dataset, 'total_input')}.")
+
+    def build_optimizer(self):
+        if self.trainer is None or not hasattr(self.trainer, "optimizer_fn"):
+            raise ValueError("Loaded expert does not expose trainer.optimizer_fn.")
+        optimizer = self.trainer.optimizer_fn(self.model)
+        if self.optimizer_state is not None:
+            optimizer.load_state_dict(self.optimizer_state)
+        return optimizer
+
+    def build_scheduler(self, optimizer):
+        if self.trainer is None or not hasattr(self.trainer, "lr_scheduler_fn") or self.trainer.lr_scheduler_fn is None:
+            return None
+        scheduler = self.trainer.lr_scheduler_fn(optimizer)
+        if self.scheduler_state is not None:
+            scheduler.load_state_dict(self.scheduler_state)
+        return scheduler
+
+    def predict_window(self, batch, n_repeat: int = 1):
+        if self.trainer is None:
+            raise ValueError("Loaded expert does not include a trainer.")
         return self.trainer.predict_window(self.model, batch, n_repeat=n_repeat)
 
-    def predict_loader(self, loader) -> pd.DataFrame:
-        """Run inference for all batches produced by a loader."""
+    def predict_loader(self, loader):
+        if self.trainer is None:
+            raise ValueError("Loaded expert does not include a trainer.")
         return self.trainer.predict_loader(self.model, loader)
 
     def predict_patient(
@@ -129,24 +235,12 @@ class PredictionPackage:
         num_workers_dataset: int = 1,
         num_workers_loader: int = 0,
         collate_fn=None,
-    ) -> pd.DataFrame:
-        """Predict one EDF file using the embedded dataset template.
-
-        Args:
-            edf_path: EDF file to score.
-            batch_size: Inference batch size.
-            num_workers_dataset: Worker count used while preparing the
-                temporary dataset instance.
-            num_workers_loader: Dataloader worker count.
-            collate_fn: Optional collate function. Defaults to
-                :func:`sleepwalker.datasets.Basedataset.batch_collate`.
-
-        Returns:
-            A prediction DataFrame generated by the embedded trainer.
-        """
+    ):
+        if self.trainer is None or self.dataset_template is None:
+            raise ValueError("Loaded expert does not include trainer and dataset_template.")
         return self.trainer.predict_patient(
             self.model,
-            self.unlabelled_dataset,
+            self.dataset_template,
             edf_path,
             batch_size=batch_size,
             num_workers_dataset=num_workers_dataset,
@@ -155,121 +249,214 @@ class PredictionPackage:
         )
 
 
+def save_expert_package(
+    path: str | os.PathLike,
+    *,
+    expert_name: str,
+    task: str,
+    model,
+    trainer,
+    dataset_template,
+    builder: Optional[dict[str, Any]] = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> LoadedExpert:
+    """Write a directory-based expert package and return its live view.
+
+    The resulting directory contains:
+
+    - ``model_state.pt``: required model parameters.
+    - ``optimizer_state.pt``: optional optimizer snapshot.
+    - ``scheduler_state.pt``: optional scheduler snapshot.
+    - ``manifest.json``: structured contract and provenance description.
+
+    The layout is intentionally small and inspectable. Users should expect a
+    package to preserve enough information to reload the model in the same
+    codebase and validate inference compatibility, but not to encapsulate the
+    full repository or arbitrary Python behavior.
+    """
+
+    out = _normalize_path(path)
+    out.mkdir(parents=True, exist_ok=True)
+
+    builder_spec = None if builder is None else BuilderSpec(
+        module=str(builder["module"]),
+        function=str(builder["function"]),
+        config=dict(builder.get("config", {})),
+    )
+
+    manifest = ExpertManifest(
+        format_version="sleepwalker-expert-v1",
+        expert_name=expert_name,
+        task=task,
+        source_git_commit=_safe_git_commit(),
+        builder=builder_spec,
+        model={
+            "class_name": _class_path(model),
+            "state_file": "model_state.pt",
+            "input_spec": {
+                "shape": list(model.input_spec()[0]),
+                "meta": model.input_spec()[1],
+            },
+        },
+        input_contract=_input_contract(model, dataset_template),
+        preprocessing_contract={
+            "dataset_side": _dataset_side_contract(dataset_template),
+            "model_side": _model_side_contract(model),
+        },
+        output_contract=_output_contract(model, trainer),
+        training_state={
+            "optimizer_file": "optimizer_state.pt" if optimizer is not None else None,
+            "scheduler_file": "scheduler_state.pt" if scheduler is not None else None,
+            "trainer_class": _class_path(trainer) if trainer is not None else None,
+            "dataset_class": _class_path(dataset_template) if dataset_template is not None else None,
+        },
+        metadata=dict(metadata or {}),
+    )
+
+    torch.save(model.state_dict(), out / "model_state.pt")
+    if optimizer is not None:
+        torch.save(optimizer.state_dict(), out / "optimizer_state.pt")
+    if scheduler is not None:
+        torch.save(scheduler.state_dict(), out / "scheduler_state.pt")
+    with (out / "manifest.json").open("w", encoding="utf-8") as f:
+        f.write(manifest.to_json() + "\n")
+
+    return LoadedExpert(
+        model=model,
+        trainer=trainer,
+        dataset_template=dataset_template,
+        manifest=manifest,
+        optimizer_state=None if optimizer is None else optimizer.state_dict(),
+        scheduler_state=None if scheduler is None else scheduler.state_dict(),
+    )
+
+
+def _manifest_from_dict(payload: dict[str, Any]) -> ExpertManifest:
+    builder_payload = payload.get("builder")
+    builder = None
+    if builder_payload is not None:
+        builder = BuilderSpec(
+            module=builder_payload["module"],
+            function=builder_payload["function"],
+            config=dict(builder_payload.get("config", {})),
+        )
+    return ExpertManifest(
+        format_version=payload["format_version"],
+        expert_name=payload["expert_name"],
+        task=payload["task"],
+        source_git_commit=payload.get("source_git_commit"),
+        builder=builder,
+        model=dict(payload["model"]),
+        input_contract=dict(payload["input_contract"]),
+        preprocessing_contract=dict(payload["preprocessing_contract"]),
+        output_contract=dict(payload["output_contract"]),
+        training_state=dict(payload["training_state"]),
+        metadata=dict(payload.get("metadata", {})),
+    )
+
+
+def load_expert_package(
+    path: str | os.PathLike,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> LoadedExpert:
+    """Load a previously saved expert package from disk.
+
+    Loading proceeds in three phases:
+
+    1. Parse ``manifest.json`` to recover the schema and builder spec.
+    2. Reconstruct Python objects by calling the builder.
+    3. Load tensor state files into the reconstructed objects.
+
+    Because builder reconstruction depends on repository code, load-time
+    compatibility is a code-level contract, not just a file-format contract.
+    """
+
+    root = Path(path)
+    if not root.is_dir():
+        raise ValueError(f"Expert package path must be a directory, got {root}")
+
+    with (root / "manifest.json").open("r", encoding="utf-8") as f:
+        manifest = _manifest_from_dict(json.load(f))
+
+    if manifest.builder is None:
+        raise ValueError("Cannot load expert package without a builder spec.")
+
+    builder_fn = _load_builder(manifest.builder)
+    components = builder_fn(manifest.builder.config)
+
+    model = components["model"]
+    trainer = components.get("trainer")
+    dataset_template = components.get("dataset_template")
+
+    state_dict = torch.load(root / "model_state.pt", map_location=map_location)
+    model.load_state_dict(state_dict)
+    model = model.to(map_location)
+
+    optimizer_state = None
+    scheduler_state = None
+    optimizer_file = manifest.training_state.get("optimizer_file")
+    scheduler_file = manifest.training_state.get("scheduler_file")
+    if optimizer_file:
+        optimizer_state = torch.load(root / optimizer_file, map_location="cpu")
+    if scheduler_file:
+        scheduler_state = torch.load(root / scheduler_file, map_location="cpu")
+
+    if trainer is not None and hasattr(trainer, "device"):
+        trainer.device = str(map_location)
+    if trainer is not None and hasattr(trainer, "warmup_device"):
+        trainer.warmup_device = str(map_location)
+
+    return LoadedExpert(
+        model=model,
+        trainer=trainer,
+        dataset_template=dataset_template,
+        manifest=manifest,
+        optimizer_state=optimizer_state,
+        scheduler_state=scheduler_state,
+    )
+
+
 def export_prediction_package(
-    path: str,
+    path: str | os.PathLike,
     *,
     model,
     trainer,
     dataset,
-    model_card_md: str = "",
     metadata: Optional[dict[str, Any]] = None,
-) -> PredictionPackage:
-    """Export a trained model, trainer, and dataset template to `.swmodel`.
+    model_card_md: str = "",
+) -> LoadedExpert:
+    """Compatibility wrapper that saves an inference-oriented expert package.
 
-    Args:
-        path: Output file path. The ``.swmodel`` suffix is appended when
-            missing.
-        model: Trained model instance.
-        trainer: Trainer instance. Export sanitizes trainer state that is only
-            needed for training.
-        dataset: Labelled or unlabelled dataset object. It must either already
-            be an ``UnlabelledDataset`` or provide ``to_unlabelled()``.
-        model_card_md: Optional Markdown stored as ``model_card.md`` in the
-            package.
-        metadata: Optional metadata merged into the exported manifest.
-
-    Returns:
-        A :class:`PredictionPackage` representing the exported contents.
-
-    Raises:
-        ValueError: If the export path refers to a directory or the dataset
-            cannot be converted into an unlabelled template.
-
-    Notes:
-        The current on-disk format stores both a serialized model object and a
-        separate ``state_dict``. Tests confirm round-tripping of trainer and
-        dataset template metadata, but long-term compatibility guarantees are
-        not established.
+    This helper preserves the older "prediction package" naming while using the
+    same package/manifest layout as :func:`save_expert_package`.
     """
-    path = _normalize_export_path(path)
-    unlabelled_dataset = _to_unlabelled_dataset(dataset)
-    model_export = _model_copy_for_export(model)
-    trainer_export = _sanitize_trainer_for_export(trainer)
-    package_metadata = {
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "git_commit": _safe_git_commit(),
-        "python_version": sys.version,
-        "platform": platform.platform(),
-        "torch_version": torch.__version__,
-        "numpy_version": np.__version__,
-        "pandas_version": pd.__version__,
-        "model_class": f"{model.__class__.__module__}.{model.__class__.__name__}",
-        "trainer_class": f"{trainer.__class__.__module__}.{trainer.__class__.__name__}",
-        "source_dataset_class": f"{dataset.__class__.__module__}.{dataset.__class__.__name__}",
-        "unlabelled_dataset_class": f"{unlabelled_dataset.__class__.__module__}.{unlabelled_dataset.__class__.__name__}",
-        "source_event_mapping": dict(getattr(dataset, "event_mapping", {}) or {}),
-    }
-    if metadata is not None:
-        package_metadata.update(metadata)
-    package_metadata["format"] = "sleepwalker-swmodel-v1"
 
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("meta.json", json.dumps(package_metadata, indent=2, ensure_ascii=True))
-        zf.writestr("model_card.md", model_card_md)
-        zf.writestr("model.pt", _torch_save_bytes(model.state_dict()))
-        zf.writestr("model.pkl", cloudpickle.dumps(model_export))
-        zf.writestr("trainer.pkl", cloudpickle.dumps(trainer_export))
-        zf.writestr("unlabelled_dataset.pkl", cloudpickle.dumps(unlabelled_dataset))
-
-    return PredictionPackage(
-        model=model,
-        trainer=trainer,
-        unlabelled_dataset=unlabelled_dataset,
-        metadata=package_metadata,
+    del model_card_md
+    metadata = dict(metadata or {})
+    expert_name = str(
+        metadata.get("expert_name")
+        or metadata.get("experiment_name")
+        or Path(path).name
     )
-
-
-def load_prediction_package(path: str, map_location: str | torch.device = "cpu") -> PredictionPackage:
-    """Load a previously exported prediction package.
-
-    Args:
-        path: Path to a ``.swmodel`` zip file or an unpacked package directory.
-        map_location: Torch device used to restore the model weights.
-
-    Returns:
-        A :class:`PredictionPackage` with trainer device fields rewritten to
-        the requested ``map_location`` when those attributes exist.
-    """
-    if os.path.isdir(path):
-        with open(os.path.join(path, "model.pkl"), "rb") as f:
-            model = cloudpickle.load(f)
-        with open(os.path.join(path, "trainer.pkl"), "rb") as f:
-            trainer = cloudpickle.load(f)
-        with open(os.path.join(path, "unlabelled_dataset.pkl"), "rb") as f:
-            unlabelled_dataset = cloudpickle.load(f)
-        with open(os.path.join(path, "meta.json"), "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        state_dict = torch.load(os.path.join(path, "model.pt"), map_location=map_location)
-    else:
-        with zipfile.ZipFile(path, "r") as zf:
-            model = cloudpickle.loads(zf.read("model.pkl"))
-            trainer = cloudpickle.loads(zf.read("trainer.pkl"))
-            unlabelled_dataset = cloudpickle.loads(zf.read("unlabelled_dataset.pkl"))
-            metadata = json.loads(zf.read("meta.json").decode("utf-8"))
-            state_dict = torch.load(io.BytesIO(zf.read("model.pt")), map_location=map_location)
-    model.load_state_dict(state_dict)
-    model = model.to(map_location)
-    device_str = _normalize_device_string(map_location)
-    if hasattr(trainer, "device"):
-        trainer.device = device_str
-    if hasattr(trainer, "warmup_device"):
-        trainer.warmup_device = device_str
-    return PredictionPackage(
+    task = str(
+        metadata.get("task")
+        or metadata.get("model")
+        or "expert"
+    )
+    return save_expert_package(
+        path,
+        expert_name=expert_name,
+        task=task,
         model=model,
         trainer=trainer,
-        unlabelled_dataset=unlabelled_dataset,
+        dataset_template=dataset,
         metadata=metadata,
     )
+
+
+def load_prediction_package(path: str | os.PathLike, map_location: str | torch.device = "cpu") -> LoadedExpert:
+    """Compatibility wrapper around :func:`load_expert_package`."""
+    return load_expert_package(path, map_location=map_location)

@@ -1,78 +1,89 @@
 import json
-import os
-import tempfile
 from pathlib import Path
+import sys
+import tempfile
 
-import numpy as np
 import pandas as pd
 import pytest
 import torch
-from torch.utils.data import DataLoader, Dataset
 
-from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_collate
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sleepwalker.deployment import load_expert_package, save_expert_package
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.models.Basemodel import BaseModel
-from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.deployment import export_prediction_package, load_prediction_package
+from sleepwalker.trainer.Run import RunCfg, run
+from train_arousal import build_expert_components as build_arousal_expert_components
+
+
+BUILDER_CALLS: list[dict] = []
 
 
 class TinyModel(BaseModel):
-    def __init__(self):
+    def __init__(self, *, ts_len: int, n_channels: int, classes: list[str]):
         super().__init__()
-        self.linear = torch.nn.Linear(1, 2, bias=True)
+        self.ts_len = ts_len
+        self.n_channels = n_channels
+        self.classes = list(classes)
+        self.linear = torch.nn.Linear(n_channels, len(classes), bias=True)
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
         return x.mean(dim=1)
 
     def feature_dim(self) -> int:
-        return 1
+        return self.n_channels
 
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
-
-class TinyWindowDataset(Dataset):
-    def __init__(self):
-        self.items = [
-            {
-                "data": torch.tensor([[0.0], [0.0], [0.0], [0.0]], dtype=torch.float32),
-                "patient": "p1.edf",
-                "time": pd.Timestamp("2024-01-01 00:00:00"),
-            },
-            {
-                "data": torch.tensor([[1.0], [1.0], [1.0], [1.0]], dtype=torch.float32),
-                "patient": "p1.edf",
-                "time": pd.Timestamp("2024-01-01 00:00:30"),
-            },
-        ]
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, idx):
-        return self.items[idx]
-
-
-class MinimalDataset(BaseDataset):
-    def __init__(self):
-        super().__init__(
-            channels=[ChannelConfig(name="sig", normalizer=None)],
-            sample_frequency=1.0,
-            total_input="4s",
-            target_resolution="2s",
-            event_mapping=None,
+    def input_spec(self):
+        return (
+            (1, self.ts_len, self.n_channels),
+            {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
-        raise NotImplementedError
+
+class TinyDatasetTemplate:
+    def __init__(
+        self,
+        *,
+        channels: list[str],
+        sample_frequency: float,
+        total_input: str,
+        target_resolution: str,
+        stride: str,
+    ):
+        self._channels = list(channels)
+        self.sample_frequency = float(sample_frequency)
+        self.total_input = pd.to_timedelta(total_input)
+        self.target_resolution = pd.to_timedelta(target_resolution)
+        self.stride = pd.to_timedelta(stride)
+        self.resample_type = "nearest"
+        self.rereference = None
+        self.prepare_patient_callback = None
+        self.prepare_target_callback = None
+        self.prepare_sample_callback = None
+
+    def get_input_channels(self):
+        return list(self._channels)
 
 
-class RunDataset(Dataset):
+class TinyTrainDataset:
     def __init__(self):
-        self.channels = [ChannelConfig(name="sig", normalizer=None)]
-        self.items = [{"data": torch.zeros(4, 1), "target": torch.tensor([1.0, 0.0])}]
+        self.items = [
+            {"data": torch.zeros(4, 2), "target": torch.tensor([1.0, 0.0])},
+            {"data": torch.ones(4, 2), "target": torch.tensor([0.0, 1.0])},
+        ]
+        self.sample_frequency = 1.0
+        self.total_input = pd.to_timedelta("4s")
+        self.target_resolution = pd.to_timedelta("2s")
+        self.stride = pd.to_timedelta("2s")
+        self.resample_type = "nearest"
+        self.rereference = None
+        self.prepare_patient_callback = None
+        self.prepare_target_callback = None
+        self.prepare_sample_callback = None
 
     def __len__(self):
         return len(self.items)
@@ -89,146 +100,317 @@ class RunDataset(Dataset):
     def get_timeseries_len(self):
         return 4
 
-
-class StubTrainer:
-    def fit(self, model, train_loader, val_loader=None):
-        return {}
-
-    def test(self, model, test_loader):
-        return 0.0, {}
+    def get_input_channels(self):
+        return ["sig_a", "sig_b"]
 
 
-def build_trainer():
-    return MulticlassTrainer(
+def build_tiny_components(config: dict):
+    BUILDER_CALLS.append(dict(config))
+    classes = list(config.get("classes", ["neg", "pos"]))
+    model = TinyModel(
+        ts_len=int(config["ts_len"]),
+        n_channels=int(config["n_channels"]),
+        classes=classes,
+    )
+    trainer = MulticlassTrainer(
         epochs=1,
-        optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3),
-        classes=["neg", "pos"],
+        optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=float(config.get("lr", 1e-3))),
+        lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=0.5,
+            total_iters=2,
+        ),
+        classes=classes,
         loss_function=torch.nn.functional.cross_entropy,
         device="cpu",
         warmup_device="cpu",
     )
+    dataset_template = TinyDatasetTemplate(
+        channels=list(config["channels"]),
+        sample_frequency=float(config["sample_frequency"]),
+        total_input=str(config["total_input"]),
+        target_resolution=str(config["target_resolution"]),
+        stride=str(config["stride"]),
+    )
+    return {
+        "model": model,
+        "trainer": trainer,
+        "dataset_template": dataset_template,
+    }
 
 
-def test_multiclass_predict_loader_returns_timestamped_dataframe():
-    trainer = build_trainer()
-    model = TinyModel()
+def _build_components():
+    cfg = {
+        "ts_len": 4,
+        "n_channels": 2,
+        "channels": ["sig_a", "sig_b"],
+        "classes": ["neg", "pos"],
+        "sample_frequency": 1.0,
+        "total_input": "4s",
+        "target_resolution": "2s",
+        "stride": "2s",
+        "lr": 1e-3,
+    }
+    return cfg, build_tiny_components(cfg)
+
+
+def test_save_load_expert_package_roundtrip_preserves_manifest_and_weights():
+    cfg, components = _build_components()
+    model = components["model"]
+    trainer = components["trainer"]
+    dataset_template = components["dataset_template"]
     with torch.no_grad():
-        model.linear.weight.copy_(torch.tensor([[-1.0], [1.0]]))
-        model.linear.bias.zero_()
-
-    loader = DataLoader(TinyWindowDataset(), batch_size=2, shuffle=False, collate_fn=batch_collate)
-    result = trainer.predict_loader(model, loader)
-
-    assert list(result["patient"]) == ["p1.edf", "p1.edf"]
-    assert list(result["prediction"]) == ["neg", "pos"]
-    assert "prob__neg" in result.columns
-    assert "prob__pos" in result.columns
-
-
-def test_prediction_package_roundtrip_preserves_trainer_and_dataset_template():
-    trainer = build_trainer()
-    model = TinyModel()
-    dataset = MinimalDataset()
+        model.linear.weight.copy_(torch.tensor([[1.0, -1.0], [-0.5, 0.25]]))
+        model.linear.bias.copy_(torch.tensor([0.1, -0.2]))
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        package_path = Path(tmpdir) / "test.swmodel"
-        export_prediction_package(
-            str(package_path),
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
             model=model,
             trainer=trainer,
-            dataset=dataset,
-            model_card_md="# test\n",
+            dataset_template=dataset_template,
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
             metadata={"experiment": "unit-test"},
         )
-        assert package_path.is_file()
-        package = load_prediction_package(str(package_path), map_location="cpu")
 
-        assert package.metadata["experiment"] == "unit-test"
-        assert package.metadata["source_event_mapping"] == {}
-        assert isinstance(package.unlabelled_dataset, UnlabelledDataset)
-        assert package.unlabelled_dataset.initialized is False
-        assert package.trainer.__class__.__name__ == "MulticlassTrainer"
-        assert package.model.__class__.__name__ == "TinyModel"
+        loaded = load_expert_package(package_path, map_location="cpu")
+
+        assert loaded.manifest.format_version == "sleepwalker-expert-v1"
+        assert loaded.manifest.expert_name == "tiny"
+        assert loaded.metadata["experiment"] == "unit-test"
+        assert torch.allclose(loaded.model.linear.weight, model.linear.weight)
+        assert torch.allclose(loaded.model.linear.bias, model.linear.bias)
 
 
-def test_export_prediction_package_appends_swmodel_extension_when_missing():
-    trainer = build_trainer()
-    model = TinyModel()
-    dataset = MinimalDataset()
+def test_loaded_expert_runs_forward_on_compatible_batch():
+    cfg, components = _build_components()
+    model = components["model"]
+    trainer = components["trainer"]
+    dataset_template = components["dataset_template"]
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        package_path = Path(tmpdir) / "test_package"
-        export_prediction_package(
-            str(package_path),
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
             model=model,
             trainer=trainer,
-            dataset=dataset,
+            dataset_template=dataset_template,
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
         )
-        assert (Path(tmpdir) / "test_package.swmodel").is_file()
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+        batch = {"data": torch.zeros(3, 4, 2)}
+        outputs = loaded.forward(batch)
+
+        assert outputs.shape == (3, 2)
 
 
-def test_run_writes_meta_data_into_run_folder():
-    model = TinyModel()
-    trainer = StubTrainer()
-    train_dataset = RunDataset()
+def test_loaded_expert_freeze_and_unfreeze_toggle_requires_grad():
+    cfg, components = _build_components()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=components["model"],
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+        )
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+        loaded.freeze()
+        assert all(not param.requires_grad for param in loaded.model.parameters())
+
+        loaded.unfreeze()
+        assert all(param.requires_grad for param in loaded.model.parameters())
+
+
+def test_loaded_expert_restores_optimizer_and_scheduler_state():
+    cfg, components = _build_components()
+    model = components["model"]
+    trainer = components["trainer"]
+    optimizer = trainer.optimizer_fn(model)
+    scheduler = trainer.lr_scheduler_fn(optimizer)
+
+    batch = torch.ones(2, 4, 2)
+    target = torch.tensor([0, 1])
+    loss = torch.nn.functional.cross_entropy(model(batch), target)
+    loss.backward()
+    optimizer.step()
+    scheduler.step()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=model,
+            trainer=trainer,
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+        restored_optimizer = loaded.build_optimizer()
+        restored_scheduler = loaded.build_scheduler(restored_optimizer)
+
+        original_state = optimizer.state_dict()
+        restored_state = restored_optimizer.state_dict()
+        assert restored_state["param_groups"] == original_state["param_groups"]
+        assert restored_state["state"].keys() == original_state["state"].keys()
+        for param_id in original_state["state"]:
+            assert restored_state["state"][param_id].keys() == original_state["state"][param_id].keys()
+            for key, value in original_state["state"][param_id].items():
+                restored_value = restored_state["state"][param_id][key]
+                if torch.is_tensor(value):
+                    assert torch.allclose(restored_value, value)
+                else:
+                    assert restored_value == value
+        assert restored_scheduler is not None
+        assert restored_scheduler.state_dict() == scheduler.state_dict()
+
+
+def test_loaded_expert_rejects_dataset_contract_mismatch():
+    cfg, components = _build_components()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=components["model"],
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+        )
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+        bad_dataset = TinyDatasetTemplate(
+            channels=["sig_a", "sig_c"],
+            sample_frequency=1.0,
+            total_input="4s",
+            target_resolution="2s",
+            stride="2s",
+        )
+        with pytest.raises(ValueError, match="Expected channels"):
+            loaded.validate_dataset(bad_dataset)
+
+
+def test_load_uses_recorded_builder_reference():
+    cfg, components = _build_components()
+    BUILDER_CALLS.clear()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=components["model"],
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+        )
+
+        load_expert_package(package_path, map_location="cpu")
+
+        assert BUILDER_CALLS == [cfg]
+
+
+def test_package_writes_manifest_json():
+    cfg, components = _build_components()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=components["model"],
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+            metadata={"tag": "check"},
+        )
+
+        manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["format_version"] == "sleepwalker-expert-v1"
+        assert manifest["builder"]["module"] == __name__
+        assert manifest["metadata"]["tag"] == "check"
+
+
+def test_run_converges_on_expert_package_checkpoints():
+    cfg, components = _build_components()
+    trainer = components["trainer"]
+    trainer.epochs = 1
+    trainer.save_every = 1
+    model = components["model"]
+    dataset = TinyTrainDataset()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         result = run(
             RunCfg(
-                experiment_name="unit-run-meta",
-                model_name="TinyModel",
+                experiment_name="tiny-run",
+                model_name="tiny-model",
                 model=model,
                 trainer=trainer,
-                train_datasets=[train_dataset],
+                train_datasets=[dataset],
                 val_datasets=[],
                 test_datasets=[],
-                batch_size=1,
+                batch_size=2,
                 n_samples=None,
                 num_workers_dataloader=0,
-                collate_fn=batch_collate,
-                log_path=tmpdir,
-                meta_data={"source": "run", "kind": "test"},
-            )
-        )
-
-        meta_path = Path(tmpdir) / "unit-run-meta" / "meta_data.yml"
-        assert result.experiment_name == "unit-run-meta"
-        assert meta_path.is_file()
-        content = meta_path.read_text(encoding="utf-8")
-        assert "source" in content
-        assert "run" in content
-
-
-def test_export_prediction_package_accepts_numpy_dataset_and_exports_unlabelled_dataset():
-    model = TinyModel()
-    trainer = build_trainer()
-
-    with tempfile.TemporaryDirectory() as cache_dir, tempfile.TemporaryDirectory() as export_dir:
-        cache_path = Path(cache_dir)
-        with (cache_path / "meta.json").open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "sample_frequency": 1.0,
-                    "resample_type": "nearest",
-                    "total_input": "4s",
-                    "target_resolution": "2s",
-                    "classes": ["neg", "pos"],
-                    "input_channels": ["sig"],
-                    "all_patients": ["p1.edf"],
+                collate_fn=lambda batch: {
+                    "data": torch.stack([item["data"] for item in batch]),
+                    "target": torch.stack([item["target"] for item in batch]),
                 },
-                f,
+                log_path=tmpdir,
+                expert_name="tiny",
+                expert_task="unit",
+                expert_builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
             )
-        np.save(cache_path / "data.npy", np.zeros((1, 4, 1), dtype=np.float32))
-        np.save(cache_path / "patient.npy", np.array(["p1.edf"]))
-        np.save(cache_path / "time.npy", np.array([pd.Timestamp("2024-01-01").value], dtype=np.int64))
-
-        dataset = NumpyDataset(cache_path, in_memory=True)
-        package_path = os.path.join(export_dir, "numpy.swmodel")
-        package = export_prediction_package(
-            package_path,
-            model=model,
-            trainer=trainer,
-            dataset=dataset,
         )
-        assert os.path.isfile(package_path)
-        assert isinstance(package.unlabelled_dataset, UnlabelledDataset)
+
+        checkpoint_path = Path(result.train_result["checkpoint"])
+        assert (checkpoint_path / "manifest.json").is_file()
+        assert (checkpoint_path / "model_state.pt").is_file()
+
+        loaded = load_expert_package(checkpoint_path, map_location="cpu")
+        outputs = loaded.forward({"data": torch.zeros(1, 4, 2)})
+        assert outputs.shape == (1, 2)
+
+
+def test_train_arousal_expert_builder_reconstructs_components_without_data_access():
+    components = build_arousal_expert_components(
+        {
+            "channels": ["eeg", "eog", "chin_emg", "ECG"],
+            "clean": False,
+            "grouped": True,
+            "total_input": "30s",
+            "model": "utime-small",
+            "scaler": False,
+            "arousal_weight": 1,
+            "epochs": 2,
+        }
+    )
+
+    assert components["trainer"].epochs == 2
+    assert isinstance(components["dataset_template"], UnlabelledDataset)
+    assert len(components["dataset_template"].get_input_channels()) == 4
+    shape, meta = components["model"].input_spec()
+    assert shape[2] == 4
+    assert meta["n_channels"] == 4
+    assert meta["layout"] == "BTC"

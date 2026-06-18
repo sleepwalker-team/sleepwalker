@@ -6,8 +6,6 @@ import argparse
 import os
 from functools import partial
 
-from sleepwalker.deployment.package import export_prediction_package
-
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
 os.environ["OPENBLAS_NUM_THREADS"] = "2"
@@ -323,15 +321,9 @@ def main():
             use_mlflow=True,
             log_path=os.path.join("results", "desaturation"),
             meta_data=vars(args),
+            expert_name=experiment_name,
+            expert_task="desaturation",
         )
-    )
-
-    export_prediction_package(
-        os.path.join("results", "desaturation", experiment_name, "deploy", experiment_name, ".swmodel"),
-        model=run_result.model,
-        trainer=run_result.trainer,
-        dataset=train_dataset.to_unlabelled(),
-        metadata={"experiment_name": experiment_name, **vars(args)},
     )
 
 

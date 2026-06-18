@@ -34,3 +34,4 @@ copy_data.sh
 cache/*
 results/*
 docs/
+old/

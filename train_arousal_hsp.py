@@ -40,13 +40,11 @@ torch.set_num_threads(2)
 torch.set_num_interop_threads(1)
 mp.set_sharing_strategy("file_system")
 
-TRAIN_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/train-test-2023"
-TEST_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/val-2024"
+ROOT = "/cephfs_projects/sleepwalker/hsp"
 
 TARGET_CLASSES = ["no_arousal", "arousal"]
 DEFAULT_CONFIG = {
-    "train_root": TRAIN_ROOT,
-    "test_root": TEST_ROOT,
+    "root": ROOT,
     "batch_size": 128,
     "epochs": 35,
     "n_samples": 100_000,
@@ -61,11 +59,12 @@ DEFAULT_CONFIG = {
     "clean": False,
     "arousal_weight": 1,
     "model": "utime-big",
-    "id": "",
-    "total_input": "30s",
+    "id": None,
+    "total_input": "60s",
     "val_frac": 0.1,
     "dry": False,
     "use_mlflow": True,
+    "asleep_only": True
 }
 
 
@@ -116,15 +115,26 @@ def prepare_sample(
     return item
 
 def build_dataset_template(cfg: dict):
-    EVENT_MAPPING = {
-        "arousal": "arousal",
-        "n1": "sleep",
-        "n2": "sleep",
-        "n3": "sleep",
-        "rem": "sleep",
-        #"rera": "arousal", 
-        #"plm-arousal": "arousal", 
-    }
+    if cfg["asleep_only"]:
+        EVENT_MAPPING = {
+            "arousal": "arousal",
+            "n1": "sleep",
+            "n2": "sleep",
+            "n3": "sleep",
+            "rem": "sleep",
+            #"rera": "arousal", 
+            #"plm-arousal": "arousal", 
+        }
+    else:
+        EVENT_MAPPING = {
+            "arousal": "arousal",
+            "n1": "sleep",
+            "n2": "sleep",
+            "n3": "sleep",
+            "rem": "sleep",
+            #"rera": "arousal", 
+            #"plm-arousal": "arousal", 
+        }
 
     if cfg["clean"]:
         EVENT_MAPPING["artefakt"] = "artifact"

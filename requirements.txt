@@ -14,3 +14,4 @@ openpyxl
 xmltodict
 mysqlclient
 mne
+git+https://github.com/lamarr-institute/haml.git

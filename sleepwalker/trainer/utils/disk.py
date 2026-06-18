@@ -1,15 +1,8 @@
-"""Helpers for jsonl artifacts and model checkpoints."""
+"""Helpers for jsonl artifacts."""
 
 import json
-import os
-import tempfile
-from typing import Optional
-
 import numpy as np
 import pandas as pd
-import torch
-
-from sleepwalker.models.Basemodel import BaseModel
 
 
 def read_jsonl(filename: str) -> pd.DataFrame:
@@ -45,28 +38,3 @@ def append_to_jsonl(filename: str, record: dict):
 
     with open(f"{filename}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, cls=NumpyEncoder) + "\n")
-
-
-def store_checkpoint(
-    model: BaseModel,
-    optimizer: torch.optim.Optimizer,
-    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
-    folder: str = tempfile.mkdtemp(prefix="sleepwalker_"),
-) -> str:
-    """Persist model and optimizer state to one checkpoint directory.
-
-    Args:
-        model: Model whose `state_dict` should be stored.
-        optimizer: Optimizer to store.
-        scheduler: Optional scheduler to store.
-        folder: Output directory.
-
-    Returns:
-        The checkpoint directory path.
-    """
-    os.makedirs(folder, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(folder, "model.pt"))
-    torch.save(optimizer.state_dict(), os.path.join(folder, "optimizer.pt"))
-    if scheduler:
-        torch.save(scheduler.state_dict(), os.path.join(folder, "scheduler.pt"))
-    return folder

@@ -8,7 +8,6 @@ logging of test results.
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -22,30 +21,78 @@ from sleepwalker.utils import LocalArtifactSink, MlflowSink, logger
 
 @dataclass
 class RunCfg:
-    """
-    Describe one fully prepared experiment invocation.
+    """Describe one fully prepared training run.
 
-    The caller is responsible for assembling dataset splits, model, trainer,
-    experiment naming, and task-specific behavior. :func:`run` only executes
-    the shared mechanics.
+    ``RunCfg`` is the boundary between task-specific experiment assembly and
+    the generic execution logic in :func:`run`. Training scripts are expected
+    to fully decide dataset splits, model architecture, trainer behavior, and
+    deployment/export metadata before constructing this object. The runner then
+    handles loader construction, training, logging, evaluation, and expert
+    package wiring in a uniform way.
 
-    Attributes:
-        experiment_name: Name used for logging and jsonl artifacts.
-        model_name: Human-readable model identifier stored in test records.
-        model: Model instance to fit and evaluate.
-        trainer: Trainer instance implementing ``fit(...)`` and ``test(...)``.
-        train_datasets: Training dataset parts that will be combined.
-        val_datasets: Validation dataset parts that will be combined.
-        test_datasets: Named test dataset pairs evaluated after training.
-        batch_size: Batch size for train, validation, and test loaders.
-        n_samples: Optional cap for random training/validation sampling.
-        num_workers_dataloader: Worker count for all loaders built here.
-        test_repeats: Repeat counts passed into trainer-side test evaluation.
-        use_energy_tracker: Whether to enable the optional Lamarr energy
-            tracker.
-        tags: Logging tags forwarded to the repository logger.
-        collate_fn: Required collate function used for all loaders.
-        meta_data: Optional structured run metadata logged as hparams.
+    The fields fall into three groups:
+
+    1. Core execution fields:
+       ``model``, ``trainer``, dataset lists, loader settings, and evaluation
+       repeat counts. These define what is trained and how it is iterated.
+    2. Logging fields:
+       ``experiment_name``, ``model_name``, ``tags``, ``meta_data``,
+       ``log_path``, and the feature flags for MLflow and energy tracking.
+       These affect observability, not model semantics.
+    3. Deployment fields:
+       ``expert_name``, ``expert_task``, ``expert_builder``,
+       ``expert_dataset_template``, and ``expert_metadata``. These define the
+       expert package snapshot saved by the trainer and are the main link
+       between a completed run and later reloadable inference/training usage.
+
+    Expectations and non-goals:
+
+    - ``run`` does not derive missing task semantics. If a trainer needs a
+      specific collator, dataset template, or package builder, the caller must
+      supply them.
+    - ``train_datasets`` and ``val_datasets`` are combined in-memory via the
+      repository dataset utilities; they are not treated as separate training
+      domains once handed to the runner.
+    - ``expert_dataset_template`` should represent the unlabelled inference
+      shape expected by the saved model. When omitted, ``run`` falls back to
+      the first training dataset if it exposes ``to_unlabelled()``.
+
+    Field details:
+
+    - ``experiment_name``: Stable run identifier used for local artifact
+      folders, MLflow runs, JSONL test records, and checkpoint naming.
+    - ``model_name``: Human-readable label written into metrics/test outputs.
+      This is descriptive metadata and does not need to match the Python class
+      name.
+    - ``model``: Instantiated model object to train and later evaluate.
+    - ``trainer``: Trainer object implementing ``fit(...)`` and ``test(...)``.
+      The runner also injects expert package metadata into this object.
+    - ``train_datasets`` / ``val_datasets``: Dataset objects combined into one
+      loader per split.
+    - ``test_datasets``: Named datasets evaluated after training. The tuple
+      label becomes part of the logged test records.
+    - ``batch_size``: Loader batch size shared across train/val/test.
+    - ``n_samples``: Optional random sampling cap for train/val loaders. This
+      is a loader-time budget, not a dataset truncation on disk.
+    - ``num_workers_dataloader``: Worker count for loaders created here.
+    - ``test_repeats``: Logical inference repeat counts, typically used with
+      grouped/randomized inputs where evaluation is averaged over repeated
+      views.
+    - ``use_energy_tracker``: Enables the optional Lamarr energy tracker.
+    - ``use_mlflow``: Enables the repository MLflow sink for this run.
+    - ``log_path``: Root folder under which local run artifacts are written.
+    - ``tags``: Logger/MLflow tags associated with the run.
+    - ``collate_fn``: Required batch collator for every loader built here.
+    - ``meta_data``: Structured run metadata logged as hyperparameters and
+      copied into the expert package metadata.
+    - ``expert_name`` / ``expert_task``: Export-facing identity for the saved
+      package. Defaults fall back to ``experiment_name`` and ``model_name``.
+    - ``expert_builder``: Reload specification used by the expert package to
+      reconstruct model, trainer, and dataset template in a code-aware way.
+    - ``expert_dataset_template``: Unlabelled dataset template that defines
+      inference-time structure and feeds the package input contract.
+    - ``expert_metadata``: Additional export-only metadata merged into package
+      metadata alongside ``meta_data``.
     """
 
     experiment_name: str
@@ -65,6 +112,11 @@ class RunCfg:
     tags: dict[str, str] = field(default_factory=dict)
     collate_fn: Any = None
     meta_data: dict[str, Any] = field(default_factory=dict)
+    expert_name: str | None = None
+    expert_task: str | None = None
+    expert_builder: dict[str, Any] | None = None
+    expert_dataset_template: Any = None
+    expert_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -150,6 +202,13 @@ def run(cfg: RunCfg) -> RunResult:
 
     train_dataset = combine_datasets(cfg.train_datasets)
     val_dataset = combine_datasets(cfg.val_datasets) if len(cfg.val_datasets) > 0 else None
+    package_dataset_template = cfg.expert_dataset_template
+    if package_dataset_template is None and len(cfg.train_datasets) > 0:
+        first_dataset = cfg.train_datasets[0]
+        if hasattr(first_dataset, "to_unlabelled"):
+            package_dataset_template = first_dataset.to_unlabelled()
+        else:
+            package_dataset_template = first_dataset
 
     tracker = None
     if cfg.use_energy_tracker:
@@ -168,6 +227,19 @@ def run(cfg: RunCfg) -> RunResult:
     
     if cfg.meta_data:
         logger.hparams(cfg.meta_data)
+
+    cfg.trainer._expert_package_cfg = {
+        "expert_name": cfg.expert_name or cfg.experiment_name,
+        "task": cfg.expert_task or cfg.model_name,
+        "builder": cfg.expert_builder,
+        "dataset_template": package_dataset_template,
+        "metadata": {
+            "experiment_name": cfg.experiment_name,
+            "model_name": cfg.model_name,
+            **cfg.expert_metadata,
+            **cfg.meta_data,
+        },
+    }
 
     logger.info(f"Loaded {train_dataset.get_n_patients()} for training")
     if val_dataset is not None:
@@ -199,13 +271,10 @@ def run(cfg: RunCfg) -> RunResult:
 
     train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
     if "checkpoint" in train_result:
-        logger.artifact(path=os.path.join(train_result["checkpoint"], "model.pt"), dest=f"final")
-        logger.artifact(path=os.path.join(train_result["checkpoint"], "optimizer.pt"), dest=f"final")
-        if Path(os.path.join(train_result["checkpoint"], "scheduler.pt")).is_file():
-            logger.artifact(path=os.path.join(train_result["checkpoint"], "scheduler.pt"), dest=f"final")
+        logger.artifact(path=train_result["checkpoint"], dest="final")
 
         with torch.inference_mode():
-            state_dict = torch.load(os.path.join(train_result["checkpoint"], "model.pt"), map_location="cpu")
+            state_dict = torch.load(os.path.join(train_result["checkpoint"], "model_state.pt"), map_location="cpu")
             cfg.model.load_state_dict(state_dict)
 
     test_records: list[dict[str, Any]] = []

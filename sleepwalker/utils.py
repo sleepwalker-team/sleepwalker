@@ -7,6 +7,40 @@ from typing import Any, Dict, Optional, List, Protocol
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 
+# (Pretty-print) Number of learnable parameters for PyTorch models
+def count_parameters(model, pretty=True):
+    def pretty_int(n):
+        if n >= 1_000_000_000:
+            v = n / 1_000_000_000
+            s = f"{v:.3g}b"
+        elif n >= 1_000_000:
+            v = n / 1_000_000
+            s = f"{v:.3g}m"
+        elif n >= 1_000:
+            v = n / 1_000
+            s = f"{v:.3g}k"
+        else:
+            s = str(n)
+        return s
+
+    def count_recursive(module):
+        total_params = 0
+        
+        for child in module.children():
+            child_params = count_recursive(child)
+            total_params += child_params
+        
+        if list(module.children()) == []:  # if module has no children, it's a layer
+            for param in module.parameters():
+                total_params += param.numel()
+        
+        return total_params
+    
+    p = count_recursive(model)
+    if pretty:
+        return pretty_int(p)
+    return p
+
 # ---------------------------
 # Level-aware formatter
 # ---------------------------
@@ -332,6 +366,111 @@ class MlflowSink:
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         # MLflow has no progress bar concept
         return NullProgress()
+
+class WandbSink:
+    def __init__(self, tracking_uri: Optional[str] = None, experiment: Optional[str] = None, artifact_uri: Optional[str] = None):
+        import wandb
+        self.wandb = wandb
+        self.base_url = tracking_uri
+        self.project = experiment
+        self._run = None
+        self._run_active = False
+
+    def start(self, run_name: Optional[str],
+              params: Optional[Dict[str, Any]], tags: Optional[Dict[str, Any]]):
+        if self.base_url:
+            self.wandb.login(host=self.base_url)
+
+        active = self.wandb.run
+        if active is None:
+            self._run = self.wandb.init(
+                project=self.project,
+                name=run_name,
+                config=params or {},
+                tags=list(tags.keys()) if tags else None,
+            )
+        else:
+            self._run = active
+            if params:
+                self._run.config.update(params, allow_val_change=True)
+        self._run_active = True
+
+        # Setup epoch / batch x axis
+        self._run.define_metric('epoch/*', step_metric='epoch')
+        self._run.define_metric('batch/*', step_metric='batch')
+
+
+    def end(self, status: str = "FINISHED"):
+        if self._run_active:
+            exit_code = 0 if status == "FINISHED" else 1
+            self._run.finish(exit_code=exit_code)
+            self._run_active = False
+
+    def event(self, level: str, message: str, context: str):
+        # W&B has no free-form event log; ignore
+        pass
+
+    def metric(self, name: str, value: float, step: int, context: str):
+        # Context is ignored → metric name must be explicit
+        self._run.log({name: float(value)})
+
+    def hparams(self, values: Dict[str, Any], context: str):
+        flat_params: dict[str, str | float | int] = {}
+        for key, value in values.items():
+            if isinstance(value, bool):
+                flat_params[key] = str(value)
+            elif isinstance(value, (str, int, float)):
+                flat_params[key] = value
+            else:
+                flat_params[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if flat_params:
+            self._run.config.update(flat_params, allow_val_change=True)
+        # Full structured copy as an artifact-style text file
+        self._save_text(
+            json.dumps(values, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            "hparams.json",
+        )
+
+    def figure(self, name: str, figure: Any, context: str):
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        tmp.close()
+        try:
+            if hasattr(figure, "savefig"):
+                figure.savefig(tmp.name, bbox_inches="tight")
+                self._run.log({f"figures/{name}": self.wandb.Image(tmp.name)})
+            elif callable(figure):
+                figure(tmp.name)
+                self._run.log({f"figures/{name}": self.wandb.Image(tmp.name)})
+            else:
+                raise TypeError("figure must be matplotlib.Figure or callable(path)")
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    def artifact(self, path: str, dest: Optional[str], context: str):
+        # Context is ignored → artifact name only depends on dest
+        name = (dest or os.path.basename(path.rstrip("/"))).replace("/", "_") or "artifact"
+        art = self.wandb.Artifact(name, type="files")
+        if os.path.isdir(path):
+            art.add_dir(path)
+        else:
+            art.add_file(path)
+        self._run.log_artifact(art)
+
+    def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
+        # W&B has no progress bar concept
+        return NullProgress()
+
+    def _save_text(self, text: str, filename: str):
+        import os
+        out_dir = self._run.dir
+        full = os.path.join(out_dir, filename)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(text)
+        self._run.save(full, base_path=out_dir)
 
 
 class LocalArtifactSink:

@@ -7,6 +7,7 @@ for some read paths and for one repair path in ``fix_edf_header``.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from contextlib import redirect_stdout
 import io
 from typing import Any,  Dict, List, Optional, Union
@@ -353,12 +354,13 @@ def edf_to_df(
         documented.
     """
     close_after = isinstance(edf, str)
+    f = None
 
     try:
         if close_after:
             f = pyedflib.EdfReader(edf, annotations_mode=DO_NOT_READ_ANNOTATIONS, check_file_size=DO_NOT_CHECK_FILE_SIZE)
         else:
-            f = edf 
+            f = edf
 
         text_trap = io.StringIO()
         with redirect_stdout(text_trap):
@@ -366,70 +368,65 @@ def edf_to_df(
             if not labels:
                 return pd.DataFrame()
 
-            dfs = []
             file_start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
             duration_s = float(f.getFileDuration())
             file_end = file_start + pd.to_timedelta(f"{duration_s}s")
 
             start_ = start or file_start
             end_ = end or file_end
+            resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
 
+            # Bucket requested channels by their native sample frequency so
+            # each group pays one pandas.resample(...) call instead of one
+            # call per channel. Equivalence with the previous per-channel
+            # implementation is covered by test_edf_to_df_grouped.py.
+            groups: "dict[float, list[tuple[str, int]]]" = defaultdict(list)
             for ch in channels:
                 if ch not in labels:
                     continue
                 idx = labels.index(ch)
-                
                 fs = float(f.getSampleFrequency(idx))
-                dt = pd.to_timedelta(1.0 / fs, unit="s")
+                groups[fs].append((ch, idx))
 
-                # compute indices
+            group_dfs = []
+            for fs, items in groups.items():
+                dt = pd.to_timedelta(1.0 / fs, unit="s")
                 i0 = max(int((start_ - file_start) / dt), 0)
                 i1 = max(int((end_ - file_start) / dt), i0 + 1)
-                x = f.readSignal(idx, start=i0, n=i1 - i0, digital=False)
 
-                # resample in numpy for speed
-                if len(x) == 0:
+                arrays: "dict[str, np.ndarray]" = {}
+                for ch, idx in items:
+                    x = f.readSignal(idx, start=i0, n=i1 - i0, digital=False)
+                    if len(x) == 0:
+                        continue
+                    arrays[ch] = x
+                if not arrays:
                     continue
 
-                df = pd.DataFrame(x, columns=[ch], index=pd.date_range(start=start_, periods=len(x), freq=dt))
-                # df.index = pd.date_range(start=start_, periods=len(x), freq=dt)
-                resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
+                min_len = min(len(v) for v in arrays.values())
+                if any(len(v) != min_len for v in arrays.values()):
+                    arrays = {k: v[:min_len] for k, v in arrays.items()}
+
+                index = pd.date_range(start=start_, periods=min_len, freq=dt)
+                df = pd.DataFrame(arrays, index=index)
                 if how == "mean":
                     df = df.resample(resample_rate).mean()
                 elif how == "max":
                     df = df.resample(resample_rate).max()
                 else:
                     df = df.resample(resample_rate).nearest()
-                dfs.append(df)
+                group_dfs.append(df)
 
-                # if fs != frequency:
-                #     step = fs / frequency
-                #     if how == "mean":
-                #         step_int = int(round(step))
-                #         n_full = len(x) // step_int * step_int
-                #         x = x[:n_full].reshape(-1, step_int).mean(axis=1)
-                #     elif how == "max":
-                #         step_int = int(round(step))
-                #         n_full = len(x) // step_int * step_int
-                #         x = x[:n_full].reshape(-1, step_int).max(axis=1)
-                #     else:  # nearest
-                #         x = x[::int(round(step))]
-
-                #     dt = pd.to_timedelta(1.0 / frequency, unit="s")    
-                
-                # build DataFrame
-                #idx_range = pd.date_range(start=start_, periods=len(x), freq=dt)
-                #dfs.append(pd.DataFrame({ch: x}, index=idx_range))
-            
-            if not dfs:
+            if not group_dfs:
                 return pd.DataFrame()
-            elif len(dfs) > 1:
-                # Merge channels, fill small gaps if needed
-                out = pd.concat(dfs, axis=1, join="outer").ffill().bfill()
+            elif len(group_dfs) > 1:
+                out = pd.concat(group_dfs, axis=1, join="outer").ffill().bfill()
             else:
-                out = dfs[0]
+                out = group_dfs[0]
 
-            return out
+            # Preserve requested channel order for callers that rely on it.
+            ordered = [c for c in channels if c in out.columns]
+            return out[ordered]
     except Exception as e:
         if isinstance(edf, str):
             edf_path = edf
@@ -485,13 +482,13 @@ def edf_to_df(
             df = df.resample(resample_rate).nearest()
 
         return df.ffill().bfill()
-    # finally:
-    #     if close_after:
-    #         try:
-    #             f.close()
-    #         except Exception:
-    #             pass
-            
+    finally:
+        if close_after and f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
+
 # def edf_to_df(
 #     edf_path: str,
 #     channels: List[str],

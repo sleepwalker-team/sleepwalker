@@ -74,6 +74,7 @@ class EDFFile:
     classes: Optional[Set[str]] = None
     labels: Optional[EventIndex] = None
     labels_extra: Optional[EventIndex] = None
+    diagnosis_label: Optional[str] = None
     normalizers: Optional[dict[str, Normalizer]] = None
 
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):

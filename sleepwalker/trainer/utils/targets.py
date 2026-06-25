@@ -192,3 +192,17 @@ def prepare_multiclass_target(
     if target_extra_onehot is not None:
         item["target_extra"] = target_extra_onehot
     return item
+
+def prepare_diagnosis_target(
+    target,
+    target_classes,
+):
+    """Build one-hot multiclass targets from a patient-level diagnosis label."""
+    if target is None:
+        return None
+
+    onehot = torch.zeros(len(target_classes), dtype=torch.float32)
+    onehot[target_classes.index(target)] = 1.0
+    item = {"target": onehot}
+
+    return item

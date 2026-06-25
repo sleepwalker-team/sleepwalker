@@ -9,6 +9,7 @@ here stays close to what is directly supported by code and tests.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import traceback
 from sleepwalker.utils import logger
 
@@ -16,6 +17,7 @@ import pandas as pd
 import xlrd
 
 from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig
+from sleepwalker.datasets.DiagnosisDataset import DiagnosisDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
@@ -769,3 +771,41 @@ class Ruhrlandklinik(BaseDataset):
         # df = df.dropna()
 
         # return df
+
+class RuhrlandklinikDiagnosis(DiagnosisDataset):
+    """
+    Diagnosis Labels:
+            - healthy
+            - osa
+            - osa_plm
+            - plm_uars
+            - uars
+    """
+    def __init__(self,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+    @staticmethod
+    def get_ruhrland_root(path):
+        p = Path(path).resolve()
+        for parent in [p] + list(p.parents):
+            if parent.name == "ruhrlandklinik":
+                return parent
+        return None
+        
+    def get_patient_label(self, edf_path):
+        dataset_folder = self.get_ruhrland_root(edf_path)
+
+        diagnosis_label_filepath = os.path.join(dataset_folder, "labels-2022-09-13.csv")
+        diagnosis_label_df = pd.read_csv(diagnosis_label_filepath, index_col=0)
+        # all_labels = diagnosis_label_df["Diagnose"].unique()
+
+        # Check if patient_id is in disease_df
+        patient_id = Path(edf_path).name
+        if patient_id not in diagnosis_label_df.index:
+            logger.warning(f"Patient {patient_id} does not have a diagnosis label. Returning None.")
+            return None
+        patient_label = diagnosis_label_df.at[patient_id, "Diagnose"].lower().strip()
+
+        return patient_label

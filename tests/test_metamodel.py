@@ -24,6 +24,9 @@ class DummyEmbeddingModel(BaseModel):
     def _classifier(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
+    def input_spec(self):
+        return (1, 2, self.n_channels), {"layout": "BTC", "ts_len": 2, "n_channels": self.n_channels}
+
 
 class AddConstant(torch.nn.Module):
     def __init__(self, value: float, warmup: bool = False):

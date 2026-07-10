@@ -332,7 +332,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
 
 
 def build_expert_components(cfg: dict):
-    cfg = dict(cfg)
+    cfg = {**DEFAULT_CONFIG, **dict(cfg)}
     dataset = build_dataset_template(cfg)
     model, trainer = build_model_and_trainer(dataset, cfg)
     return {

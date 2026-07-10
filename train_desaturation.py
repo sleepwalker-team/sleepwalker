@@ -100,8 +100,7 @@ def prepare_sample(data, quality_data=None, target=None, target_extra=None, pati
         item["target_extra"] = target_extra
     return item
 
-def build_dataset(
-    patients: list[str],
+def build_dataset_template(
     channels: list[str],
     sample_frequency: int,
     stride: str,
@@ -127,7 +126,28 @@ def build_dataset(
         target_resolution=target_resolution,
     )
     dataset.classes = list(TARGET_CLASSES)
-    dataset.initialize(patients, NUM_WORKERS_DATASET)
+    return dataset
+
+
+def build_dataset(
+    patients: list[str],
+    channels: list[str],
+    sample_frequency: int,
+    stride: str,
+    total_input: str,
+    target_resolution: str,
+    sleep_percentage: float,
+    num_workers_dataset: int = NUM_WORKERS_DATASET,
+):
+    dataset = build_dataset_template(
+        channels=channels,
+        sample_frequency=sample_frequency,
+        stride=stride,
+        total_input=total_input,
+        target_resolution=target_resolution,
+        sleep_percentage=sleep_percentage,
+    )
+    dataset.initialize(patients, num_workers_dataset)
     return dataset
 
 def is_pap_patient(edf_path: str) -> bool:
@@ -165,6 +185,30 @@ def list_patients(source_root: str, channels: list[str], dry_run: bool) -> list[
         if not is_pap_patient(patient) and has_required_channels(patient, channels)
     ]
     return patients[:2] if dry_run else patients
+
+
+def build_expert_components(cfg: dict):
+    dataset = build_dataset_template(
+        channels=list(cfg["channels"]),
+        sample_frequency=int(cfg["sample_frequency"]),
+        stride=str(cfg["stride"]),
+        total_input=str(cfg["total_input"]),
+        target_resolution=str(cfg["target_resolution"]),
+        sleep_percentage=float(cfg["sleep_percentage"]),
+    )
+    model, trainer = build_model_and_trainer(
+        dataset,
+        str(cfg["model"]),
+        int(cfg["sample_frequency"]),
+        int(cfg.get("epochs", 1)),
+        bool(cfg.get("scaler", False)),
+        int(cfg.get("desaturation_weight", 1)),
+    )
+    return {
+        "model": model,
+        "trainer": trainer,
+        "dataset_template": dataset.to_unlabelled(),
+    }
 
 def build_model_and_trainer(
     train_dataset,
@@ -237,6 +281,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--n_samples", type=int, default=250_000, help="Number of training samples per epoch.")
     parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
+    parser.add_argument("--max_train_patients", type=int, default=None, help="Optional cap for training patients after listing.")
+    parser.add_argument("--max_test_patients", type=int, default=None, help="Optional cap for test patients after listing.")
+    parser.add_argument("--num_workers_dataset", type=int, default=NUM_WORKERS_DATASET, help="Workers for patient initialization.")
+    parser.add_argument("--num_workers_dataloader", type=int, default=NUM_WORKERS_DATALOADER, help="Workers for torch dataloaders.")
+    parser.add_argument("--no_mlflow", action="store_true", help="Disable MLflow logging for smoke tests.")
     parser.add_argument("--dry", action="store_true")
     args = parser.parse_args()
 
@@ -250,6 +299,10 @@ def main():
 
     train_patients = list_patients(TRAIN_ROOT, args.channels, args.dry)
     test_patients = list_patients(TEST_ROOT, args.channels, args.dry)
+    if args.max_train_patients is not None:
+        train_patients = train_patients[: args.max_train_patients]
+    if args.max_test_patients is not None:
+        test_patients = test_patients[: args.max_test_patients]
 
     val_dataset = None
     if args.val_frac is not None and args.val_frac > 0:
@@ -266,7 +319,8 @@ def main():
             args.stride,
             args.total_input,
             args.target_resolution,
-            args.sleep_percentage
+            args.sleep_percentage,
+            args.num_workers_dataset,
         )
         logger.uncontext()
         if len(val_patients) > 0:
@@ -278,7 +332,8 @@ def main():
                 args.stride,
                 args.total_input,
                 args.target_resolution,
-                args.sleep_percentage
+                args.sleep_percentage,
+                args.num_workers_dataset,
             )
             logger.uncontext()
         logger.context("TEST")
@@ -289,7 +344,8 @@ def main():
             args.stride,
             args.total_input,
             args.target_resolution,
-            args.sleep_percentage
+            args.sleep_percentage,
+            args.num_workers_dataset,
         )
         logger.uncontext()
 
@@ -301,6 +357,19 @@ def main():
         args.scaler,
         args.desaturation_weight,
     )
+    expert_builder_config = {
+        "channels": list(args.channels),
+        "sample_frequency": args.sample_frequency,
+        "stride": args.stride,
+        "total_input": args.total_input,
+        "target_resolution": args.target_resolution,
+        "sleep_percentage": args.sleep_percentage,
+        "model": args.model,
+        "scaler": args.scaler,
+        "desaturation_weight": args.desaturation_weight,
+        "epochs": 2 if args.dry else args.epochs,
+    }
+    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 
     run_result = run(
         RunCfg(
@@ -313,16 +382,22 @@ def main():
             test_datasets=[("Ruhrland2024", test_dataset)],
             batch_size=args.batch_size,
             n_samples=1_000 if args.dry else args.n_samples,
-            num_workers_dataloader=NUM_WORKERS_DATALOADER,
+            num_workers_dataloader=args.num_workers_dataloader,
             test_repeats=[1],
             use_energy_tracker=False,
             tags={"model": args.model},
             collate_fn=batch_collate,
-            use_mlflow=True,
+            use_mlflow=not args.no_mlflow,
             log_path=os.path.join("results", "desaturation"),
             meta_data=vars(args),
             expert_name=experiment_name,
             expert_task="desaturation",
+            expert_builder={
+                "module": "train_desaturation",
+                "function": "build_expert_components",
+                "config": expert_builder_config,
+            },
+            expert_dataset_template=expert_dataset_template,
         )
     )
 

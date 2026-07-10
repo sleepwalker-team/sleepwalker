@@ -435,12 +435,12 @@ class MultiLabelTrainer(BaseTrainer):
             logger.info(render_confusion_table_grid(blocks, header=f"{mode.upper()} confusion matrices"))
 
     def run_epoch(self, loader, opt, model, prefix=""):
-        """Run one train, validation, or test epoch for a ``MetaModel``.
+        """Run one train, validation, or test epoch for a multitask model.
 
         Args:
             loader: Dataloader producing ``data`` and integer multitask targets.
             opt: Optimizer for training epochs, or ``None`` during evaluation.
-            model: Expected to be an instance of ``MetaModel``.
+            model: Expected to expose ``task_config`` and return task logits.
             prefix: Progress-label prefix used to infer the logging mode.
 
         Returns:
@@ -451,8 +451,8 @@ class MultiLabelTrainer(BaseTrainer):
             ValueError: If the model type, dataset resolution, logits, or
                 targets do not match the configured task layout.
         """
-        if not isinstance(model, MetaModel):
-            raise ValueError("MultiLabelTrainer requires a MetaModel.")
+        if not isinstance(model, MetaModel) and not hasattr(model, "task_config"):
+            raise ValueError("MultiLabelTrainer requires a multitask model with task_config.")
         dataset_resolution = getattr(loader.dataset, "target_resolution", None)
         if dataset_resolution is None:
             raise ValueError("MultiLabelTrainer requires loader.dataset.target_resolution.")

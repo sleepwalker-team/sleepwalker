@@ -24,7 +24,7 @@ from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import Respirat
 from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.utils import get_edf_files_in_repo
-from sleepwalker.models import MetaModel, MetaModelEntry, SleepTransformer
+from sleepwalker.models import ExpertInterfaceEdge, MetaModel, MetaModelEntry, SleepTransformer, StructuredExpertInterfaceMetaModel
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.Run import RunCfg, run
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
@@ -48,6 +48,7 @@ num_workers_dataset = 8
 num_workers_dataloader = 8
 patient_filter_quantile = 0.05
 impedance_cutoff_ohm = 20_000.0
+enable_sample_quality_filter = True
 
 respiratory_channels = ["Chest", "Abdomen", "Saturation", "Pulse Waveform"]
 sleep_channels = ["F3-M2", "F4-M1", "C3-M2", "C4-M1", "O1-M2", "O2-M1"]
@@ -163,6 +164,17 @@ def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra
         The exact thresholds are experiment-specific and are documented here as
         current script behavior, not as validated general defaults.
     """
+    if not enable_sample_quality_filter:
+        item = {
+            "data": torch.from_numpy(data.values).float(),
+            "target": target,
+            "patient": patient,
+            "time": time,
+        }
+        if target_extra is not None:
+            item["target_extra"] = target_extra
+        return item
+
     # Reject high-impedance windows before they reach the
     # model while keeping impedance out of the actual model inputs.
     if quality_data is not None and "EEG" in quality_data.columns:
@@ -313,13 +325,15 @@ def list_split_patients(purpose: str, dry_run: bool) -> list[str]:
     return patients[:2] if dry_run else patients
 
 
-def load_split_dataset(purpose: str, dry_run: bool):
+def load_split_dataset(purpose: str, dry_run: bool, max_patients: int | None = None):
     """Build and initialize one Ruhrland dataset split."""
     patients = list_split_patients(purpose, dry_run)
+    if max_patients is not None:
+        patients = patients[:max_patients]
     return initialize_dataset(build_dataset(), patients)
 
 
-def build_model(dataset):
+def build_model(dataset, fusion: str = "metamodel"):
     """Build the current multitask composite model for Ruhrland data."""
     respiratory_model = UTime(
         ts_len=dataset.get_timeseries_len(),
@@ -352,36 +366,34 @@ def build_model(dataset):
     if len(missing) > 0:
         raise ValueError(f"Dataset is missing required MetaModel input channels: {missing}. Available: {input_channels}")
 
-    model = MetaModel(
-        task_config=normalized_task_config,
-        input_channels=input_channels,
-        models=[
-            MetaModelEntry(respiratory_model, ["Chest", "Abdomen", "Saturation", "Pulse Waveform"]),
-            MetaModelEntry(sleep_model, ["EEG"]),
-        ],
-    )
+    entries = [
+        MetaModelEntry(respiratory_model, ["Chest", "Abdomen", "Saturation", "Pulse Waveform"]),
+        MetaModelEntry(sleep_model, ["EEG"]),
+    ]
+    if fusion == "metamodel":
+        model = MetaModel(
+            task_config=normalized_task_config,
+            input_channels=input_channels,
+            models=entries,
+        )
+    elif fusion == "structured-interfaces":
+        model = StructuredExpertInterfaceMetaModel(
+            task_config=normalized_task_config,
+            input_channels=input_channels,
+            models=entries,
+            edges=[
+                ExpertInterfaceEdge(source=1, target=0, bottleneck_dim=8),
+                ExpertInterfaceEdge(source=0, target=1, bottleneck_dim=8),
+            ],
+        )
+    else:
+        raise ValueError(f"Did not recognize fusion mode {fusion}.")
     return model
 
-def main():
-    """Build datasets, trainer, and model, then launch the multitask run."""
-    parser = argparse.ArgumentParser()
-    args = parser.parse_args()
 
-    logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=experiment_name))
-
-    logger.context("Train")
-    train_dataset = load_split_dataset("train", dry_run=False)
-    logger.uncontext()
-
-    logger.context("Test")
-    test_dataset = load_split_dataset("test", dry_run=False)
-    logger.uncontext()
-
-    missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in normalized_task_config.values() for label in cfg["labels"]))
-    if len(missing) > 0:
-        raise ValueError(f"Task config is missing dataset classes: {missing}")
-    trainer = MultiLabelTrainer(
-        epochs=epochs,
+def build_trainer(epochs_: int, device: str = "cuda:0", warmup_device: str = "cpu"):
+    return MultiLabelTrainer(
+        epochs=epochs_,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1, end_factor=1e-2, total_iters=50
@@ -390,25 +402,112 @@ def main():
         condition_task="sleep",
         condition_labels=["n1", "n2", "n3", "rem"],
         conditioned_tasks=["breathing", "arousal", "desat"],
+        device=device,
+        warmup_device=warmup_device,
         save_every=10,
         log_batches=False,
     )
 
-    model = build_model(train_dataset)
+
+def build_expert_components(cfg: dict):
+    dataset = build_dataset()
+    model = build_model(dataset, fusion=str(cfg.get("fusion", "metamodel")))
+    trainer = build_trainer(
+        int(cfg.get("epochs", 1)),
+        device=str(cfg.get("device", "cuda:0")),
+        warmup_device=str(cfg.get("warmup_device", "cpu")),
+    )
+    return {
+        "model": model,
+        "trainer": trainer,
+        "dataset_template": dataset.to_unlabelled(),
+    }
+
+def main():
+    """Build datasets, trainer, and model, then launch the multitask run."""
+    global num_workers_dataset, num_workers_dataloader
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--fusion", choices=["metamodel", "structured-interfaces"], default="metamodel")
+    parser.add_argument("--id", type=str, default="")
+    parser.add_argument("--epochs", type=int, default=epochs)
+    parser.add_argument("--n_samples", type=int, default=n_samples)
+    parser.add_argument("--batch_size", type=int, default=batch_size)
+    parser.add_argument("--max_train_patients", type=int, default=None)
+    parser.add_argument("--max_test_patients", type=int, default=None)
+    parser.add_argument("--num_workers_dataset", type=int, default=num_workers_dataset)
+    parser.add_argument("--num_workers_dataloader", type=int, default=num_workers_dataloader)
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--warmup_device", type=str, default="cpu")
+    parser.add_argument("--disable_sample_quality_filter", action="store_true")
+    parser.add_argument("--no_mlflow", action="store_true")
+    args = parser.parse_args()
+
+    global enable_sample_quality_filter
+    enable_sample_quality_filter = not args.disable_sample_quality_filter
+    num_workers_dataset = args.num_workers_dataset
+    num_workers_dataloader = args.num_workers_dataloader
+
+    run_name = experiment_name
+    if args.fusion != "metamodel":
+        run_name += f"_{args.fusion}"
+    if args.id:
+        run_name += f"_{args.id}"
+    if args.dry:
+        run_name += "-dev"
+
+    if not args.no_mlflow:
+        logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=run_name))
+
+    logger.context("Train")
+    train_dataset = load_split_dataset("train", dry_run=args.dry, max_patients=args.max_train_patients)
+    logger.uncontext()
+
+    logger.context("Test")
+    test_dataset = load_split_dataset("test", dry_run=args.dry, max_patients=args.max_test_patients)
+    logger.uncontext()
+
+    missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in normalized_task_config.values() for label in cfg["labels"]))
+    if len(missing) > 0:
+        raise ValueError(f"Task config is missing dataset classes: {missing}")
+    run_epochs = 2 if args.dry else args.epochs
+    trainer = build_trainer(run_epochs, device=args.device, warmup_device=args.warmup_device)
+
+    model = build_model(train_dataset, fusion=args.fusion)
+    expert_builder_config = {
+        "fusion": args.fusion,
+        "epochs": run_epochs,
+        "device": args.device,
+        "warmup_device": args.warmup_device,
+    }
+    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
     run(
         RunCfg(
-            experiment_name=experiment_name,
-            model_name="MetaModel",
+            experiment_name=run_name,
+            model_name=args.fusion,
             model=model,
             trainer=trainer,
             train_datasets=[train_dataset],
             val_datasets=[],
             test_datasets=[("test", test_dataset)],
-            batch_size=batch_size,
-            n_samples=n_samples,
-            num_workers_dataloader=num_workers_dataloader,
+            batch_size=args.batch_size,
+            n_samples=1_000 if args.dry and args.n_samples is None else args.n_samples,
+            num_workers_dataloader=args.num_workers_dataloader,
             use_energy_tracker=False,
+            use_mlflow=not args.no_mlflow,
+            log_path=os.path.join("results", "multilabel"),
+            tags={"fusion": args.fusion},
             collate_fn=batch_collate,
+            meta_data=vars(args),
+            expert_name=run_name,
+            expert_task="multilabel",
+            expert_builder={
+                "module": "train_multilabel",
+                "function": "build_expert_components",
+                "config": expert_builder_config,
+            },
+            expert_dataset_template=expert_dataset_template,
         )
     )
 

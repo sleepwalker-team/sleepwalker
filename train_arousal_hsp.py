@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import numpy as np
+np.seterr(all='raise')
+
 import argparse
 from collections import defaultdict
+import multiprocessing
 import os
 from functools import partial
+from typing import Optional
 
 import pandas as pd
 import yaml
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
+from tqdm import tqdm
+from os.path import basename, dirname, exists, join
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -21,12 +28,8 @@ import torch
 import torch.multiprocessing as mp
 
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
-from sleepwalker.datasets.Ruhrlandklinik import get_channels
-from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
-from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
-from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
+from sleepwalker.datasets.HSP import HSP, get_channels
+from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
@@ -56,15 +59,13 @@ DEFAULT_CONFIG = {
     "grouped": False,
     "channels": ["eeg", "eog", "chin_emg", "ECG"],
     "scaler": False,
-    "clean": False,
     "arousal_weight": 1,
     "model": "utime-big",
     "id": None,
     "total_input": "60s",
     "val_frac": 0.1,
     "dry": False,
-    "use_mlflow": True,
-    "asleep_only": True
+    "use_mlflow": True
 }
 
 
@@ -84,13 +85,12 @@ def prepare_patient(data_df, label_df, label_extra_df, patient=None):
     label_df, label_extra_df = trimmed
     return data_df, label_df, label_extra_df
 
-
 def prepare_sample(
     data,
-    quality_data=None,
     target=None,
     target_extra=None,
     patient=None,
+    quality_data=None,
     time=None,
 ):
     # if quality_data is not None and "EEG" in quality_data.columns:
@@ -114,53 +114,38 @@ def prepare_sample(
         item["target_extra"] = target_extra
     return item
 
-def build_dataset_template(cfg: dict):
-    if cfg["asleep_only"]:
-        EVENT_MAPPING = {
-            "arousal": "arousal",
-            "n1": "sleep",
-            "n2": "sleep",
-            "n3": "sleep",
-            "rem": "sleep",
-            #"rera": "arousal", 
-            #"plm-arousal": "arousal", 
-        }
-    else:
-        EVENT_MAPPING = {
-            "arousal": "arousal",
-            "n1": "sleep",
-            "n2": "sleep",
-            "n3": "sleep",
-            "rem": "sleep",
-            #"rera": "arousal", 
-            #"plm-arousal": "arousal", 
-        }
+def build_dataset(patients: list[str], cfg: dict):
+    dataset = build_dataset_template(cfg)
+    dataset.initialize(patients, cfg["num_workers_dataset"])
+    return dataset
 
-    if cfg["clean"]:
-        EVENT_MAPPING["artefakt"] = "artifact"
-        prepare_arousal_target = partial(
-            prepare_multiclass_target,
-            target_classes=TARGET_CLASSES,
-            filters=[
-                {"columns": ["wake"], "percentage": 0.5, "mode": "max"},
-                {"columns": ["artifact"], "percentage": 0.0, "mode": "max"},
-            ],
-        )
-    else:
-        prepare_arousal_target = partial(
-            prepare_multiclass_target,
-            target_classes=TARGET_CLASSES,
-        )
-
-    channel_configs = get_channels(
+def cfg_to_channelcfg(cfg: dict) -> list[ChannelConfig]:
+    return get_channels(
         cfg["channels"],
         grouped=cfg["grouped"],
-        include_quality=False,
         normalize=True,
         sample_frequency=cfg["sample_frequency"],
-        override_normalize={"chin_emg": None, "ECG": None},
+        override_normalize={"chin_emg":None, "leg_emg": None, "EKG":None},
     )
-    dataset = Ruhrlandklinik(
+
+def build_dataset_template(cfg: dict):
+    EVENT_MAPPING = {
+        "arousal": "arousal",
+        "n1": "sleep",
+        "n2": "sleep",
+        "n3": "sleep",
+        "rem": "sleep",
+        #"rera": "arousal", 
+        #"plm-arousal": "arousal", 
+    }
+
+    prepare_arousal_target = partial(
+        prepare_multiclass_target,
+        target_classes=TARGET_CLASSES,
+    )
+
+    channel_configs = cfg_to_channelcfg(cfg)
+    dataset = HSP(
         channels=channel_configs,
         sample_frequency=cfg["sample_frequency"],
         event_mapping=EVENT_MAPPING,
@@ -174,67 +159,67 @@ def build_dataset_template(cfg: dict):
     dataset.classes = list(TARGET_CLASSES)
     logger.info(
         f"Configured {len(dataset.get_input_channels())} effective input channels "
-        f"from {len(channel_configs)} Ruhrland channel candidates."
+        f"from {len(channel_configs)} HSP channel candidates."
     )
     return dataset
 
 
-def build_dataset(patients: list[str], cfg: dict):
-    dataset = build_dataset_template(cfg)
-    dataset.initialize(patients, cfg["num_workers_dataset"])
-    return dataset
+def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
+    bn = basename(edf_path)
+    annot_name = f"{bn.replace('eeg', 'annotations').replace('.edf', '.csv')}"
+    annot_path = join(dirname(edf_path), annot_name)
 
-def is_pap_patient(edf_path: str) -> bool:
-    meta = read_edf_meta(edf_path)
-    available_channels = meta["signals"]
-    pap_channel_patterns = [
-        "Druckeinstellung",
-        "EPAP",
-        "IPAP",
-        "Druck (PAP)",
-        "Mask Pressure",
-        "Leck (PAP)",
-        "Fluss (PAP)",
-        "SpO2 (PAP)",
-        "Puls (PAP)",
-        "FiO2 (PAP)",
-        "PrismaLeak",
-        "PrismaFlow",
-        "AutoPressure",
-        "Ventilation Vorg",
-        "AchievedAlveolar",
-    ]
-    return any(ch in available_channels for ch in pap_channel_patterns)
+    if not exists(annot_path):
+        # Try Xltek annotations
+        annot_name = f"{bn.replace('-psg_eeg.edf', '_Xltek.csv')}"
+        annot_path = join(dirname(edf_path), annot_name)
+        if not exists(annot_path):
+            return None
 
-
-def has_required_channels(edf_path: str, cfg: dict) -> bool:
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
-    requested = get_channels(
-        cfg["channels"],
-        grouped=cfg["grouped"],
-        include_quality=False,
-        normalize=True,
-        sample_frequency=cfg["sample_frequency"],
-        override_normalize={"chin_emg":None, "ECG":None, "Pulse Waveform":None},
-    ) # TODO this has to be set in two places now
+    requested = cfg_to_channelcfg(cfg)
+
     channel_by_group = defaultdict(list)
-    for cfg in requested:
-        if cfg.group:
-            channel_by_group[cfg.group].append(cfg.name)
+    for channel_cfg in requested:
+        if channel_cfg.group:
+            channel_by_group[channel_cfg.group].append(channel_cfg.name)
         else:
-            channel_by_group[cfg.name].append(cfg.name)
+            channel_by_group[channel_cfg.name].append(channel_cfg.name)
 
     for requested_channels in channel_by_group.values():
         if not any(channel in available_channels for channel in requested_channels):
-            return False
-    return True
+            return None
+    return edf_path
 
-def list_patients(source_root: str, cfg: dict) -> list[str]:
-    patients = [
-        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(patient) and has_required_channels(patient, cfg)
-    ]
-    return patients[:2] if cfg["dry"] else patients
+def list_patients(cfg: dict) -> list[str]:
+    edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
+
+    logger.progress_start(len(edf_files), desc="Collecting patients", leave=True)
+    patients = []
+    if cfg["num_workers_dataset"] > 1:
+        with multiprocessing.Pool(cfg["num_workers_dataset"]) as pool:
+            iter_objects = pool.imap_unordered(partial(is_usable, cfg=cfg), edf_files)
+            for result in iter_objects:
+                if result:
+                    patients.append(result)
+                logger.progress_advance(1)
+    else:
+        for patient in edf_files:
+            if is_usable(patient, cfg) is not None:
+                patients.append(patient)
+            logger.progress_advance(1)
+
+    logger.progress_close()
+    logger.info(f"Collected patient stats for {len(patients)}/{len(edf_files)} patients.")
+
+    
+    # patients = [
+    #     patient
+    #     for patient in tqdm(edf_files, desc="Scanning HSP EDFs for required channels")
+    #     if has_required_channels(patient, cfg)
+    # ]
+    return patients[:10] if cfg["dry"] else patients
 
 def build_model_and_trainer(train_dataset, cfg: dict):
     n_channels = len(train_dataset.get_input_channels())
@@ -340,7 +325,6 @@ def build_model_and_trainer(train_dataset, cfg: dict):
     )
     return model, trainer
 
-
 def build_expert_components(cfg: dict):
     cfg = dict(cfg)
     dataset = build_dataset_template(cfg)
@@ -351,7 +335,6 @@ def build_expert_components(cfg: dict):
         "dataset_template": dataset.to_unlabelled(),
     }
 
-
 def read_yaml_config(path: str) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     with open(path, "r", encoding="utf-8") as handle:
@@ -361,32 +344,15 @@ def read_yaml_config(path: str) -> dict:
     cfg.update(loaded_cfg)
     return cfg
 
-# def normalize_config(raw_cfg: dict) -> dict:
-#     cfg = dict(DEFAULT_CONFIG)
-#     cfg.update(raw_cfg)
-#     cfg["train_root"] = str(cfg["train_root"])
-#     cfg["test_root"] = str(cfg["test_root"])
-#     cfg["batch_size"] = int(cfg["batch_size"])
-#     cfg["epochs"] = int(cfg["epochs"])
-#     cfg["n_samples"] = int(cfg["n_samples"])
-#     cfg["num_workers_dataset"] = int(cfg["num_workers_dataset"])
-#     cfg["num_workers_dataloader"] = int(cfg["num_workers_dataloader"])
-#     cfg["sample_frequency"] = int(cfg["sample_frequency"])
-#     cfg["target_resolution"] = str(cfg["target_resolution"])
-#     cfg["stride"] = str(cfg["stride"])
-#     cfg["channels"] = list(cfg["channels"])
-#     cfg["grouped"] = bool(cfg["grouped"])
-#     cfg["scaler"] = bool(cfg["scaler"])
-#     cfg["clean"] = bool(cfg["clean"])
-#     cfg["arousal_weight"] = int(cfg["arousal_weight"])
-#     cfg["model"] = str(cfg["model"])
-#     cfg["id"] = str(cfg["id"])
-#     cfg["total_input"] = str(cfg["total_input"])
-#     cfg["val_frac"] = float(cfg["val_frac"])
-#     cfg["dry"] = bool(cfg["dry"])
-#     cfg["use_mlflow"] = bool(cfg["use_mlflow"])
-#     return cfg
-
+def log_patient_split(train_patients, val_patients):
+    with open('train_hsp.txt', 'w') as f:
+        for line in train_patients:
+            f.write(f"{line}\n")
+    with open('test_hsp.txt', 'w') as f:
+        for line in val_patients:
+            f.write(f"{line}\n")
+    logger.artifact("train_hsp.txt", "train.txt")
+    logger.artifact("val_hsp.txt", "val.txt")
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate an arousal model.")
@@ -406,14 +372,13 @@ def main():
     os.makedirs(os.path.join("results", "arousal", experiment_name), exist_ok=True)
     logger.set_log_file(os.path.join("results", "arousal", experiment_name, "output.log"))
 
-    train_patients = list_patients(cfg["train_root"], cfg)
-    test_patients = list_patients(cfg["test_root"], cfg)
-
+    train_patients = list_patients(cfg)
     val_dataset = None
     if cfg["val_frac"] > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=cfg["val_frac"])
+        train_patients, val_patients = random_split(train_patients, test_frac=cfg["val_frac"],seed=1)
     else:
         val_patients = []
+    log_patient_split(train_patients, val_patients)
 
     # with suppress_stdout_logging(logger):
     logger.context("TRAIN")
@@ -423,9 +388,7 @@ def main():
         logger.context("VAL")
         val_dataset = build_dataset(val_patients, cfg)
         logger.uncontext()
-    logger.context("TEST")
-    test_dataset = build_dataset(test_patients, cfg)
-    logger.uncontext()
+    test_dataset = None 
 
     trainer_cfg = dict(cfg)
     trainer_cfg["epochs"] = 2 if cfg["dry"] else cfg["epochs"]
@@ -454,7 +417,7 @@ def main():
             trainer=trainer,
             train_datasets=[train_dataset],
             val_datasets=[] if val_dataset is None else [val_dataset],
-            test_datasets=[("Ruhrland2024", test_dataset)],
+            test_datasets=[("HSPTest", test_dataset)],
             batch_size=cfg["batch_size"],
             n_samples=cfg["n_samples"],
             num_workers_dataloader=cfg["num_workers_dataloader"],

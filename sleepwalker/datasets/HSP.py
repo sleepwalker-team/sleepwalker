@@ -2,8 +2,248 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pandas as pd
-from .Basedataset import BaseDataset  
+from .Basedataset import BaseDataset, ChannelConfig
 from os.path import basename, dirname, join, exists
+
+from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
+from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
+from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
+from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
+
+
+HSP_CHANNEL_GROUPS = {
+    "eeg": [
+        "C3-M2",
+        "C4-M1",
+        "F3-M2",
+        "F4-M1",
+        "O1-M2",
+        "O2-M1",
+        "CZ-M2",
+        "CZ-M1",
+        "C3-M1",
+        "C4-M2",
+        "F3-M1",
+        "F4-M2",
+        "O1-M1",
+        "O2-M2",
+    ],
+    "eog": ["E1-M2", "E2-M1", "E2-M2"], #"E1", "E2", "Eye Up", "Eye Down"
+    "chin_emg": [
+        "CHIN1-CHIN2",
+        "Chin1-Chin2",
+        "CHIN1-CHIN3",
+        "Chin1-Chin3",
+        "CHIN2-CHIN3",
+        "Chin2-Chin3",
+        "Chin3-Chin2",
+        # "Chin3",
+        # "Chin2",
+        # "CHIN1",
+        # "CHIN2",
+        # "CHIN3",
+        # "CHIN",
+        # "CHINz",
+        "EMG",
+    ],
+    "leg_emg": [
+        "LAT",
+        "RAT",
+        # "LLEG+",
+        # "LLEG-",
+        # "RLEG+",
+        # "RLEG-",
+        "L LEG",
+        "R LEG",
+        "left leg",
+        "right leg",
+        # "Arm1",
+        # "Arm2",
+    ],
+    "emg": [],
+    "respiratory": [ 
+        "ABD",
+        "CHEST",
+        "SaO2",
+        # "SpO2",
+        # "SPO2",
+        # "AIRFLOW",
+        # "AirFlow",
+        # "Airflow2",
+        # "IC",
+        # "PTAF",
+        # "ABDOMEN",
+        # "Abdomen",
+        # "THORAX",
+        # "Chest",
+        # "THERMISTOR",
+        # "Thermistor",
+        # "Flow",
+        # "Flow_DR",
+        # "CFLOW",
+        # "CFlow",
+        # "C-Flow",
+        # "XFlow",
+        # "XVolume",
+        # "XSum",
+        # "Tidal",
+        # "Phase",
+        # "RR",
+        # "Snore",
+        # "SNORE",
+        # "Snore_DR",
+        # "SNORE.DR",
+        # "Cap Wave",
+        # "CO2 Wave",
+        # "EtCO2",
+        # "EtC02",
+        # "ETC02",
+        # "CAPNO",
+    ],
+    "pulse": [ 
+        "EKG",
+        # "ECG",
+        # "ECG-LA",
+        # "ECG-RA",
+        # "ECG-LL",
+        # "ECG-V1",
+        # "ECG-V2",
+        # "Pleth",
+        # "PPG",
+        # "SaO2",
+        # "SpO2",
+        # "SPO2",
+        # "HR",
+        # "PR",
+        # "PulseQuality",
+        # "pulse_rate_event",
+    ],
+}
+
+HSP_CHANNEL_GROUPS["emg"] = HSP_CHANNEL_GROUPS["chin_emg"] + HSP_CHANNEL_GROUPS["leg_emg"]
+
+
+def hsp_normalizer(channel_name: str, sample_frequency: float):
+    """Return a convenience normalizer for an HSP channel.
+
+    The defaults below mirror the pragmatic Ruhrlandklinik helper: EEG/EOG use
+    the EEG filter stack, respiratory channels use the respiration filter,
+    oxygen saturation uses the saturation filter, and EMG/pulse-like channels
+    get lightweight band-pass defaults. Unknown channels fall back to ``None``.
+    """
+    if channel_name in HSP_CHANNEL_GROUPS["eeg"] or channel_name in HSP_CHANNEL_GROUPS["eog"]:
+        return EEGFilterNormalizer(fs=sample_frequency)
+    if channel_name in HSP_CHANNEL_GROUPS["chin_emg"] or channel_name in HSP_CHANNEL_GROUPS["leg_emg"]:
+        return SignalFilterNormalizer(fs=sample_frequency, lowcut=10.0, highcut=45.0, notch_freq=60.0)
+    if channel_name in {"SaO2", "SpO2", "SPO2"}:
+        return SaturationFilterNormalizer(fs=sample_frequency)
+    if channel_name in {"Pleth", "PPG"}:
+        return PulseFilterNormalizer(fs=sample_frequency)
+    if channel_name in HSP_CHANNEL_GROUPS["respiratory"]:
+        return RespirationFilterNormalizer(fs=sample_frequency)
+    if channel_name in {"EKG"}:
+        return SignalFilterNormalizer(fs=sample_frequency, lowcut=0.5, highcut=8.0)
+    return None
+
+def hsp_group_name(subgroup: str, grouped: bool) -> str | None:
+    """Resolve the logical group label used for grouped channel sampling."""
+    if not grouped:
+        return None
+    if subgroup == "eeg":
+        return "EEG"
+    if subgroup == "eog":
+        return "EOG"
+    if subgroup == "chin_emg":
+        return "Chin EMG"
+    if subgroup == "leg_emg":
+        return "Leg EMG"
+    return None
+
+def resolve_normalizer(
+    channel_name: str,
+    group_name: str | None,
+    normalize: bool,
+    override_normalize: dict[str, object | None] | None,
+    sample_frequency: float,
+):
+    """Resolve the effective normalizer for one HSP channel."""
+    if override_normalize is not None:
+        if channel_name in override_normalize:
+            return override_normalize[channel_name]
+        if group_name is not None and group_name in override_normalize:
+            return override_normalize[group_name]
+    if not normalize:
+        return None
+    return hsp_normalizer(channel_name, sample_frequency)
+
+
+def get_channels(
+    group_names: list[str],
+    grouped: bool,
+    normalize: bool,
+    sample_frequency: float,
+    override_normalize: dict[str, object | None] | None = None,
+) -> list[ChannelConfig]:
+    """Build HSP channel configurations from groups and/or channel names.
+
+    This mirrors the Ruhrlandklinik helper so training scripts can use the same
+    calling pattern across datasets. The channel groups are derived from the HSP
+    channel inventory documented in the class docstring below and intentionally
+    prefer the most common referenced PSG montage names.
+    """
+    requested = []
+    seen_names = set()
+    valid_groups = set(HSP_CHANNEL_GROUPS.keys())
+
+    for raw_group_name in group_names:
+        group_name = raw_group_name.lower().strip()
+        if group_name in valid_groups:
+            if group_name == "emg":
+                subgroups = ["chin_emg", "leg_emg"]
+            else:
+                subgroups = [group_name]
+
+            for subgroup in subgroups:
+                logical_group = hsp_group_name(subgroup, grouped)
+                for channel_name in HSP_CHANNEL_GROUPS[subgroup]:
+                    if channel_name in seen_names:
+                        continue
+                    seen_names.add(channel_name)
+                    requested.append(
+                        ChannelConfig(
+                            name=channel_name,
+                            normalizer=resolve_normalizer(
+                                channel_name=channel_name,
+                                group_name=subgroup,
+                                normalize=normalize,
+                                override_normalize=override_normalize,
+                                sample_frequency=sample_frequency,
+                            ),
+                            group=logical_group,
+                        )
+                    )
+            continue
+
+        channel_name = raw_group_name
+        if channel_name in seen_names:
+            continue
+        seen_names.add(channel_name)
+        requested.append(
+            ChannelConfig(
+                name=channel_name,
+                normalizer=resolve_normalizer(
+                    channel_name=channel_name,
+                    group_name=None,
+                    normalize=normalize,
+                    override_normalize=override_normalize,
+                    sample_frequency=sample_frequency,
+                ),
+                group=None,
+            )
+        )
+
+    return requested
 
 class HSP(BaseDataset):
     '''
@@ -1650,12 +1890,12 @@ class HSP(BaseDataset):
 
     def get_event_df(self, edf_path, start_datetime):
         bn = basename(edf_path)
-        annot_name = f'{bn.replace('eeg', 'annotations').replace('.edf', '.csv')}'
+        annot_name = f"{bn.replace('eeg', 'annotations').replace('.edf', '.csv')}"
         annot_path = join(dirname(edf_path), annot_name)
 
         if not exists(annot_path):
             # Try Xltek annotations
-            annot_name = f'{bn.replace('-psg_eeg.edf', '_Xltek.csv')}'
+            annot_name = f"{bn.replace('-psg_eeg.edf', '_Xltek.csv')}"
             annot_path = join(dirname(edf_path), annot_name)
             if not exists(annot_path):
                 raise RuntimeError('No annotation file found for EDF file', bn)
@@ -1713,6 +1953,7 @@ class HSP(BaseDataset):
             'centralapnea': 'central-apnea',
             'hypopnea': 'hypopnea',
             'rera': 'rera',
+            'arousal':'arousal'
         }
         orig = df['Label']
         result = orig.copy()
@@ -1722,4 +1963,3 @@ class HSP(BaseDataset):
         df['Label'] = result
 
         return df
-

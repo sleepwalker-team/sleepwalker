@@ -1135,4 +1135,4 @@ class BaseDataset(Dataset, ABC):
         if self.online_max_tries == 0 or cnt <= self.online_max_tries:
             return item
         else:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}")
+            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}") # TODO add stacktrace for better reporting

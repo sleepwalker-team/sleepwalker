@@ -224,6 +224,17 @@ def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def get_hsp_annotation_label_counts(annotation_path: str | Path) -> dict[str, int]:
+    """Return sane-label counts for an HSP annotation sidecar."""
+    df = pd.read_csv(annotation_path)
+    df = df.rename(columns={"event": "Label"})
+    if "Label" not in df.columns:
+        raise ValueError(f"Annotation file has no Label/event column: {annotation_path}")
+    df["Label"] = df["Label"].astype(str).str.lower()
+    df = map_hsp_sane_labels(df)
+    return df["Label"].value_counts().sort_index().astype(int).to_dict()
+
+
 def hsp_normalizer(channel_name: str, sample_frequency: float):
     """Return a convenience normalizer for an HSP channel.
 

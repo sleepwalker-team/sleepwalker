@@ -1,4 +1,5 @@
 root: /raid/sleepwalker/hsp
+task: arousal
 batch_size: 16
 epochs: 2
 n_samples: 512
@@ -25,3 +26,4 @@ use_mlflow: false
 max_edf_files: 500
 patient_limit: 40
 annotated_only: true
+require_positive_labels: true

@@ -10,17 +10,16 @@ from pathlib import Path
 import sys
 from typing import Any
 
-import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets.HSP import (
+    get_hsp_annotation_label_counts,
     get_annotated_hsp_edf_files,
     get_channels,
     get_hsp_annotation_path,
-    map_hsp_sane_labels,
 )
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
@@ -98,13 +97,7 @@ def requested_channel_groups(cfg: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def annotation_label_counts(annotation_path: str) -> dict[str, int]:
-    df = pd.read_csv(annotation_path)
-    df = df.rename(columns={"event": "Label"})
-    if "Label" not in df.columns:
-        raise ValueError(f"Annotation file has no Label/event column: {annotation_path}")
-    df["Label"] = df["Label"].astype(str).str.lower()
-    df = map_hsp_sane_labels(df)
-    return df["Label"].value_counts().sort_index().astype(int).to_dict()
+    return get_hsp_annotation_label_counts(annotation_path)
 
 
 def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -126,6 +119,16 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, 
             "reason": "missing_required_labels",
             "annotation_path": annotation_path,
             "required_any_labels": sorted(required_any_labels),
+            "label_counts": label_counts,
+        }
+    positive_labels = set(cfg.get("positive_labels") or [])
+    if cfg.get("require_positive_labels", False) and positive_labels.isdisjoint(labels):
+        return {
+            "path": edf_path,
+            "usable": False,
+            "reason": "missing_positive_labels",
+            "annotation_path": annotation_path,
+            "positive_labels": sorted(positive_labels),
             "label_counts": label_counts,
         }
 
@@ -224,6 +227,11 @@ def main() -> None:
         help="Inspect all EDFs instead of only same-record annotation-paired EDFs.",
     )
     parser.add_argument("--top-channels", type=int, default=40)
+    parser.add_argument(
+        "--require-positive-labels",
+        action="store_true",
+        help="Require at least one configured positive label in addition to required labels/channels.",
+    )
     parser.add_argument("--json-out", type=str, default=None, help="Optional path for detailed JSON output.")
     args = parser.parse_args()
 
@@ -236,6 +244,8 @@ def main() -> None:
         cfg["channels"] = args.channels
     if args.grouped:
         cfg["grouped"] = True
+    if args.require_positive_labels:
+        cfg["require_positive_labels"] = True
     cfg.setdefault("root", DEFAULT_ROOT)
     cfg.setdefault("sample_frequency", 100)
     cfg.setdefault("annotated_only", True)
@@ -253,6 +263,11 @@ def main() -> None:
 
     required = requested_channel_groups(cfg)
     positive_labels = list(cfg.get("positive_labels") or [])
+    if cfg.get("require_positive_labels", False) and not positive_labels:
+        raise ValueError(
+            "require_positive_labels=True needs configured positive_labels. "
+            "Pass --task or set task/positive_labels in the config."
+        )
     records = [diagnose_file(edf_path, required, cfg) for edf_path in edf_files]
     payload = {
         "config": {
@@ -264,6 +279,7 @@ def main() -> None:
             "annotated_only": annotated_only,
             "required_any_labels": cfg.get("required_any_labels", []),
             "positive_labels": positive_labels,
+            "require_positive_labels": bool(cfg.get("require_positive_labels", False)),
         },
         "required_channel_groups": required,
         "summary": summarize(records, args.top_channels, positive_labels),

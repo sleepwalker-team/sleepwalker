@@ -27,7 +27,13 @@ import torch
 import torch.multiprocessing as mp
 
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.datasets.HSP import HSP, get_annotated_hsp_edf_files, get_channels, get_hsp_annotation_path
+from sleepwalker.datasets.HSP import (
+    HSP,
+    get_annotated_hsp_edf_files,
+    get_channels,
+    get_hsp_annotation_label_counts,
+    get_hsp_annotation_path,
+)
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
@@ -47,6 +53,7 @@ ROOT = "/cephfs_projects/sleepwalker/hsp"
 TARGET_CLASSES = ["no_arousal", "arousal"]
 DEFAULT_CONFIG = {
     "root": ROOT,
+    "task": "arousal",
     "batch_size": 128,
     "epochs": 35,
     "n_samples": 100_000,
@@ -70,6 +77,7 @@ DEFAULT_CONFIG = {
     "max_edf_files": None,
     "patient_limit": None,
     "annotated_only": True,
+    "require_positive_labels": True,
 }
 
 
@@ -169,8 +177,13 @@ def build_dataset_template(cfg: dict):
 
 
 def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
-    if get_hsp_annotation_path(edf_path) is None:
+    annot_path = get_hsp_annotation_path(edf_path)
+    if annot_path is None:
         return None
+    if cfg.get("require_positive_labels", True):
+        label_counts = get_hsp_annotation_label_counts(annot_path)
+        if label_counts.get("arousal", 0) <= 0:
+            return None
 
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
@@ -392,6 +405,7 @@ def main():
     model, trainer = build_model_and_trainer(train_dataset, trainer_cfg)
     expert_builder_config = {
         "sample_frequency": cfg["sample_frequency"],
+        "task": cfg.get("task", "arousal"),
         "target_resolution": cfg["target_resolution"],
         "stride": cfg["stride"],
         "channels": list(cfg["channels"]),
@@ -408,6 +422,7 @@ def main():
         "max_edf_files": cfg.get("max_edf_files"),
         "patient_limit": cfg.get("patient_limit"),
         "annotated_only": cfg.get("annotated_only", True),
+        "require_positive_labels": cfg.get("require_positive_labels", True),
     }
     expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 

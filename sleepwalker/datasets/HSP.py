@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from .Basedataset import BaseDataset, ChannelConfig
 from os.path import basename, dirname, join, exists
+from pathlib import Path
 
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
@@ -134,6 +135,45 @@ HSP_CHANNEL_GROUPS = {
 }
 
 HSP_CHANNEL_GROUPS["emg"] = HSP_CHANNEL_GROUPS["chin_emg"] + HSP_CHANNEL_GROUPS["leg_emg"]
+
+
+def get_hsp_annotation_path(edf_path: str | Path) -> str | None:
+    """Return the same-record HSP annotation sidecar for an EDF, if present."""
+    edf_path = Path(edf_path)
+    bn = edf_path.name
+    candidates = [
+        edf_path.with_name(bn.replace("eeg", "annotations").replace(".edf", ".csv")),
+        edf_path.with_name(bn.replace("-psg_eeg.edf", "_Xltek.csv")),
+    ]
+
+    parts = edf_path.parts
+    for idx, part in enumerate(parts):
+        if part.startswith("sub-") and (idx == 0 or parts[idx - 1] != "HSP"):
+            mirror_path = Path(*parts[:idx]) / "HSP" / Path(*parts[idx:])
+            mirror_bn = mirror_path.name
+            candidates.extend(
+                [
+                    mirror_path.with_name(mirror_bn.replace("eeg", "annotations").replace(".edf", ".csv")),
+                    mirror_path.with_name(mirror_bn.replace("-psg_eeg.edf", "_Xltek.csv")),
+                ]
+            )
+            break
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def get_annotated_hsp_edf_files(root: str | Path, recursive: bool = True) -> list[str]:
+    """List HSP EDF files that have a same-record annotation sidecar."""
+    from sleepwalker.datasets.utils import get_edf_files_in_repo
+
+    return [
+        edf_path
+        for edf_path in get_edf_files_in_repo(str(root), recursive=recursive)
+        if get_hsp_annotation_path(edf_path) is not None
+    ]
 
 
 def hsp_normalizer(channel_name: str, sample_frequency: float):
@@ -1913,16 +1953,9 @@ class HSP(BaseDataset):
         self.sane_labels = sane_labels
 
     def get_event_df(self, edf_path, start_datetime):
-        bn = basename(edf_path)
-        annot_name = f"{bn.replace('eeg', 'annotations').replace('.edf', '.csv')}"
-        annot_path = join(dirname(edf_path), annot_name)
-
-        if not exists(annot_path):
-            # Try Xltek annotations
-            annot_name = f"{bn.replace('-psg_eeg.edf', '_Xltek.csv')}"
-            annot_path = join(dirname(edf_path), annot_name)
-            if not exists(annot_path):
-                raise RuntimeError('No annotation file found for EDF file', bn)
+        annot_path = get_hsp_annotation_path(edf_path)
+        if annot_path is None:
+            raise RuntimeError('No annotation file found for EDF file', basename(edf_path))
 
         df = pd.read_csv(annot_path)
         df = df.rename(columns={'event': 'Label', 'time': 'Starttime', 'duration': 'Duration'})

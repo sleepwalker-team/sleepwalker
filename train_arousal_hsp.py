@@ -16,7 +16,6 @@ import pandas as pd
 import yaml
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from tqdm import tqdm
-from os.path import basename, dirname, exists, join
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -28,7 +27,7 @@ import torch
 import torch.multiprocessing as mp
 
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.datasets.HSP import HSP, get_channels
+from sleepwalker.datasets.HSP import HSP, get_annotated_hsp_edf_files, get_channels, get_hsp_annotation_path
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
@@ -70,6 +69,7 @@ DEFAULT_CONFIG = {
     "use_mlflow": True,
     "max_edf_files": None,
     "patient_limit": None,
+    "annotated_only": True,
 }
 
 
@@ -169,16 +169,8 @@ def build_dataset_template(cfg: dict):
 
 
 def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
-    bn = basename(edf_path)
-    annot_name = f"{bn.replace('eeg', 'annotations').replace('.edf', '.csv')}"
-    annot_path = join(dirname(edf_path), annot_name)
-
-    if not exists(annot_path):
-        # Try Xltek annotations
-        annot_name = f"{bn.replace('-psg_eeg.edf', '_Xltek.csv')}"
-        annot_path = join(dirname(edf_path), annot_name)
-        if not exists(annot_path):
-            return None
+    if get_hsp_annotation_path(edf_path) is None:
+        return None
 
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
@@ -197,7 +189,10 @@ def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
     return edf_path
 
 def list_patients(cfg: dict) -> list[str]:
-    edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
+    if cfg.get("annotated_only", True):
+        edf_files = get_annotated_hsp_edf_files(cfg["root"], recursive=True)
+    else:
+        edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
     if cfg.get("max_edf_files") is not None:
         edf_files = edf_files[: int(cfg["max_edf_files"])]
 
@@ -412,6 +407,7 @@ def main():
         "num_workers_dataset": cfg["num_workers_dataset"],
         "max_edf_files": cfg.get("max_edf_files"),
         "patient_limit": cfg.get("patient_limit"),
+        "annotated_only": cfg.get("annotated_only", True),
     }
     expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 

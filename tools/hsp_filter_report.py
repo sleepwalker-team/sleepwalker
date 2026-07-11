@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import json
-from os.path import basename, dirname, exists, join
 from pathlib import Path
 import sys
 from typing import Any
@@ -16,7 +15,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.datasets.HSP import get_channels
+from sleepwalker.datasets.HSP import get_annotated_hsp_edf_files, get_channels, get_hsp_annotation_path
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
 
@@ -34,15 +33,7 @@ def read_config(path: str | None) -> dict[str, Any]:
 
 
 def expected_annotation_path(edf_path: str) -> str | None:
-    bn = basename(edf_path)
-    candidates = [
-        join(dirname(edf_path), bn.replace("eeg", "annotations").replace(".edf", ".csv")),
-        join(dirname(edf_path), bn.replace("-psg_eeg.edf", "_Xltek.csv")),
-    ]
-    for candidate in candidates:
-        if exists(candidate):
-            return candidate
-    return None
+    return get_hsp_annotation_path(edf_path)
 
 
 def requested_channel_groups(cfg: dict[str, Any]) -> dict[str, list[str]]:
@@ -125,6 +116,11 @@ def main() -> None:
     parser.add_argument("--channels", nargs="+", default=None, help="Override required HSP channel groups/names.")
     parser.add_argument("--grouped", action="store_true", help="Treat channel groups as grouped model inputs.")
     parser.add_argument("--max-files", type=int, default=None, help="Optional EDF cap for quick diagnostics.")
+    parser.add_argument(
+        "--all-edfs",
+        action="store_true",
+        help="Inspect all EDFs instead of only same-record annotation-paired EDFs.",
+    )
     parser.add_argument("--top-channels", type=int, default=40)
     parser.add_argument("--json-out", type=str, default=None, help="Optional path for detailed JSON output.")
     args = parser.parse_args()
@@ -140,8 +136,13 @@ def main() -> None:
     cfg.setdefault("channels", ["eeg", "eog", "chin_emg"])
     cfg.setdefault("grouped", False)
     cfg.setdefault("sample_frequency", 100)
+    cfg.setdefault("annotated_only", True)
 
-    edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
+    annotated_only = bool(cfg.get("annotated_only", True)) and not args.all_edfs
+    if annotated_only:
+        edf_files = get_annotated_hsp_edf_files(cfg["root"], recursive=True)
+    else:
+        edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
     if args.max_files is not None:
         edf_files = edf_files[: args.max_files]
 
@@ -153,6 +154,7 @@ def main() -> None:
             "channels": cfg["channels"],
             "grouped": cfg["grouped"],
             "sample_frequency": cfg["sample_frequency"],
+            "annotated_only": annotated_only,
         },
         "required_channel_groups": required,
         "summary": summarize(records, args.top_channels),

@@ -24,3 +24,4 @@ dry: false
 use_mlflow: true
 max_edf_files: null
 patient_limit: null
+annotated_only: true

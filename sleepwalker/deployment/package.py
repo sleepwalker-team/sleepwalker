@@ -32,6 +32,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any, Optional
 
@@ -357,6 +358,30 @@ def _manifest_from_dict(payload: dict[str, Any]) -> ExpertManifest:
     )
 
 
+def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any]) -> None:
+    """Initialize lazy preprocessor buffers before loading saved state."""
+    preprocessors = getattr(model, "preprocessors", None)
+    if preprocessors is None:
+        return
+
+    pattern = re.compile(r"^preprocessors\.(\d+)\.n$")
+    for key, saved in state_dict.items():
+        match = pattern.match(key)
+        if match is None or not hasattr(saved, "numel") or int(saved.numel()) == 0:
+            continue
+        idx = int(match.group(1))
+        if idx >= len(preprocessors):
+            continue
+        preprocessor = preprocessors[idx]
+        current = getattr(preprocessor, "n", None)
+        if current is None or not hasattr(current, "numel") or int(current.numel()) != 0:
+            continue
+        if not hasattr(preprocessor, "push"):
+            continue
+        dummy = torch.zeros(1, 1, int(saved.numel()), device=saved.device, dtype=torch.float32)
+        preprocessor.push(dummy)
+
+
 def load_expert_package(
     path: str | os.PathLike,
     *,
@@ -392,6 +417,7 @@ def load_expert_package(
     dataset_template = components.get("dataset_template")
 
     state_dict = torch.load(root / "model_state.pt", map_location=map_location)
+    _prepare_preprocessor_state_for_load(model, state_dict)
     model.load_state_dict(state_dict)
     model = model.to(map_location)
 

@@ -57,7 +57,7 @@ DEFAULT_CONFIG = {
     "target_resolution": "1s",
     "stride": "1s",
     "grouped": False,
-    "channels": ["eeg", "eog", "chin_emg", "ECG"],
+    "channels": ["eeg", "eog", "chin_emg", "pulse"],
     "scaler": False,
     "arousal_weight": 1,
     "model": "utime-big",
@@ -65,7 +65,9 @@ DEFAULT_CONFIG = {
     "total_input": "60s",
     "val_frac": 0.1,
     "dry": False,
-    "use_mlflow": True
+    "use_mlflow": True,
+    "max_edf_files": None,
+    "max_patients": None,
 }
 
 
@@ -194,6 +196,8 @@ def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
 
 def list_patients(cfg: dict) -> list[str]:
     edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
+    if cfg.get("max_edf_files") is not None:
+        edf_files = edf_files[: int(cfg["max_edf_files"])]
 
     logger.progress_start(len(edf_files), desc="Collecting patients", leave=True)
     patients = []
@@ -213,12 +217,8 @@ def list_patients(cfg: dict) -> list[str]:
     logger.progress_close()
     logger.info(f"Collected patient stats for {len(patients)}/{len(edf_files)} patients.")
 
-    
-    # patients = [
-    #     patient
-    #     for patient in tqdm(edf_files, desc="Scanning HSP EDFs for required channels")
-    #     if has_required_channels(patient, cfg)
-    # ]
+    if cfg.get("max_patients") is not None:
+        patients = patients[: int(cfg["max_patients"])]
     return patients[:10] if cfg["dry"] else patients
 
 def build_model_and_trainer(train_dataset, cfg: dict):
@@ -339,7 +339,7 @@ def read_yaml_config(path: str) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     with open(path, "r", encoding="utf-8") as handle:
         loaded_cfg = yaml.safe_load(handle) or {}
-    if not isinstance(cfg, dict):
+    if not isinstance(loaded_cfg, dict):
         raise ValueError(f"Config file must contain a top-level mapping: {path}")
     cfg.update(loaded_cfg)
     return cfg
@@ -348,7 +348,7 @@ def log_patient_split(train_patients, val_patients):
     with open('train_hsp.txt', 'w') as f:
         for line in train_patients:
             f.write(f"{line}\n")
-    with open('test_hsp.txt', 'w') as f:
+    with open('val_hsp.txt', 'w') as f:
         for line in val_patients:
             f.write(f"{line}\n")
     logger.artifact("train_hsp.txt", "train.txt")
@@ -406,6 +406,8 @@ def main():
         "arousal_weight": cfg["arousal_weight"],
         "epochs": trainer_cfg["epochs"],
         "num_workers_dataset": cfg["num_workers_dataset"],
+        "max_edf_files": cfg.get("max_edf_files"),
+        "max_patients": cfg.get("max_patients"),
     }
     expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 
@@ -417,7 +419,7 @@ def main():
             trainer=trainer,
             train_datasets=[train_dataset],
             val_datasets=[] if val_dataset is None else [val_dataset],
-            test_datasets=[("HSPTest", test_dataset)],
+            test_datasets=[] if test_dataset is None else [("HSPTest", test_dataset)],
             batch_size=cfg["batch_size"],
             n_samples=cfg["n_samples"],
             num_workers_dataloader=cfg["num_workers_dataloader"],
@@ -431,7 +433,7 @@ def main():
             expert_name=experiment_name,
             expert_task="arousal",
             expert_builder={
-                "module": "train_arousal",
+                "module": "train_arousal_hsp",
                 "function": "build_expert_components",
                 "config": expert_builder_config,
             },

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sleepwalker.deployment import load_expert_package, save_expert_package
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
 from train_arousal import build_expert_components as build_arousal_expert_components
@@ -21,8 +22,8 @@ BUILDER_CALLS: list[dict] = []
 
 
 class TinyModel(BaseModel):
-    def __init__(self, *, ts_len: int, n_channels: int, classes: list[str]):
-        super().__init__()
+    def __init__(self, *, ts_len: int, n_channels: int, classes: list[str], preprocessors=None):
+        super().__init__(preprocessors=preprocessors)
         self.ts_len = ts_len
         self.n_channels = n_channels
         self.classes = list(classes)
@@ -107,10 +108,14 @@ class TinyTrainDataset:
 def build_tiny_components(config: dict):
     BUILDER_CALLS.append(dict(config))
     classes = list(config.get("classes", ["neg", "pos"]))
+    preprocessors = None
+    if config.get("robust_scaler"):
+        preprocessors = [RobustScaler(channels=list(config.get("scaler_channels", range(int(config["n_channels"])))))]
     model = TinyModel(
         ts_len=int(config["ts_len"]),
         n_channels=int(config["n_channels"]),
         classes=classes,
+        preprocessors=preprocessors,
     )
     trainer = MulticlassTrainer(
         epochs=1,
@@ -280,6 +285,33 @@ def test_loaded_expert_restores_optimizer_and_scheduler_state():
                     assert restored_value == value
         assert restored_scheduler is not None
         assert restored_scheduler.state_dict() == scheduler.state_dict()
+
+
+def test_load_expert_package_restores_warmed_preprocessor_state():
+    cfg, _ = _build_components()
+    cfg = {**cfg, "robust_scaler": True, "scaler_channels": [0, 1]}
+    components = build_tiny_components(cfg)
+    model = components["model"]
+
+    model.preprocessors[0].update(torch.randn(2, 4, 2))
+    assert model.preprocessors[0].n.numel() == 2
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=model,
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+        )
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+
+        assert loaded.model.preprocessors[0].n.shape == model.preprocessors[0].n.shape
+        assert torch.allclose(loaded.model.preprocessors[0].marker_heights, model.preprocessors[0].marker_heights)
 
 
 def test_loaded_expert_rejects_dataset_contract_mismatch():

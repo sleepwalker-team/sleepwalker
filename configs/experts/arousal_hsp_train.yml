@@ -1,7 +1,7 @@
 root: /raid/sleepwalker/hsp
 batch_size: 128
-epochs: 2
-n_samples: 10000
+epochs: 35
+n_samples: 100000
 num_workers_dataset: 8
 num_workers_dataloader: 8
 sample_frequency: 100
@@ -21,3 +21,5 @@ total_input: "60s"
 val_frac: 0.1
 dry: false
 use_mlflow: true
+max_edf_files: null
+max_patients: null

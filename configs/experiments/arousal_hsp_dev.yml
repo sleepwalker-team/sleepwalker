@@ -1,0 +1,4 @@
+script: train_arousal_hsp.py
+args:
+  config: configs/experts/arousal_hsp_dev.yml
+  id: hsp-arousal-dev

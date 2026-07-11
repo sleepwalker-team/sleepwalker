@@ -176,6 +176,54 @@ def get_annotated_hsp_edf_files(root: str | Path, recursive: bool = True) -> lis
     ]
 
 
+def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """Map heterogeneous HSP annotation labels to stable task labels."""
+    df = df.copy()
+    exact_mapping = {
+        'stage - n1': 'n1',
+        'sleep_stage_n1': 'n1',
+        'sleep_stage_1': 'n1',
+        'stage - n2': 'n2',
+        'sleep_stage_n2': 'n2',
+        'sleep_stage_2': 'n2',
+        'stage - n3': 'n3',
+        'sleep_stage_n3': 'n3',
+        'sleep_stage_3': 'n3',
+        'stage - r': 'rem',
+        'sleep_stage_r': 'rem',
+        'sleep_stage_rem': 'rem',
+        'rem': 'rem',
+        'stage - w': 'wake',
+        'sleep_stage_w': 'wake',
+        'apnea / desats': 'apnea',
+        'oxygen_desaturation': 'desaturation'
+    }
+    df['Label'] = df['Label'].replace(exact_mapping)
+
+    substring_matches = {
+        'desaturation': 'desaturation',
+        'obstructive apnea': 'obstructive-apnea',
+        'obstructive_apnea': 'obstructive-apnea',
+        'obstructiveapnea': 'obstructive-apnea',
+        'mixed apnea': 'mixed-apnea',
+        'mixed_apnea': 'mixed-apnea',
+        'mixedapnea': 'mixed-apnea',
+        'central apnea': 'central-apnea',
+        'central_apnea': 'central-apnea',
+        'centralapnea': 'central-apnea',
+        'hypopnea': 'hypopnea',
+        'rera': 'rera',
+        'arousal':'arousal'
+    }
+    orig = df['Label']
+    result = orig.copy()
+    for k, v in substring_matches.items():
+        mask = orig.str.contains(k, case=False, na=False)
+        result = result.mask(mask, v)
+    df['Label'] = result
+    return df
+
+
 def hsp_normalizer(channel_name: str, sample_frequency: float):
     """Return a convenience normalizer for an HSP channel.
 
@@ -1976,47 +2024,4 @@ class HSP(BaseDataset):
         return df[['Label', 'Starttime', 'Endtime', 'Duration']]
 
     def _map_to_sane_labels(self, df):
-        exact_mapping = {
-            'stage - n1': 'n1',
-            'sleep_stage_n1': 'n1',
-            'sleep_stage_1': 'n1',
-            'stage - n2': 'n2',
-            'sleep_stage_n2': 'n2',
-            'sleep_stage_2': 'n2',
-            'stage - n3': 'n3',
-            'sleep_stage_n3': 'n3',
-            'sleep_stage_3': 'n3',
-            'stage - r': 'rem',
-            'sleep_stage_r': 'rem',
-            'sleep_stage_rem': 'rem',
-            'rem': 'rem',
-            'stage - w': 'wake',
-            'sleep_stage_w': 'wake',
-            'apnea / desats': 'apnea',
-            'oxygen_desaturation': 'desaturation'
-        }
-        df['Label'] = df['Label'].replace(exact_mapping)
-
-        substring_matches = {
-            'desaturation': 'desaturation',
-            'obstructive apnea': 'obstructive-apnea',
-            'obstructive_apnea': 'obstructive-apnea',
-            'obstructiveapnea': 'obstructive-apnea',
-            'mixed apnea': 'mixed-apnea',
-            'mixed_apnea': 'mixed-apnea',
-            'mixedapnea': 'mixed-apnea',
-            'central apnea': 'central-apnea',
-            'central_apnea': 'central-apnea',
-            'centralapnea': 'central-apnea',
-            'hypopnea': 'hypopnea',
-            'rera': 'rera',
-            'arousal':'arousal'
-        }
-        orig = df['Label']
-        result = orig.copy()
-        for k, v in substring_matches.items():
-            mask = orig.str.contains(k, case=False, na=False)
-            result = result.mask(mask, v)
-        df['Label'] = result
-
-        return df
+        return map_hsp_sane_labels(df)

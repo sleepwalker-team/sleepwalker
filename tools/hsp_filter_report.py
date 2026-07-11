@@ -10,16 +10,50 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.datasets.HSP import get_annotated_hsp_edf_files, get_channels, get_hsp_annotation_path
+from sleepwalker.datasets.HSP import (
+    get_annotated_hsp_edf_files,
+    get_channels,
+    get_hsp_annotation_path,
+    map_hsp_sane_labels,
+)
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
 
 DEFAULT_ROOT = "/raid/sleepwalker/hsp"
+SLEEP_LABELS = ["n1", "n2", "n3", "rem"]
+BREATHING_LABELS = ["apnea", "obstructive-apnea", "central-apnea", "mixed-apnea", "hypopnea"]
+TASK_DEFAULTS = {
+    "sleep": {
+        "channels": ["eeg"],
+        "grouped": True,
+        "positive_labels": ["wake", "n1", "n2", "n3", "rem"],
+        "required_any_labels": ["wake", "n1", "n2", "n3", "rem"],
+    },
+    "arousal": {
+        "channels": ["eeg", "eog", "chin_emg"],
+        "grouped": True,
+        "positive_labels": ["arousal"],
+        "required_any_labels": SLEEP_LABELS,
+    },
+    "breathing": {
+        "channels": ["abdomen", "chest", "airflow", "spo2"],
+        "grouped": True,
+        "positive_labels": BREATHING_LABELS,
+        "required_any_labels": SLEEP_LABELS,
+    },
+    "desaturation": {
+        "channels": ["spo2"],
+        "grouped": True,
+        "positive_labels": ["desaturation"],
+        "required_any_labels": SLEEP_LABELS,
+    },
+}
 
 
 def read_config(path: str | None) -> dict[str, Any]:
@@ -34,6 +68,18 @@ def read_config(path: str | None) -> dict[str, Any]:
 
 def expected_annotation_path(edf_path: str) -> str | None:
     return get_hsp_annotation_path(edf_path)
+
+
+def apply_task_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    task = cfg.get("task")
+    if task is None:
+        return cfg
+    if task not in TASK_DEFAULTS:
+        raise ValueError(f"Unknown HSP task '{task}'. Known tasks: {sorted(TASK_DEFAULTS)}")
+
+    for key, value in TASK_DEFAULTS[task].items():
+        cfg.setdefault(key, value)
+    return cfg
 
 
 def requested_channel_groups(cfg: dict[str, Any]) -> dict[str, list[str]]:
@@ -51,15 +97,49 @@ def requested_channel_groups(cfg: dict[str, Any]) -> dict[str, list[str]]:
     return dict(grouped)
 
 
-def diagnose_file(edf_path: str, required: dict[str, list[str]]) -> dict[str, Any]:
+def annotation_label_counts(annotation_path: str) -> dict[str, int]:
+    df = pd.read_csv(annotation_path)
+    df = df.rename(columns={"event": "Label"})
+    if "Label" not in df.columns:
+        raise ValueError(f"Annotation file has no Label/event column: {annotation_path}")
+    df["Label"] = df["Label"].astype(str).str.lower()
+    df = map_hsp_sane_labels(df)
+    return df["Label"].value_counts().sort_index().astype(int).to_dict()
+
+
+def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, Any]) -> dict[str, Any]:
     annotation_path = expected_annotation_path(edf_path)
     if annotation_path is None:
         return {"path": edf_path, "usable": False, "reason": "missing_annotation"}
 
     try:
+        label_counts = annotation_label_counts(annotation_path)
+    except Exception as exc:
+        return {"path": edf_path, "usable": False, "reason": "label_error", "error": repr(exc)}
+
+    labels = set(label_counts)
+    required_any_labels = set(cfg.get("required_any_labels") or [])
+    if required_any_labels and labels.isdisjoint(required_any_labels):
+        return {
+            "path": edf_path,
+            "usable": False,
+            "reason": "missing_required_labels",
+            "annotation_path": annotation_path,
+            "required_any_labels": sorted(required_any_labels),
+            "label_counts": label_counts,
+        }
+
+    try:
         meta = read_edf_meta(edf_path)
     except Exception as exc:
-        return {"path": edf_path, "usable": False, "reason": "meta_error", "error": repr(exc)}
+        return {
+            "path": edf_path,
+            "usable": False,
+            "reason": "meta_error",
+            "error": repr(exc),
+            "annotation_path": annotation_path,
+            "label_counts": label_counts,
+        }
 
     available = set(meta["signals"])
     missing_groups = {
@@ -74,6 +154,8 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]]) -> dict[str, An
             "reason": "missing_required_channel_group",
             "missing_groups": missing_groups,
             "available_channels": sorted(available),
+            "annotation_path": annotation_path,
+            "label_counts": label_counts,
         }
 
     return {
@@ -82,28 +164,47 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]]) -> dict[str, An
         "reason": "usable",
         "annotation_path": annotation_path,
         "available_channels": sorted(available),
+        "label_counts": label_counts,
     }
 
 
-def summarize(records: list[dict[str, Any]], top_channels: int) -> dict[str, Any]:
+def summarize(records: list[dict[str, Any]], top_channels: int, positive_labels: list[str]) -> dict[str, Any]:
     reasons = Counter(record["reason"] for record in records)
     missing_groups = Counter()
     channel_counter = Counter()
+    label_counter = Counter()
+    positive_patient_counter = Counter()
     examples: dict[str, list[str]] = defaultdict(list)
     for record in records:
         for group in record.get("missing_groups", {}):
             missing_groups[group] += 1
         for channel in record.get("available_channels", []):
             channel_counter[channel] += 1
+        for label, count in record.get("label_counts", {}).items():
+            label_counter[label] += count
+            if label in positive_labels and count > 0:
+                positive_patient_counter[label] += 1
         reason = record["reason"]
         if len(examples[reason]) < 5:
             examples[reason].append(record["path"])
 
+    positive_patients_any = 0
+    positive_label_set = set(positive_labels)
+    if positive_label_set:
+        positive_patients_any = sum(
+            any(label in positive_label_set and count > 0 for label, count in record.get("label_counts", {}).items())
+            for record in records
+            if record["reason"] == "usable"
+        )
+
     return {
         "total": len(records),
         "usable": reasons.get("usable", 0),
+        "usable_with_positive_label": positive_patients_any,
         "reasons": dict(reasons),
         "missing_required_groups": dict(missing_groups),
+        "positive_patient_counts": dict(positive_patient_counter),
+        "top_labels": label_counter.most_common(40),
         "top_channels": channel_counter.most_common(top_channels),
         "examples": dict(examples),
     }
@@ -112,6 +213,7 @@ def summarize(records: list[dict[str, Any]], top_channels: int) -> dict[str, Any
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default=None, help="Optional YAML config with HSP root/channels/grouped settings.")
+    parser.add_argument("--task", type=str, choices=sorted(TASK_DEFAULTS), default=None, help="Apply default labels/channels for an HSP task.")
     parser.add_argument("--root", type=str, default=None, help="Override HSP root.")
     parser.add_argument("--channels", nargs="+", default=None, help="Override required HSP channel groups/names.")
     parser.add_argument("--grouped", action="store_true", help="Treat channel groups as grouped model inputs.")
@@ -126,6 +228,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = read_config(args.config)
+    if args.task is not None:
+        cfg["task"] = args.task
     if args.root is not None:
         cfg["root"] = args.root
     if args.channels is not None:
@@ -133,10 +237,11 @@ def main() -> None:
     if args.grouped:
         cfg["grouped"] = True
     cfg.setdefault("root", DEFAULT_ROOT)
-    cfg.setdefault("channels", ["eeg", "eog", "chin_emg"])
-    cfg.setdefault("grouped", False)
     cfg.setdefault("sample_frequency", 100)
     cfg.setdefault("annotated_only", True)
+    cfg = apply_task_defaults(cfg)
+    cfg.setdefault("grouped", False)
+    cfg.setdefault("channels", ["eeg", "eog", "chin_emg"])
 
     annotated_only = bool(cfg.get("annotated_only", True)) and not args.all_edfs
     if annotated_only:
@@ -147,17 +252,21 @@ def main() -> None:
         edf_files = edf_files[: args.max_files]
 
     required = requested_channel_groups(cfg)
-    records = [diagnose_file(edf_path, required) for edf_path in edf_files]
+    positive_labels = list(cfg.get("positive_labels") or [])
+    records = [diagnose_file(edf_path, required, cfg) for edf_path in edf_files]
     payload = {
         "config": {
             "root": cfg["root"],
+            "task": cfg.get("task"),
             "channels": cfg["channels"],
             "grouped": cfg["grouped"],
             "sample_frequency": cfg["sample_frequency"],
             "annotated_only": annotated_only,
+            "required_any_labels": cfg.get("required_any_labels", []),
+            "positive_labels": positive_labels,
         },
         "required_channel_groups": required,
-        "summary": summarize(records, args.top_channels),
+        "summary": summarize(records, args.top_channels, positive_labels),
         "records": records,
     }
 

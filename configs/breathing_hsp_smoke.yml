@@ -1,0 +1,33 @@
+root: /raid/sleepwalker/hsp
+task: breathing
+batch_size: 16
+epochs: 2
+n_samples: 512
+num_workers_dataset: 2
+num_workers_dataloader: 0
+sample_frequency: 100
+target_resolution: "5s"
+stride: "1s"
+grouped: true
+scaler: true
+sleep_percentage: 0.5
+class_weights:
+  apnea: 2.0
+  hypopnea: 2.0
+  regular breathing: 1.0
+channels:
+  - abdomen
+  - chest
+  - airflow
+  - spo2
+model: utime-big
+total_input: "60s"
+val_frac: 0.1
+test_frac: 0.0
+dry: true
+use_mlflow: false
+max_edf_files: 500
+patient_limit: 40
+annotated_only: true
+balance_batches: false
+balance_gamma: 0.75

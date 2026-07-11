@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from functools import partial
 import os
 import random
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, cast
 
 import numpy as np
@@ -799,6 +800,8 @@ class BaseDataset(Dataset, ABC):
             ValueError: If the file cannot produce at least one valid window or
                 appears inconsistent with the configured assumptions.
         """
+        started_at = time.perf_counter()
+        slow_warning_seconds = float(os.environ.get("SLEEPWALKER_SLOW_PATIENT_SECONDS", "20"))
         try:
             artifacts = self._prepare_patient_artifacts(edf_path)
             if artifacts is None:
@@ -822,7 +825,7 @@ class BaseDataset(Dataset, ABC):
                     f"with a total signal length of {artifacts['end'] - artifacts['start']}s"
                 )
 
-            return EDFFile(
+            result = EDFFile(
                 path=edf_path,
                 X=None,
                 channels=list(artifacts["data_df"].columns),
@@ -834,8 +837,16 @@ class BaseDataset(Dataset, ABC):
                 classes=artifacts["classes"].union(artifacts["extra_classes"]),
                 normalizers=artifacts["normalizers"],
             )
+            elapsed = time.perf_counter() - started_at
+            if elapsed >= slow_warning_seconds:
+                logger.warning(
+                    f"Slow patient preparation: {edf_path} took {elapsed:.1f}s "
+                    f"and produced {n_items} windows."
+                )
+            return result
         except Exception as e:
-            logger.warning(f"Cannot read edf file: {edf_path} due to {e}")
+            elapsed = time.perf_counter() - started_at
+            logger.warning(f"Cannot read edf file: {edf_path} after {elapsed:.1f}s due to {e}")
 
             return None #EDFFile(path=edf_path, classes=classes.union(extra_classes))
 

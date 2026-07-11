@@ -24,6 +24,7 @@ from sleepwalker.datasets.ABC import ABC
 from sleepwalker.datasets.Apples import Apples
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.CAP import CAP
+from sleepwalker.datasets.HSP import HSP, get_channels as get_hsp_channels
 from sleepwalker.datasets.ISRUC import ISRUC
 from sleepwalker.datasets.MNC import MNC
 from sleepwalker.datasets.MROS import MROS
@@ -313,6 +314,19 @@ DATASET_CFG = {
         ],
         "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
+    "hsp": {
+        "clazz": HSP,
+        "edf_path": "hsp",
+        "event_mapping": {
+            "wake": "wake",
+            "n1": "n1",
+            "n2": "n2",
+            "n3": "n3",
+            "rem": "rem",
+        },
+        "channel_groups": ["eeg"],
+        "grouped_channel_groups": ["eeg"],
+    },
     "sleepedfx": {
         "clazz": SleepEDFx,
         "edf_path": "sleep-edfx",
@@ -469,6 +483,15 @@ def filter_patients_by_sleep_time(
 
 def build_channel_configs(dataset_name: str, grouped: bool) -> tuple[list[ChannelConfig], list[list[str]] | None]:
     dataset_cfg = DATASET_CFG[dataset_name]
+    if "channel_groups" in dataset_cfg:
+        channel_groups = dataset_cfg["grouped_channel_groups"] if grouped else dataset_cfg["channel_groups"]
+        return get_hsp_channels(
+            channel_groups,
+            grouped=grouped,
+            normalize=True,
+            sample_frequency=SAMPLE_FREQUENCY,
+        ), None
+
     selected_channels = dataset_cfg["grouped_channels"] if grouped else [dataset_cfg["channels"][0]]
     channels = [
         ChannelConfig(
@@ -508,8 +531,10 @@ def build_dataset(dataset_name: str, patients: list[str], grouped: bool, total_i
 def list_patients(dataset_name: str, grouped: bool, dry_run: bool) -> list[str]:
     dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
     patients = get_edf_files_in_repo(dataset_path, recursive=True)
-    if dry_run:
+    if dry_run and dataset_name != "hsp":
         return patients[:2]
+    if dry_run:
+        patients = patients[:50]
 
     channels, rereference = build_channel_configs(dataset_name, grouped)
     dataset = DATASET_CFG[dataset_name]["clazz"](
@@ -531,6 +556,8 @@ def list_patients(dataset_name: str, grouped: bool, dry_run: bool) -> list[str]:
             num_workers=NUM_WORKERS_DATASET,
             label=dataset_name,
         )
+    if dry_run:
+        return filtered[:2]
     return filtered
 
 
@@ -680,6 +707,7 @@ def main():
     model, trainer = build_model_and_trainer(train_dataset, args.model, args.dry)
 
     collate_ignore = ["time", "patient", "dataset"] if hasattr(train_dataset, "datasets") else ["time", "patient"]
+    test_repeats = [1] if args.dry else (GROUPED_TEST_REPEATS if args.grouped else [1])
     run(
         RunCfg(
             experiment_name=experiment_name,
@@ -692,7 +720,7 @@ def main():
             batch_size=BATCH_SIZE,
             n_samples=1_000 if args.dry else N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
-            test_repeats=GROUPED_TEST_REPEATS if args.grouped else [1],
+            test_repeats=test_repeats,
             use_energy_tracker=False,
             use_mlflow=True,
             log_path=os.path.join("results", "sleep"),

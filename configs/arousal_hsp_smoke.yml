@@ -11,15 +11,16 @@ grouped: true
 scaler: true
 clean: true
 arousal_weight: 10
+balance_batches: false
+balance_gamma: 0.75
 channels:
   - eeg
   - eog
   - chin_emg
-  - pulse
 model: utime-big
 total_input: "60s"
 val_frac: 0.1
 dry: true
 use_mlflow: false
-max_edf_files: 200
-max_patients: 20
+max_edf_files: 500
+patient_limit: 40

@@ -47,7 +47,7 @@ def expected_annotation_path(edf_path: str) -> str | None:
 
 def requested_channel_groups(cfg: dict[str, Any]) -> dict[str, list[str]]:
     requested = get_channels(
-        cfg.get("channels", ["eeg", "eog", "chin_emg", "ECG"]),
+        cfg.get("channels", ["eeg", "eog", "chin_emg"]),
         grouped=bool(cfg.get("grouped", False)),
         normalize=False,
         sample_frequency=float(cfg.get("sample_frequency", 100)),
@@ -137,7 +137,7 @@ def main() -> None:
     if args.grouped:
         cfg["grouped"] = True
     cfg.setdefault("root", DEFAULT_ROOT)
-    cfg.setdefault("channels", ["eeg", "eog", "chin_emg", "pulse"])
+    cfg.setdefault("channels", ["eeg", "eog", "chin_emg"])
     cfg.setdefault("grouped", False)
     cfg.setdefault("sample_frequency", 100)
 

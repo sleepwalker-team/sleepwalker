@@ -57,9 +57,11 @@ DEFAULT_CONFIG = {
     "target_resolution": "1s",
     "stride": "1s",
     "grouped": False,
-    "channels": ["eeg", "eog", "chin_emg", "pulse"],
+    "channels": ["eeg", "eog", "chin_emg"],
     "scaler": False,
     "arousal_weight": 1,
+    "balance_batches": False,
+    "balance_gamma": 0.75,
     "model": "utime-big",
     "id": None,
     "total_input": "60s",
@@ -67,7 +69,7 @@ DEFAULT_CONFIG = {
     "dry": False,
     "use_mlflow": True,
     "max_edf_files": None,
-    "max_patients": None,
+    "patient_limit": None,
 }
 
 
@@ -217,9 +219,9 @@ def list_patients(cfg: dict) -> list[str]:
     logger.progress_close()
     logger.info(f"Collected patient stats for {len(patients)}/{len(edf_files)} patients.")
 
-    if cfg.get("max_patients") is not None:
-        patients = patients[: int(cfg["max_patients"])]
-    return patients[:10] if cfg["dry"] else patients
+    if cfg.get("patient_limit") is not None:
+        patients = patients[: int(cfg["patient_limit"])]
+    return patients
 
 def build_model_and_trainer(train_dataset, cfg: dict):
     n_channels = len(train_dataset.get_input_channels())
@@ -319,8 +321,8 @@ def build_model_and_trainer(train_dataset, cfg: dict):
         loss_function=torch.nn.functional.cross_entropy,#torch.nn.functional.binary_cross_entropy_with_logits,
         save_every=10,
         # loss_mode="inverse",
-        balance_batches=True,
-        balance_gamma=0.75,
+        balance_batches=cfg.get("balance_batches", False),
+        balance_gamma=cfg.get("balance_gamma", 0.75),
         class_weights={"no_arousal":1, "arousal":cfg["arousal_weight"]}
     )
     return model, trainer
@@ -404,10 +406,12 @@ def main():
         "model": cfg["model"],
         "scaler": cfg["scaler"],
         "arousal_weight": cfg["arousal_weight"],
+        "balance_batches": cfg.get("balance_batches", False),
+        "balance_gamma": cfg.get("balance_gamma", 0.75),
         "epochs": trainer_cfg["epochs"],
         "num_workers_dataset": cfg["num_workers_dataset"],
         "max_edf_files": cfg.get("max_edf_files"),
-        "max_patients": cfg.get("max_patients"),
+        "patient_limit": cfg.get("patient_limit"),
     }
     expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 

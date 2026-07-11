@@ -1,9 +1,0 @@
-script: train_arousal_hsp.py
-args:
-  config: configs/experts/arousal_hsp_train.yml
-  id: hsp-arousal-sweep
-sweep:
-  args.id:
-    - hsp-arousal-utime-big-60s-w10
-    - hsp-arousal-utime-big-90s-w10
-    - hsp-arousal-utime-huge-60s-w10

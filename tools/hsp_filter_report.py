@@ -121,17 +121,6 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, 
             "required_any_labels": sorted(required_any_labels),
             "label_counts": label_counts,
         }
-    positive_labels = set(cfg.get("positive_labels") or [])
-    if cfg.get("require_positive_labels", False) and positive_labels.isdisjoint(labels):
-        return {
-            "path": edf_path,
-            "usable": False,
-            "reason": "missing_positive_labels",
-            "annotation_path": annotation_path,
-            "positive_labels": sorted(positive_labels),
-            "label_counts": label_counts,
-        }
-
     try:
         meta = read_edf_meta(edf_path)
     except Exception as exc:
@@ -171,14 +160,14 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, 
     }
 
 
-def summarize(records: list[dict[str, Any]], top_channels: int, positive_labels: list[str]) -> dict[str, Any]:
-    reasons = Counter(record["reason"] for record in records)
+def summarize(edf_file_reports: list[dict[str, Any]], top_channels: int, positive_labels: list[str]) -> dict[str, Any]:
+    reasons = Counter(record["reason"] for record in edf_file_reports)
     missing_groups = Counter()
     channel_counter = Counter()
     label_counter = Counter()
-    positive_patient_counter = Counter()
+    positive_edf_file_counter = Counter()
     examples: dict[str, list[str]] = defaultdict(list)
-    for record in records:
+    for record in edf_file_reports:
         for group in record.get("missing_groups", {}):
             missing_groups[group] += 1
         for channel in record.get("available_channels", []):
@@ -186,27 +175,27 @@ def summarize(records: list[dict[str, Any]], top_channels: int, positive_labels:
         for label, count in record.get("label_counts", {}).items():
             label_counter[label] += count
             if label in positive_labels and count > 0:
-                positive_patient_counter[label] += 1
+                positive_edf_file_counter[label] += 1
         reason = record["reason"]
         if len(examples[reason]) < 5:
             examples[reason].append(record["path"])
 
-    positive_patients_any = 0
+    positive_edf_files_any = 0
     positive_label_set = set(positive_labels)
     if positive_label_set:
-        positive_patients_any = sum(
+        positive_edf_files_any = sum(
             any(label in positive_label_set and count > 0 for label, count in record.get("label_counts", {}).items())
-            for record in records
+            for record in edf_file_reports
             if record["reason"] == "usable"
         )
 
     return {
-        "total": len(records),
-        "usable": reasons.get("usable", 0),
-        "usable_with_positive_label": positive_patients_any,
+        "total_edf_files": len(edf_file_reports),
+        "usable_edf_files": reasons.get("usable", 0),
+        "usable_edf_files_with_positive_mapped_label": positive_edf_files_any,
         "reasons": dict(reasons),
         "missing_required_groups": dict(missing_groups),
-        "positive_patient_counts": dict(positive_patient_counter),
+        "positive_edf_file_counts": dict(positive_edf_file_counter),
         "top_labels": label_counter.most_common(40),
         "top_channels": channel_counter.most_common(top_channels),
         "examples": dict(examples),
@@ -227,11 +216,6 @@ def main() -> None:
         help="Inspect all EDFs instead of only same-record annotation-paired EDFs.",
     )
     parser.add_argument("--top-channels", type=int, default=40)
-    parser.add_argument(
-        "--require-positive-labels",
-        action="store_true",
-        help="Require at least one configured positive label in addition to required labels/channels.",
-    )
     parser.add_argument("--json-out", type=str, default=None, help="Optional path for detailed JSON output.")
     args = parser.parse_args()
 
@@ -244,8 +228,6 @@ def main() -> None:
         cfg["channels"] = args.channels
     if args.grouped:
         cfg["grouped"] = True
-    if args.require_positive_labels:
-        cfg["require_positive_labels"] = True
     cfg.setdefault("root", DEFAULT_ROOT)
     cfg.setdefault("sample_frequency", 100)
     cfg.setdefault("annotated_only", True)
@@ -263,12 +245,7 @@ def main() -> None:
 
     required = requested_channel_groups(cfg)
     positive_labels = list(cfg.get("positive_labels") or [])
-    if cfg.get("require_positive_labels", False) and not positive_labels:
-        raise ValueError(
-            "require_positive_labels=True needs configured positive_labels. "
-            "Pass --task or set task/positive_labels in the config."
-        )
-    records = [diagnose_file(edf_path, required, cfg) for edf_path in edf_files]
+    edf_file_reports = [diagnose_file(edf_path, required, cfg) for edf_path in edf_files]
     payload = {
         "config": {
             "root": cfg["root"],
@@ -278,15 +255,14 @@ def main() -> None:
             "sample_frequency": cfg["sample_frequency"],
             "annotated_only": annotated_only,
             "required_any_labels": cfg.get("required_any_labels", []),
-            "positive_labels": positive_labels,
-            "require_positive_labels": bool(cfg.get("require_positive_labels", False)),
+            "positive_mapped_labels": positive_labels,
         },
         "required_channel_groups": required,
-        "summary": summarize(records, args.top_channels, positive_labels),
-        "records": records,
+        "summary": summarize(edf_file_reports, args.top_channels, positive_labels),
+        "edf_file_reports": edf_file_reports,
     }
 
-    print(json.dumps({k: v for k, v in payload.items() if k != "records"}, indent=2, sort_keys=True))
+    print(json.dumps({k: v for k, v in payload.items() if k != "edf_file_reports"}, indent=2, sort_keys=True))
     if args.json_out is not None:
         output_path = Path(args.json_out)
         output_path.parent.mkdir(parents=True, exist_ok=True)

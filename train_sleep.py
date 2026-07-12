@@ -51,8 +51,11 @@ from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
-torch.set_num_threads(2)
-torch.set_num_interop_threads(1)
+try:
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 mp.set_sharing_strategy("file_system")
 
 TARGET_CLASSES = ["wake", "n1", "n2", "n3", "rem"]
@@ -505,7 +508,7 @@ def build_channel_configs(dataset_name: str, grouped: bool) -> tuple[list[Channe
     return channels, rereference
 
 
-def build_dataset(dataset_name: str, patients: list[str], grouped: bool, total_input: str):
+def build_dataset_template(dataset_name: str, grouped: bool, total_input: str):
     if dataset_name not in DATASET_CFG:
         raise ValueError(f"Unknown sleep staging dataset '{dataset_name}'.")
 
@@ -523,6 +526,11 @@ def build_dataset(dataset_name: str, patients: list[str], grouped: bool, total_i
         rereference=rereference,
     )
     dataset.classes = list(TARGET_CLASSES)
+    return dataset
+
+
+def build_dataset(dataset_name: str, patients: list[str], grouped: bool, total_input: str):
+    dataset = build_dataset_template(dataset_name, grouped, total_input)
     dataset.initialize(patients, NUM_WORKERS_DATASET)
     logger.info(f"{dataset_name}: loaded {len(patients)} patients")
     return dataset
@@ -611,6 +619,24 @@ def build_model_and_trainer(train_dataset, model_name: str, dry_run: bool):
         balance_batches=balance_batches,
     )
     return model, trainer
+
+
+def build_expert_components(cfg: dict):
+    model_name = str(cfg.get("model", "sleeptransformer"))
+    dataset_name = str(cfg.get("dataset", "hsp"))
+    grouped = bool(cfg.get("grouped", True))
+    dry_run = bool(cfg.get("dry", False))
+    model_cfg = MODEL_CFG[model_name]
+    total_input = str(cfg.get("total_input", model_cfg["total_input"]))
+    dataset = build_dataset_template(dataset_name, grouped, total_input)
+    model, trainer = build_model_and_trainer(dataset, model_name, dry_run)
+    if "epochs" in cfg:
+        trainer.epochs = int(cfg["epochs"])
+    return {
+        "model": model,
+        "trainer": trainer,
+        "dataset_template": dataset.to_unlabelled(),
+    }
 
 
 def build_dataset_parts(args, train_total_input: str, test_total_input: str):
@@ -705,6 +731,19 @@ def main():
     train_parts, val_parts, test_parts = build_dataset_parts(args, train_total_input, test_total_input)
     train_dataset = combine_datasets(train_parts)
     model, trainer = build_model_and_trainer(train_dataset, args.model, args.dry)
+    expert_builder_config = {
+        "model": args.model,
+        "dataset": args.train[0] if len(args.train) == 1 else "mixed",
+        "grouped": args.grouped,
+        "dry": args.dry,
+        "epochs": trainer.epochs,
+        "total_input": train_total_input,
+    }
+    expert_dataset_template = (
+        build_expert_components(expert_builder_config)["dataset_template"]
+        if expert_builder_config["dataset"] != "mixed"
+        else train_dataset.to_unlabelled()
+    )
 
     collate_ignore = ["time", "patient", "dataset"] if hasattr(train_dataset, "datasets") else ["time", "patient"]
     test_repeats = [1] if args.dry else (GROUPED_TEST_REPEATS if args.grouped else [1])
@@ -727,6 +766,14 @@ def main():
             tags={"model": args.model},
             collate_fn=partial(batch_collate, ignore_list=collate_ignore),
             meta_data=vars(args),
+            expert_name=experiment_name,
+            expert_task="sleep",
+            expert_builder={
+                "module": "train_sleep",
+                "function": "build_expert_components",
+                "config": expert_builder_config,
+            },
+            expert_dataset_template=expert_dataset_template,
         )
     )
 

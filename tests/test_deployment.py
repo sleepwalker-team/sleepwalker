@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sleepwalker.deployment import load_expert_package, save_expert_package
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
@@ -111,6 +112,8 @@ def build_tiny_components(config: dict):
     preprocessors = None
     if config.get("robust_scaler"):
         preprocessors = [RobustScaler(channels=list(config.get("scaler_channels", range(int(config["n_channels"])))))]
+    if config.get("normalize"):
+        preprocessors = [Normalize()]
     model = TinyModel(
         ts_len=int(config["ts_len"]),
         n_channels=int(config["n_channels"]),
@@ -312,6 +315,36 @@ def test_load_expert_package_restores_warmed_preprocessor_state():
 
         assert loaded.model.preprocessors[0].n.shape == model.preprocessors[0].n.shape
         assert torch.allclose(loaded.model.preprocessors[0].marker_heights, model.preprocessors[0].marker_heights)
+
+
+def test_load_expert_package_restores_normalize_running_state():
+    cfg, _ = _build_components()
+    cfg = {**cfg, "normalize": True}
+    components = build_tiny_components(cfg)
+    model = components["model"]
+
+    model.preprocessors[0].update(torch.randn(3, 4, 2))
+    assert model.preprocessors[0].mean is not None
+    assert model.preprocessors[0].M2 is not None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        package_path = Path(tmpdir) / "tiny_expert"
+        save_expert_package(
+            package_path,
+            expert_name="tiny",
+            task="unit",
+            model=model,
+            trainer=components["trainer"],
+            dataset_template=components["dataset_template"],
+            builder={"module": __name__, "function": "build_tiny_components", "config": cfg},
+        )
+
+        loaded = load_expert_package(package_path, map_location="cpu")
+
+        assert loaded.model.preprocessors[0].mean is not None
+        assert loaded.model.preprocessors[0].M2 is not None
+        assert torch.allclose(loaded.model.preprocessors[0].mean, model.preprocessors[0].mean)
+        assert torch.allclose(loaded.model.preprocessors[0].M2, model.preprocessors[0].M2)
 
 
 def test_loaded_expert_rejects_dataset_contract_mismatch():

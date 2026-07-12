@@ -1,0 +1,21 @@
+root: /raid/sleepwalker/hsp
+seed: sleepwalker-paper-v0
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+limits:
+  train_edf_files: 20
+  val_edf_files: 2
+  test_edf_files: 1
+  test_windows: 512
+training:
+  epochs: 1
+  n_samples: 64
+  batch_size: 16
+  num_workers_dataset: 2
+  num_workers_dataloader: 0
+  use_mlflow: false
+  device: cuda:0
+  warmup_device: cpu
+output_dir: results/paper_pipeline/smoke

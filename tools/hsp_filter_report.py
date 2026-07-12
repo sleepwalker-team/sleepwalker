@@ -33,24 +33,28 @@ TASK_DEFAULTS = {
         "grouped": True,
         "positive_labels": ["wake", "n1", "n2", "n3", "rem"],
         "required_any_labels": ["wake", "n1", "n2", "n3", "rem"],
+        "min_duration_s": 1800,
     },
     "arousal": {
         "channels": ["eeg", "eog", "chin_emg"],
         "grouped": True,
         "positive_labels": ["arousal"],
         "required_any_labels": SLEEP_LABELS,
+        "min_duration_s": 1800,
     },
     "breathing": {
         "channels": ["abdomen", "chest", "airflow", "spo2"],
         "grouped": True,
         "positive_labels": BREATHING_LABELS,
         "required_any_labels": SLEEP_LABELS,
+        "min_duration_s": 1800,
     },
     "desaturation": {
         "channels": ["spo2"],
         "grouped": True,
         "positive_labels": ["desaturation"],
         "required_any_labels": SLEEP_LABELS,
+        "min_duration_s": 1800,
     },
 }
 
@@ -129,6 +133,19 @@ def diagnose_file(edf_path: str, required: dict[str, list[str]], cfg: dict[str, 
             "usable": False,
             "reason": "meta_error",
             "error": repr(exc),
+            "annotation_path": annotation_path,
+            "label_counts": label_counts,
+        }
+
+    min_duration_s = cfg.get("min_duration_s")
+    if min_duration_s is not None and float(meta["duration_s"]) < float(min_duration_s):
+        return {
+            "path": edf_path,
+            "usable": False,
+            "reason": "too_short",
+            "duration_s": float(meta["duration_s"]),
+            "min_duration_s": float(min_duration_s),
+            "available_channels": sorted(meta["signals"]),
             "annotation_path": annotation_path,
             "label_counts": label_counts,
         }

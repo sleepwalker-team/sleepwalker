@@ -44,8 +44,11 @@ from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
-torch.set_num_threads(2)
-torch.set_num_interop_threads(1)
+try:
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 mp.set_sharing_strategy("file_system")
 
 ROOT = "/cephfs_projects/sleepwalker/hsp"
@@ -61,10 +64,10 @@ DEFAULT_CONFIG = {
     "sample_frequency": 100,
     "target_resolution": "1s",
     "stride": "1s",
-    "grouped": False,
+    "grouped": True,
     "channels": ["eeg", "eog", "chin_emg"],
-    "scaler": False,
-    "arousal_weight": 1,
+    "scaler": True,
+    "arousal_weight": 10,
     "balance_batches": False,
     "balance_gamma": 0.75,
     "model": "utime-big",
@@ -405,7 +408,7 @@ def main():
         "target_resolution": cfg["target_resolution"],
         "stride": cfg["stride"],
         "channels": list(cfg["channels"]),
-        "clean": cfg["clean"],
+        "clean": bool(cfg.get("clean", False)),
         "grouped": cfg["grouped"],
         "total_input": cfg["total_input"],
         "model": cfg["model"],

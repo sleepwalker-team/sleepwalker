@@ -364,9 +364,9 @@ def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any])
     if preprocessors is None:
         return
 
-    pattern = re.compile(r"^preprocessors\.(\d+)\.n$")
+    robust_pattern = re.compile(r"^preprocessors\.(\d+)\.n$")
     for key, saved in state_dict.items():
-        match = pattern.match(key)
+        match = robust_pattern.match(key)
         if match is None or not hasattr(saved, "numel") or int(saved.numel()) == 0:
             continue
         idx = int(match.group(1))
@@ -380,6 +380,20 @@ def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any])
             continue
         dummy = torch.zeros(1, 1, int(saved.numel()), device=saved.device, dtype=torch.float32)
         preprocessor.push(dummy)
+
+    normalize_pattern = re.compile(r"^preprocessors\.(\d+)\.(mean|M2)$")
+    for key, saved in state_dict.items():
+        match = normalize_pattern.match(key)
+        if match is None or not torch.is_tensor(saved):
+            continue
+        idx = int(match.group(1))
+        buffer_name = match.group(2)
+        if idx >= len(preprocessors):
+            continue
+        preprocessor = preprocessors[idx]
+        if getattr(preprocessor, buffer_name, None) is not None:
+            continue
+        setattr(preprocessor, buffer_name, torch.zeros_like(saved))
 
 
 def load_expert_package(

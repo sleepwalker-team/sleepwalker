@@ -9,6 +9,11 @@ limits:
   val_edf_files: 2
   test_edf_files: 1
   test_windows: 512
+  external_edf_files: 1
+  external_scan_edf_files: 20
+  fusion_train_edf_files: 2
+  fusion_test_edf_files: 1
+  fusion_test_windows: 256
 training:
   epochs: 1
   n_samples: 64

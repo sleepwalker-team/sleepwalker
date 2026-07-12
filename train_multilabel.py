@@ -376,6 +376,15 @@ def build_model(dataset, fusion: str = "metamodel"):
             input_channels=input_channels,
             models=entries,
         )
+    elif fusion == "stacking":
+        model = MetaModel(
+            task_config=normalized_task_config,
+            input_channels=input_channels,
+            models=entries,
+        )
+        for entry in entries:
+            for parameter in entry.model.parameters():
+                parameter.requires_grad_(False)
     elif fusion == "structured-interfaces":
         model = StructuredExpertInterfaceMetaModel(
             task_config=normalized_task_config,
@@ -385,6 +394,23 @@ def build_model(dataset, fusion: str = "metamodel"):
                 ExpertInterfaceEdge(source=1, target=0, bottleneck_dim=8),
                 ExpertInterfaceEdge(source=0, target=1, bottleneck_dim=8),
             ],
+        )
+    elif fusion == "monolithic":
+        monolithic_model = UTime(
+            ts_len=dataset.get_timeseries_len(),
+            n_channels=len(input_channels),
+            classes=None,
+            sampling_frequency="0.01s",
+            channel=[16, 32, 64, 128],
+            maxpool=[10, 8, 6, 4],
+            kernel=[5, 5, 5, 5],
+            norm="channel",
+            mlp_size=64,
+        )
+        model = MetaModel(
+            task_config=normalized_task_config,
+            input_channels=input_channels,
+            models=[MetaModelEntry(monolithic_model, input_channels)],
         )
     else:
         raise ValueError(f"Did not recognize fusion mode {fusion}.")
@@ -429,7 +455,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry", action="store_true")
-    parser.add_argument("--fusion", choices=["metamodel", "structured-interfaces"], default="metamodel")
+    parser.add_argument("--fusion", choices=["metamodel", "stacking", "structured-interfaces", "monolithic"], default="metamodel")
     parser.add_argument("--id", type=str, default="")
     parser.add_argument("--epochs", type=int, default=epochs)
     parser.add_argument("--n_samples", type=int, default=n_samples)

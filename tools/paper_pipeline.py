@@ -22,11 +22,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
+from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(TOOLS_ROOT))
 
 from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.datasets.HSP import (
     get_annotated_hsp_edf_files,
     get_hsp_annotation_label_counts,
@@ -42,6 +46,10 @@ from sleepwalker.trainer.utils.metrics import (
 from sleepwalker.utils import logger
 
 import train_arousal_hsp
+import train_arousal
+import train_breathing
+import train_desaturation
+import train_multilabel
 import train_event_hsp
 import train_sleep
 from hsp_filter_report import TASK_DEFAULTS, apply_task_defaults, requested_channel_groups
@@ -247,7 +255,19 @@ def latest_final_package(log_path: Path, experiment_name: str) -> str | None:
     final_dir = log_path / experiment_name / "final"
     if not final_dir.exists():
         return None
-    candidates = sorted(path for path in final_dir.iterdir() if path.is_dir())
+    candidates = []
+    for path in sorted(final_dir.iterdir()):
+        if not path.is_dir():
+            continue
+        manifest_path = path / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if manifest.get("expert_name") == experiment_name:
+            candidates.append(path)
     return str(candidates[-1]) if candidates else None
 
 
@@ -475,6 +495,262 @@ def run_summary(task: str, experiment_name: str, log_path: Path, result) -> dict
     }
 
 
+def failure_summary(method: str, task: str, dataset: str, model: str, error: Exception) -> dict[str, Any]:
+    return {
+        "method": method,
+        "task": task,
+        "dataset": dataset,
+        "model": model,
+        "status": "failed",
+        "error": f"{type(error).__name__}: {error}",
+    }
+
+
+def evaluate_loaded_expert(
+    summary: dict[str, Any],
+    dataset_name: str,
+    dataset,
+    cfg: dict[str, Any],
+    *,
+    max_windows_key: str = "test_windows",
+) -> dict[str, Any]:
+    package_path = summary.get("package_path")
+    if not package_path:
+        raise ValueError(f"Missing package path for task {summary.get('task')}.")
+    loaded = load_expert_package(package_path, map_location="cpu")
+    loaded.trainer.device = str(cfg.get("training", {}).get("device", "cuda:0"))
+    if not hasattr(loaded.trainer, "steps"):
+        loaded.trainer.steps = {"train": 0, "val": 0, "test": 0}
+    if not hasattr(loaded.trainer, "epoch_step"):
+        loaded.trainer.epoch_step = 0
+    loaded.model.to(loaded.trainer.device)
+    dataset = limited_test_dataset(dataset, {"limits": {"test_windows": cfg.get("limits", {}).get(max_windows_key)}})
+    if len(dataset) == 0:
+        raise ValueError(f"No evaluable windows for {dataset_name}/{summary['task']} under the current smoke cap.")
+    loader = DataLoader(
+        dataset,
+        batch_size=int(cfg["training"]["batch_size"]),
+        shuffle=False,
+        num_workers=int(cfg["training"]["num_workers_dataloader"]),
+        collate_fn=batch_collate,
+        drop_last=False,
+        pin_memory=True,
+    )
+    loss, cm = loaded.trainer.test(loaded.model, loader)
+    return {
+        "method": "independent_external",
+        "task": summary["task"],
+        "dataset": dataset_name,
+        "model": summary.get("package_model") or type(loaded.model).__name__,
+        "test_records": [
+            {
+                "model": summary.get("package_model") or type(loaded.model).__name__,
+                "dataset": dataset_name,
+                "test_loss": loss,
+                "test_cm": cm,
+                "classes": dataset.get_classes(),
+            }
+        ],
+        "package_reload_ok": True,
+        "package_path": package_path,
+        "status": "ok",
+    }
+
+
+def ruhrland_sleep_dataset(cfg: dict[str, Any]):
+    train_sleep.NUM_WORKERS_DATASET = int(cfg["training"]["num_workers_dataset"])
+    dataset_path = REPO_ROOT / train_sleep.DATASET_ROOT / train_sleep.DATASET_CFG["ruhrland2024"]["edf_path"]
+    patients = []
+    channel_cfgs, _ = train_sleep.build_channel_configs("ruhrland2024", grouped=True)
+    required_groups: dict[str, list[str]] = {}
+    for channel_cfg in channel_cfgs:
+        required_groups.setdefault(channel_cfg.group or channel_cfg.name, []).append(channel_cfg.name)
+    for edf_path in get_edf_files_in_repo(str(dataset_path), recursive=True):
+        try:
+            available = set(read_edf_meta(edf_path)["signals"])
+        except Exception:
+            continue
+        if all(any(name in available for name in names) for names in required_groups.values()):
+            patients.append(edf_path)
+        if len(patients) >= int(cfg.get("limits", {}).get("external_edf_files", 1)):
+            break
+    patients = limited(patients, cfg.get("limits", {}).get("external_edf_files"))
+    total_input = train_sleep.MODEL_CFG["sleeptransformer"]["total_input"]
+    return train_sleep.build_dataset("ruhrland2024", patients, grouped=True, total_input=total_input)
+
+
+def ruhrland_arousal_dataset(cfg: dict[str, Any]):
+    task_cfg = dict(train_arousal.DEFAULT_CONFIG)
+    task_cfg.update(
+        {
+            "dry": False,
+            "grouped": True,
+            "channels": ["eeg", "eog", "chin_emg"],
+            "scaler": True,
+            "num_workers_dataset": int(cfg["training"]["num_workers_dataset"]),
+            "num_workers_dataloader": int(cfg["training"]["num_workers_dataloader"]),
+        }
+    )
+    patients = train_arousal.list_patients(task_cfg["test_root"], task_cfg)
+    patients = limited(patients, cfg.get("limits", {}).get("external_edf_files"))
+    return train_arousal.build_dataset(patients, task_cfg)
+
+
+def ruhrland_breathing_dataset(cfg: dict[str, Any]):
+    train_breathing.NUM_WORKERS_DATASET = int(cfg["training"]["num_workers_dataset"])
+    train_breathing.SAMPLE_FREQUENCY = int(train_event_hsp.DEFAULT_CONFIG["sample_frequency"])
+    limits = cfg.get("limits", {})
+    task_cfg = {
+        "channels": ["Chest", "Abdomen", "Saturation", "Pulse Waveform"],
+        "grouped": True,
+        "sample_frequency": train_breathing.SAMPLE_FREQUENCY,
+        "dry": False,
+    }
+    candidates = train_breathing.list_patients(
+        train_breathing.TEST_ROOT,
+        task_cfg["channels"],
+        dry_run=False,
+        pap=False,
+    )
+    scan_limit = int(limits.get("external_scan_edf_files", max(10, int(limits.get("external_edf_files", 1)))))
+    target_patients = int(limits.get("external_edf_files", 1))
+    selected = []
+    for patient in candidates[:scan_limit]:
+        try:
+            dataset = train_breathing.build_dataset(
+                patients=[patient],
+                channels=task_cfg["channels"],
+                total_input=train_event_hsp.TASKS["breathing"]["total_input"],
+                include_pap=False,
+            )
+        except Exception:
+            continue
+        if len(dataset) == 0:
+            continue
+        selected.append(patient)
+        if len(selected) >= target_patients:
+            break
+    if not selected:
+        raise ValueError(
+            f"No evaluable Ruhrland2024 breathing EDF files among the first {min(scan_limit, len(candidates))} candidates."
+        )
+    return train_breathing.build_dataset(
+        patients=selected,
+        channels=task_cfg["channels"],
+        total_input=train_event_hsp.TASKS["breathing"]["total_input"],
+        include_pap=False,
+    )
+
+
+def ruhrland_desaturation_dataset(cfg: dict[str, Any]):
+    train_desaturation.NUM_WORKERS_DATASET = int(cfg["training"]["num_workers_dataset"])
+    patients = train_desaturation.list_patients(train_desaturation.TEST_ROOT, ["Saturation"], dry_run=False)
+    patients = limited(patients, cfg.get("limits", {}).get("external_edf_files"))
+    return train_desaturation.build_dataset(
+        patients=patients,
+        channels=["Saturation"],
+        sample_frequency=int(train_event_hsp.DEFAULT_CONFIG["sample_frequency"]),
+        stride=train_event_hsp.TASKS["desaturation"]["stride"],
+        total_input=train_event_hsp.TASKS["desaturation"]["total_input"],
+        target_resolution=train_event_hsp.TASKS["desaturation"]["target_resolution"],
+        sleep_percentage=float(train_event_hsp.DEFAULT_CONFIG["sleep_percentage"]),
+        num_workers_dataset=int(cfg["training"]["num_workers_dataset"]),
+    )
+
+
+def evaluate_external_datasets(summaries: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    builders = {
+        "sleep": ("Ruhrland2024", ruhrland_sleep_dataset),
+        "arousal": ("Ruhrland2024", ruhrland_arousal_dataset),
+        "breathing": ("Ruhrland2024", ruhrland_breathing_dataset),
+        "desaturation": ("Ruhrland2024", ruhrland_desaturation_dataset),
+    }
+    out = []
+    for summary in summaries:
+        task = summary["task"]
+        dataset_name, builder = builders[task]
+        try:
+            dataset = builder(cfg)
+            out.append(evaluate_loaded_expert(summary, dataset_name, dataset, cfg))
+        except Exception as exc:
+            out.append(failure_summary("independent_external", task, dataset_name, summary.get("package_model") or "", exc))
+    return out
+
+
+def train_fusion_smoke(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    training = cfg["training"]
+    limits = cfg.get("limits", {})
+    train_multilabel.num_workers_dataset = int(training["num_workers_dataset"])
+    train_multilabel.num_workers_dataloader = int(training["num_workers_dataloader"])
+    train_multilabel.enable_sample_quality_filter = False
+
+    def build_capped_multilabel_dataset(purpose: str, limit_key: str):
+        patients = train_multilabel.list_split_patients(purpose, dry_run=False)
+        patients = limited(patients, limits.get(limit_key))
+        dataset = train_multilabel.build_dataset()
+        dataset.initialize(patients, int(training["num_workers_dataset"]))
+        return dataset
+
+    summaries = []
+    for fusion in ["monolithic", "stacking", "metamodel", "structured-interfaces"]:
+        experiment_name = f"paper_fusion_{fusion}_ruhrland_smoke"
+        log_path = Path(cfg["output_dir"]) / "fusion"
+        try:
+            train_dataset = build_capped_multilabel_dataset("train", "fusion_train_edf_files")
+            test_dataset = build_capped_multilabel_dataset("test", "fusion_test_edf_files")
+            test_dataset = limited_test_dataset(test_dataset, {"limits": {"test_windows": limits.get("fusion_test_windows")}})
+            trainer = train_multilabel.build_trainer(
+                int(training["epochs"]),
+                device=str(training.get("device", "cuda:0")),
+                warmup_device=str(training.get("warmup_device", "cpu")),
+            )
+            trainer.save_every = 1
+            model = train_multilabel.build_model(train_dataset, fusion=fusion)
+            builder_config = {
+                "fusion": fusion,
+                "epochs": int(training["epochs"]),
+                "device": str(training.get("device", "cuda:0")),
+                "warmup_device": str(training.get("warmup_device", "cpu")),
+            }
+            result = run(
+                RunCfg(
+                    experiment_name=experiment_name,
+                    model_name=fusion,
+                    model=model,
+                    trainer=trainer,
+                    train_datasets=[train_dataset],
+                    val_datasets=[],
+                    test_datasets=[("Ruhrland2024", test_dataset)],
+                    batch_size=int(training["batch_size"]),
+                    n_samples=int(training["n_samples"]),
+                    num_workers_dataloader=int(training["num_workers_dataloader"]),
+                    test_repeats=[1],
+                    use_energy_tracker=False,
+                    use_mlflow=bool(training.get("use_mlflow", False)),
+                    log_path=str(log_path),
+                    tags={"method": fusion, "dataset": "ruhrland"},
+                    collate_fn=batch_collate,
+                    meta_data={"pipeline": "paper-smoke", "method": fusion, "dataset": "ruhrland"},
+                    expert_name=experiment_name,
+                    expert_task="multilabel",
+                    expert_builder={
+                        "module": "train_multilabel",
+                        "function": "build_expert_components",
+                        "config": builder_config,
+                    },
+                    expert_dataset_template=train_multilabel.build_expert_components(builder_config)["dataset_template"],
+                )
+            )
+            summary = run_summary("multitask", experiment_name, log_path, result)
+            summary["method"] = fusion
+            summary["dataset"] = "Ruhrland2024"
+            summary["status"] = "ok"
+            summaries.append(summary)
+        except Exception as exc:
+            summaries.append(failure_summary(fusion, "multitask", "Ruhrland2024", fusion, exc))
+    return summaries
+
+
 def _summary_can_resume(summary: dict[str, Any]) -> bool:
     package_path = summary.get("package_path")
     if not package_path:
@@ -511,42 +787,120 @@ def train_smoke(split: dict[str, Any], cfg: dict[str, Any], output_dir: Path | N
     return summaries
 
 
+def metrics_from_cm(cm: Any) -> dict[str, float]:
+    cm = np.asarray(cm)
+    total = cm.sum()
+    return {
+        "accuracy": float(cm.trace() / total) if total > 0 else 0.0,
+        "macro_f1": float(f1_score_from_confusion_matrix(cm, macro=True)) if total > 0 else 0.0,
+        "kappa": float(cohen_kappa_from_confusion_matrix(cm)) if total > 0 else 0.0,
+    }
+
+
+def record_rows(summary: dict[str, Any], record: dict[str, Any], method: str) -> list[dict[str, Any]]:
+    cm = record.get("test_cm")
+    if isinstance(cm, dict):
+        rows = []
+        task_metrics = []
+        for task, task_cm in cm.items():
+            metrics = metrics_from_cm(task_cm)
+            task_metrics.append(metrics)
+            rows.append(
+                {
+                    "method": method,
+                    "task": task,
+                    "model": record.get("model", summary.get("package_model") or ""),
+                    "dataset": record.get("dataset", summary.get("dataset", "HSP")),
+                    "test_loss": float(record["test_loss"]),
+                    "kappa": metrics["kappa"],
+                    "accuracy": metrics["accuracy"],
+                    "macro_f1": metrics["macro_f1"],
+                    "package_reload_ok": summary.get("package_reload_ok", ""),
+                    "package_path": summary.get("package_path") or "",
+                    "status": summary.get("status", "ok"),
+                    "error": summary.get("error", ""),
+                }
+            )
+        if task_metrics:
+            rows.append(
+                {
+                    "method": method,
+                    "task": "mean",
+                    "model": record.get("model", summary.get("package_model") or ""),
+                    "dataset": record.get("dataset", summary.get("dataset", "HSP")),
+                    "test_loss": float(record["test_loss"]),
+                    "kappa": float(np.mean([m["kappa"] for m in task_metrics])),
+                    "accuracy": float(np.mean([m["accuracy"] for m in task_metrics])),
+                    "macro_f1": float(np.mean([m["macro_f1"] for m in task_metrics])),
+                    "package_reload_ok": summary.get("package_reload_ok", ""),
+                    "package_path": summary.get("package_path") or "",
+                    "status": summary.get("status", "ok"),
+                    "error": summary.get("error", ""),
+                }
+            )
+        return rows
+
+    metrics = metrics_from_cm(cm)
+    return [
+        {
+            "method": method,
+            "task": summary["task"],
+            "model": record.get("model", summary.get("package_model") or ""),
+            "dataset": record.get("dataset", summary.get("dataset", "HSP")),
+            "test_loss": float(record["test_loss"]),
+            "kappa": metrics["kappa"],
+            "accuracy": metrics["accuracy"],
+            "macro_f1": metrics["macro_f1"],
+            "package_reload_ok": summary.get("package_reload_ok", ""),
+            "package_path": summary.get("package_path") or "",
+            "status": summary.get("status", "ok"),
+            "error": summary.get("error", ""),
+        }
+    ]
+
+
 def metric_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for summary in summaries:
+        if summary.get("status") == "failed":
+            rows.append(
+                {
+                    "method": summary.get("method", ""),
+                    "task": summary.get("task", ""),
+                    "model": summary.get("model", ""),
+                    "dataset": summary.get("dataset", ""),
+                    "test_loss": "",
+                    "kappa": "",
+                    "accuracy": "",
+                    "macro_f1": "",
+                    "package_reload_ok": summary.get("package_reload_ok", ""),
+                    "package_path": summary.get("package_path", ""),
+                    "status": "failed",
+                    "error": summary.get("error", ""),
+                }
+            )
+            continue
         records = summary.get("test_records") or []
         if not records:
             rows.append(
                 {
+                    "method": summary.get("method", "independent"),
                     "task": summary["task"],
                     "model": summary.get("package_model") or "",
                     "dataset": "HSP",
                     "test_loss": "",
+                    "kappa": "",
                     "accuracy": "",
                     "macro_f1": "",
-                    "kappa": "",
                     "package_reload_ok": summary["package_reload_ok"],
                     "package_path": summary.get("package_path") or "",
+                    "status": summary.get("status", "ok"),
+                    "error": summary.get("error", ""),
                 }
             )
             continue
         for record in records:
-            cm = np.asarray(record["test_cm"])
-            total = cm.sum()
-            accuracy = float(cm.trace() / total) if total > 0 else 0.0
-            rows.append(
-                {
-                    "task": summary["task"],
-                    "model": record.get("model", summary.get("package_model") or ""),
-                    "dataset": record.get("dataset", "HSP"),
-                    "test_loss": float(record["test_loss"]),
-                    "accuracy": accuracy,
-                    "macro_f1": float(f1_score_from_confusion_matrix(cm, macro=True)) if total > 0 else 0.0,
-                    "kappa": float(cohen_kappa_from_confusion_matrix(cm)) if total > 0 else 0.0,
-                    "package_reload_ok": summary["package_reload_ok"],
-                    "package_path": summary.get("package_path") or "",
-                }
-            )
+            rows.extend(record_rows(summary, record, summary.get("method", "independent")))
     return rows
 
 
@@ -564,9 +918,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def write_latex_table(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "\\begin{tabular}{lllrrrr}",
+        "\\begin{tabular}{llllrrrrl}",
         "\\toprule",
-        "Task & Model & Dataset & Loss & Acc. & Macro-F1 & $\\kappa$ \\\\",
+        "Method & Task & Dataset & Model & $\\kappa$ & Acc. & Macro-F1 & Loss & Status \\\\",
         "\\midrule",
     ]
     for row in rows:
@@ -578,8 +932,9 @@ def write_latex_table(path: Path, rows: list[dict[str, Any]]) -> None:
             return str(value)
 
         lines.append(
-            f"{row['task']} & {row['model']} & {row['dataset']} & "
-            f"{fmt(row['test_loss'])} & {fmt(row['accuracy'])} & {fmt(row['macro_f1'])} & {fmt(row['kappa'])} \\\\"
+            f"{row['method']} & {row['task']} & {row['dataset']} & {row['model']} & "
+            f"{fmt(row['kappa'])} & {fmt(row['accuracy'])} & {fmt(row['macro_f1'])} & "
+            f"{fmt(row['test_loss'])} & {row.get('status', 'ok')} \\\\"
         )
     lines.extend(["\\bottomrule", "\\end{tabular}", ""])
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -588,18 +943,23 @@ def write_latex_table(path: Path, rows: list[dict[str, Any]]) -> None:
 def write_metric_plot(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
-    if df.empty or "macro_f1" not in df:
+    if df.empty or "kappa" not in df:
         return
-    df = df[df["macro_f1"] != ""].copy()
+    df = df[df["kappa"] != ""].copy()
     if df.empty:
         return
-    df["macro_f1"] = df["macro_f1"].astype(float)
-    fig, ax = plt.subplots(figsize=(6.0, 3.0))
-    ax.bar(df["task"], df["macro_f1"], color="#4c78a8")
-    ax.set_ylabel("Macro-F1")
-    ax.set_ylim(0, max(1.0, float(df["macro_f1"].max()) * 1.1))
-    ax.set_title("Paper pipeline smoke metrics")
-    fig.tight_layout()
+    df["kappa"] = df["kappa"].astype(float)
+    labels = [f"{row.method}\\n{row.task}\\n{row.dataset}" for row in df.itertuples()]
+    fig, ax = plt.subplots(figsize=(max(10.0, len(labels) * 0.9), 5.5), constrained_layout=True)
+    ax.bar(labels, df["kappa"], color="#4c78a8")
+    ax.set_ylabel("Cohen's kappa")
+    lower = min(-0.1, float(df["kappa"].min()) * 1.1)
+    upper = max(0.1, float(df["kappa"].max()) * 1.1)
+    ax.set_ylim(lower, upper)
+    ax.set_title("Paper pipeline smoke kappa")
+    ax.tick_params(axis="x", labelrotation=45)
+    for tick in ax.get_xticklabels():
+        tick.set_horizontalalignment("right")
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -662,11 +1022,17 @@ def command_train_smoke(args) -> None:
     else:
         split = load_split(split_path)
     summaries = train_smoke(split, cfg, output_dir=output_dir)
-    write_json(output_dir / "run_summaries.json", summaries)
-    rows = metric_rows(summaries)
+    external_summaries = evaluate_external_datasets(summaries, cfg)
+    fusion_summaries = train_fusion_smoke(cfg)
+    write_json(output_dir / "single_expert_summaries.json", summaries)
+    write_json(output_dir / "external_eval_summaries.json", external_summaries)
+    write_json(output_dir / "fusion_summaries.json", fusion_summaries)
+    all_summaries = summaries + external_summaries + fusion_summaries
+    write_json(output_dir / "run_summaries.json", all_summaries)
+    rows = metric_rows(all_summaries)
     write_csv(output_dir / "paper_smoke_results.csv", rows)
     write_latex_table(REPO_ROOT / "paper" / "tables" / "pipeline_smoke_results.tex", rows)
-    write_metric_plot(REPO_ROOT / "paper" / "figures" / "pipeline_smoke_macro_f1.png", rows)
+    write_metric_plot(REPO_ROOT / "paper" / "figures" / "pipeline_smoke_kappa.png", rows)
 
 
 def command_collect(args) -> None:
@@ -676,7 +1042,7 @@ def command_collect(args) -> None:
     rows = metric_rows(summaries)
     write_csv(output_dir / "paper_smoke_results.csv", rows)
     write_latex_table(REPO_ROOT / "paper" / "tables" / "pipeline_smoke_results.tex", rows)
-    write_metric_plot(REPO_ROOT / "paper" / "figures" / "pipeline_smoke_macro_f1.png", rows)
+    write_metric_plot(REPO_ROOT / "paper" / "figures" / "pipeline_smoke_kappa.png", rows)
 
 
 def command_design(args) -> None:

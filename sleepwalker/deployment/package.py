@@ -360,16 +360,23 @@ def _manifest_from_dict(payload: dict[str, Any]) -> ExpertManifest:
 
 def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any]) -> None:
     """Initialize lazy preprocessor buffers before loading saved state."""
-    preprocessors = getattr(model, "preprocessors", None)
-    if preprocessors is None:
-        return
+    modules = dict(model.named_modules()) if hasattr(model, "named_modules") else {"": model}
 
-    robust_pattern = re.compile(r"^preprocessors\.(\d+)\.n$")
+    def resolve_preprocessors(module_prefix: str):
+        module = modules.get(module_prefix)
+        if module is None:
+            return None
+        return getattr(module, "preprocessors", None)
+
+    robust_pattern = re.compile(r"^(?:(?P<prefix>.+)\.)?preprocessors\.(?P<idx>\d+)\.n$")
     for key, saved in state_dict.items():
         match = robust_pattern.match(key)
         if match is None or not hasattr(saved, "numel") or int(saved.numel()) == 0:
             continue
-        idx = int(match.group(1))
+        preprocessors = resolve_preprocessors(match.group("prefix") or "")
+        if preprocessors is None:
+            continue
+        idx = int(match.group("idx"))
         if idx >= len(preprocessors):
             continue
         preprocessor = preprocessors[idx]
@@ -381,13 +388,16 @@ def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any])
         dummy = torch.zeros(1, 1, int(saved.numel()), device=saved.device, dtype=torch.float32)
         preprocessor.push(dummy)
 
-    normalize_pattern = re.compile(r"^preprocessors\.(\d+)\.(mean|M2)$")
+    normalize_pattern = re.compile(r"^(?:(?P<prefix>.+)\.)?preprocessors\.(?P<idx>\d+)\.(?P<buffer>mean|M2)$")
     for key, saved in state_dict.items():
         match = normalize_pattern.match(key)
         if match is None or not torch.is_tensor(saved):
             continue
-        idx = int(match.group(1))
-        buffer_name = match.group(2)
+        preprocessors = resolve_preprocessors(match.group("prefix") or "")
+        if preprocessors is None:
+            continue
+        idx = int(match.group("idx"))
+        buffer_name = match.group("buffer")
         if idx >= len(preprocessors):
             continue
         preprocessor = preprocessors[idx]

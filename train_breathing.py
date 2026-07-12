@@ -35,8 +35,11 @@ from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
-torch.set_num_threads(2)
-torch.set_num_interop_threads(1)
+try:
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 mp.set_sharing_strategy("file_system")
 
 TRAIN_ROOT = "/raid/sleepwalker/ruhrlandklinik/raw/train-test-2023"

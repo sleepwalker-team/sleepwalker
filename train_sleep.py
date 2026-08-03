@@ -19,6 +19,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 import torch
 import torch.multiprocessing as mp
 
+from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets import ChannelConfig, Ruhrlandklinik
 from sleepwalker.datasets.ABC import ABC
 from sleepwalker.datasets.Apples import Apples
@@ -44,9 +45,10 @@ from sleepwalker.models.SeqSleepNet import SeqSleepNet
 from sleepwalker.models.TinySleepNet import TinySleepNet
 from sleepwalker.models.USleep import USleep
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.losses import dice_loss
 from sleepwalker.trainer.utils.filtering import trim_event
+from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
@@ -211,8 +213,8 @@ DATASET_CFG = {
             "stage 4 sleep|4": "n3",
             "rem sleep|5": "rem",
         },
-        "channels": [ChannelConfig("EEG")],
-        "grouped_channels": [ChannelConfig("EEG", group="eeg")],
+        "channels": [ChannelConfig("EEG", unit="uV")],
+        "grouped_channels": [ChannelConfig("EEG", group="eeg", unit="uV")],
     },
     "apples": {
         "clazz": Apples,
@@ -258,16 +260,16 @@ DATASET_CFG = {
             "n3": "n3",
             "rem": "rem",
         },
-        "channels": [ChannelConfig("C4")],
+        "channels": [ChannelConfig("C4", unit="V")],
         "grouped_channels": [
-            ChannelConfig("F3", group="eeg"),
-            ChannelConfig("F4", group="eeg"),
-            ChannelConfig("C3", group="eeg"),
-            ChannelConfig("C4", group="eeg"),
-            ChannelConfig("O1", group="eeg"),
-            ChannelConfig("O2", group="eeg"),
-            ChannelConfig("M1", group="eeg"),
-            ChannelConfig("M2", group="eeg"),
+            ChannelConfig("F3", group="eeg", unit="V"),
+            ChannelConfig("F4", group="eeg", unit="V"),
+            ChannelConfig("C3", group="eeg", unit="V"),
+            ChannelConfig("C4", group="eeg", unit="V"),
+            ChannelConfig("O1", group="eeg", unit="V"),
+            ChannelConfig("O2", group="eeg", unit="V"),
+            ChannelConfig("M1", group="eeg", unit="V"),
+            ChannelConfig("M2", group="eeg", unit="V"),
         ],
         "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
@@ -281,16 +283,16 @@ DATASET_CFG = {
             "n3": "n3",
             "rem": "rem",
         },
-        "channels": [ChannelConfig("C4")],
+        "channels": [ChannelConfig("C4", unit="V")],
         "grouped_channels": [
-            ChannelConfig("F3", group="eeg"),
-            ChannelConfig("F4", group="eeg"),
-            ChannelConfig("C3", group="eeg"),
-            ChannelConfig("C4", group="eeg"),
-            ChannelConfig("O1", group="eeg"),
-            ChannelConfig("O2", group="eeg"),
-            ChannelConfig("M1", group="eeg"),
-            ChannelConfig("M2", group="eeg"),
+            ChannelConfig("F3", group="eeg", unit="V"),
+            ChannelConfig("F4", group="eeg", unit="V"),
+            ChannelConfig("C3", group="eeg", unit="V"),
+            ChannelConfig("C4", group="eeg", unit="V"),
+            ChannelConfig("O1", group="eeg", unit="V"),
+            ChannelConfig("O2", group="eeg", unit="V"),
+            ChannelConfig("M1", group="eeg", unit="V"),
+            ChannelConfig("M2", group="eeg", unit="V"),
         ],
         "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
@@ -304,16 +306,16 @@ DATASET_CFG = {
             "n3": "n3",
             "rem": "rem",
         },
-        "channels": [ChannelConfig("C4")],
+        "channels": [ChannelConfig("C4", unit="V")],
         "grouped_channels": [
-            ChannelConfig("F3", group="eeg"),
-            ChannelConfig("F4", group="eeg"),
-            ChannelConfig("C3", group="eeg"),
-            ChannelConfig("C4", group="eeg"),
-            ChannelConfig("O1", group="eeg"),
-            ChannelConfig("O2", group="eeg"),
-            ChannelConfig("M1", group="eeg"),
-            ChannelConfig("M2", group="eeg"),
+            ChannelConfig("F3", group="eeg", unit="V"),
+            ChannelConfig("F4", group="eeg", unit="V"),
+            ChannelConfig("C3", group="eeg", unit="V"),
+            ChannelConfig("C4", group="eeg", unit="V"),
+            ChannelConfig("O1", group="eeg", unit="V"),
+            ChannelConfig("O2", group="eeg", unit="V"),
+            ChannelConfig("M1", group="eeg", unit="V"),
+            ChannelConfig("M2", group="eeg", unit="V"),
         ],
         "grouped_rereference": [["F3", "F4", "C3", "C4", "O1", "O2", "M1", "M2"]],
     },
@@ -341,8 +343,11 @@ DATASET_CFG = {
             "sleep stage 4": "n3",
             "sleep stage r": "rem",
         },
-        "channels": [ChannelConfig("EEG Fpz-Cz")],
-        "grouped_channels": [ChannelConfig("EEG Fpz-Cz", group="eeg"), ChannelConfig("EEG Pz-Oz", group="eeg")],
+        "channels": [ChannelConfig("EEG Fpz-Cz", unit="uV")],
+        "grouped_channels": [
+            ChannelConfig("EEG Fpz-Cz", group="eeg", unit="uV"),
+            ChannelConfig("EEG Pz-Oz", group="eeg", unit="uV"),
+        ],
         "grouped_rereference": [["EEG Fpz-Cz", "EEG Pz-Oz"]],
     },
 }
@@ -433,7 +438,7 @@ MODEL_CFG = {
         "activation": "relu",
         "norm": "batch",
         "mlp_size": 128,
-        "balance_batches": True,
+        "balance_batches": False,
     },
 }
 
@@ -501,6 +506,7 @@ def build_channel_configs(dataset_name: str, grouped: bool) -> tuple[list[Channe
             name=cfg.name,
             group=cfg.group,
             normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY),
+            unit=cfg.unit,
         )
         for cfg in selected_channels
     ]
@@ -508,7 +514,13 @@ def build_channel_configs(dataset_name: str, grouped: bool) -> tuple[list[Channe
     return channels, rereference
 
 
-def build_dataset_template(dataset_name: str, grouped: bool, total_input: str):
+def build_dataset_template(
+    dataset_name: str,
+    grouped: bool,
+    total_input: str,
+    *,
+    assume_units_if_missing: bool = False,
+):
     if dataset_name not in DATASET_CFG:
         raise ValueError(f"Unknown sleep staging dataset '{dataset_name}'.")
 
@@ -524,49 +536,32 @@ def build_dataset_template(dataset_name: str, grouped: bool, total_input: str):
         total_input=total_input,
         target_resolution=TARGET_RESOLUTION,
         rereference=rereference,
+        assume_units_if_missing=assume_units_if_missing,
     )
     dataset.classes = list(TARGET_CLASSES)
     return dataset
 
 
-def build_dataset(dataset_name: str, patients: list[str], grouped: bool, total_input: str):
-    dataset = build_dataset_template(dataset_name, grouped, total_input)
-    dataset.initialize(patients, NUM_WORKERS_DATASET)
-    logger.info(f"{dataset_name}: loaded {len(patients)} patients")
-    return dataset
+def has_required_channels(edf_path: str, dataset_name: str, grouped: bool) -> bool:
+    available = set(read_edf_meta(edf_path)["signals"])
+    channels, _rereference = build_channel_configs(dataset_name, grouped)
+    alternatives: dict[str, list[str]] = {}
+    for channel in channels:
+        alternatives.setdefault(channel.group or channel.name, []).append(channel.name)
+    return all(any(name in available for name in names) for names in alternatives.values())
 
 
-def list_patients(dataset_name: str, grouped: bool, dry_run: bool) -> list[str]:
-    dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
-    patients = get_edf_files_in_repo(dataset_path, recursive=True)
-    if dry_run and dataset_name != "hsp":
-        return patients[:2]
-    if dry_run:
-        patients = patients[:50]
-
-    channels, rereference = build_channel_configs(dataset_name, grouped)
-    dataset = DATASET_CFG[dataset_name]["clazz"](
-        channels=channels,
-        sample_frequency=SAMPLE_FREQUENCY,
-        event_mapping=DATASET_CFG[dataset_name]["event_mapping"],
-        prepare_patient=prepare_sleep_staging_patient,
-        prepare_target=None,
-        prepare_sample=None,
-        total_input="30s",
-        target_resolution=TARGET_RESOLUTION,
-        rereference=rereference,
-    )
-    with suppress_stdout_logging(logger):
-        filtered = filter_patients_by_sleep_time(
-            patients=patients,
-            dataset=dataset,
-            quantile=SLEEP_TIME_FILTER_QUANTILE,
-            num_workers=NUM_WORKERS_DATASET,
-            label=dataset_name,
-        )
-    if dry_run:
-        return filtered[:2]
-    return filtered
+def select_sleep_records(
+    records: list[str],
+    *,
+    dataset_name: str,
+    grouped: bool,
+) -> list[str]:
+    return [
+        record
+        for record in records
+        if has_required_channels(record, dataset_name, grouped)
+    ]
 
 
 def build_model_and_trainer(train_dataset, model_name: str, dry_run: bool):
@@ -621,24 +616,6 @@ def build_model_and_trainer(train_dataset, model_name: str, dry_run: bool):
     return model, trainer
 
 
-def build_expert_components(cfg: dict):
-    model_name = str(cfg.get("model", "sleeptransformer"))
-    dataset_name = str(cfg.get("dataset", "hsp"))
-    grouped = bool(cfg.get("grouped", True))
-    dry_run = bool(cfg.get("dry", False))
-    model_cfg = MODEL_CFG[model_name]
-    total_input = str(cfg.get("total_input", model_cfg["total_input"]))
-    dataset = build_dataset_template(dataset_name, grouped, total_input)
-    model, trainer = build_model_and_trainer(dataset, model_name, dry_run)
-    if "epochs" in cfg:
-        trainer.epochs = int(cfg["epochs"])
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
-
-
 def build_dataset_parts(args, train_total_input: str, test_total_input: str):
     train_parts = []
     val_parts = []
@@ -648,22 +625,110 @@ def build_dataset_parts(args, train_total_input: str, test_total_input: str):
     val_patient_splits: list[tuple[str, list[str]]] = []
     test_patient_splits: list[tuple[str, list[str]]] = []
 
+    precomputed_split = None
+    if args.split_file is not None:
+        if args.train != ["hsp"] or args.test:
+            raise ValueError("--split-file currently requires '--train hsp' and no '--test' datasets.")
+        precomputed_split = load_split(args.split_file)
+
+    def candidates_for(dataset_name: str) -> list[str]:
+        dataset_path = os.path.join(DATASET_ROOT, DATASET_CFG[dataset_name]["edf_path"])
+        patients = get_edf_files_in_repo(dataset_path, recursive=True)
+        if args.dry:
+            patients = patients[:50] if dataset_name == "hsp" else patients[:2]
+        return patients
+
+    def select_for(dataset_name: str, records: list[str], *, training: bool) -> list[str]:
+        selected = select_sleep_records(
+            records,
+            dataset_name=dataset_name,
+            grouped=args.grouped,
+        )
+        if training:
+            selected = filter_patients_by_sleep_time(
+                selected,
+                dataset=build_dataset_template(
+                    dataset_name,
+                    args.grouped,
+                    "30s",
+                    assume_units_if_missing=args.assume_units_if_missing,
+                ),
+                quantile=SLEEP_TIME_FILTER_QUANTILE,
+                num_workers=args.num_workers_dataset,
+                label=dataset_name,
+            )
+        return selected
+
+    def initialized_dataset(
+        dataset_name: str,
+        patients: list[str],
+        *,
+        training: bool,
+    ):
+        total_input = train_total_input if training else test_total_input
+        dataset = build_dataset_template(
+            dataset_name,
+            args.grouped,
+            total_input,
+            assume_units_if_missing=args.assume_units_if_missing,
+        )
+        dataset.initialize(patients, args.num_workers_dataset)
+        return dataset
+
     with suppress_stdout_logging(logger):
         total_train_patients = 0
         total_val_patients = 0
 
         for dataset_name in args.train:
-            patients = list_patients(dataset_name, args.grouped, args.dry)
+            if precomputed_split is not None:
+                task_split = precomputed_split["tasks"]["sleep"]["edf_files"]
+                split_records = {
+                    "train": list(task_split["train"]),
+                    "val": list(task_split["val"]),
+                    "test": list(task_split["test"]),
+                }
+                for split_name, records in split_records.items():
+                    limit = getattr(args, f"max_{split_name}_patients")
+                    if limit is not None:
+                        records[:] = records[: int(limit)]
+                train_patients = select_for(
+                    dataset_name, split_records["train"], training=True
+                )
+                val_patients = select_for(
+                    dataset_name, split_records["val"], training=False
+                )
+                test_patients = select_for(
+                    dataset_name, split_records["test"], training=False
+                )
+                total_train_patients += len(train_patients)
+                total_val_patients += len(val_patients)
+                train_patient_splits.append((dataset_name, train_patients))
+                if val_patients:
+                    val_patient_splits.append((dataset_name, val_patients))
+                if test_patients:
+                    test_patient_splits.append((dataset_name, test_patients))
+                continue
+            patients = select_for(
+                dataset_name,
+                candidates_for(dataset_name),
+                training=True,
+            )
             if len(patients) == 0:
                 raise ValueError(f"No patients found for {dataset_name}.")
 
             if args.val_frac > 0:
-                remaining_patients, val_patients = random_split(patients, test_frac=args.val_frac)
+                remaining_patients, val_patients = random_split(
+                    patients, test_frac=args.val_frac, seed=int(args.seed)
+                )
             else:
                 remaining_patients, val_patients = list(patients), []
 
-            if len(args.test) == 0 and args.test_frac > 0:
-                train_patients, test_patients = random_split(remaining_patients, test_frac=args.test_frac)
+            if args.test_frac > 0:
+                train_patients, test_patients = random_split(
+                    remaining_patients,
+                    test_frac=args.test_frac,
+                    seed=int(args.seed) + 1,
+                )
             else:
                 train_patients, test_patients = list(remaining_patients), []
 
@@ -672,31 +737,44 @@ def build_dataset_parts(args, train_total_input: str, test_total_input: str):
             train_patient_splits.append((dataset_name, train_patients))
             if len(val_patients) > 0:
                 val_patient_splits.append((dataset_name, val_patients))
-            if len(args.test) == 0:
+            if len(test_patients) > 0:
                 test_patient_splits.append((dataset_name, test_patients))
 
         if len(args.test) > 0:
             for dataset_name in args.test:
-                patients = list_patients(dataset_name, args.grouped, args.dry)
+                patients = select_for(
+                    dataset_name,
+                    candidates_for(dataset_name),
+                    training=False,
+                )
                 if len(patients) == 0:
                     raise ValueError(f"No patients found for {dataset_name}.")
                 test_patient_splits.append((dataset_name, patients))
 
         for dataset_name, train_patients in train_patient_splits:
             logger.context(f"TRAIN:{dataset_name}")
-            train_parts.append(build_dataset(dataset_name, train_patients, args.grouped, train_total_input))
+            train_parts.append(
+                initialized_dataset(dataset_name, train_patients, training=True)
+            )
             logger.uncontext()
 
         for dataset_name, val_patients in val_patient_splits:
             logger.context(f"VAL:{dataset_name}")
-            val_parts.append(build_dataset(dataset_name, val_patients, args.grouped, test_total_input))
+            val_parts.append(
+                initialized_dataset(dataset_name, val_patients, training=False)
+            )
             logger.uncontext()
 
         for dataset_name, test_patients in test_patient_splits:
             if len(test_patients) == 0:
                 raise ValueError(f"Test split for {dataset_name} is empty.")
             logger.context(f"TEST:{dataset_name}")
-            test_parts.append((dataset_name, build_dataset(dataset_name, test_patients, args.grouped, test_total_input)))
+            test_parts.append(
+                (
+                    dataset_name,
+                    initialized_dataset(dataset_name, test_patients, training=False),
+                )
+            )
             logger.uncontext()
 
     return train_parts, val_parts, test_parts
@@ -711,8 +789,38 @@ def main():
     parser.add_argument("--id", type=str, default="", help="ID of the experiment.")
     parser.add_argument("--val_frac", type=float, default=VAL_FRAC, help="Fraction of train patients reserved for validation.")
     parser.add_argument("--test_frac", type=float, default=TEST_FRAC, help="Fraction reserved for internal test splits.")
+    parser.add_argument("--split-file", default=None, help="Optional shared HSP subject split YAML.")
+    parser.add_argument("--max-train-patients", type=int, default=None)
+    parser.add_argument("--max-val-patients", type=int, default=None)
+    parser.add_argument("--max-test-patients", type=int, default=None)
+    parser.add_argument("--max-test-windows", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--n-samples", type=int, default=N_SAMPLES)
+    parser.add_argument("--num-workers-dataset", type=int, default=NUM_WORKERS_DATASET)
+    parser.add_argument("--num-workers-dataloader", type=int, default=NUM_WORKERS_DATALOADER)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--warmup-device", default="cpu")
+    parser.add_argument(
+        "--assume-units-if-missing",
+        action="store_true",
+        help="Assume unitless EDF channels already use the configured channel units.",
+    )
+    parser.add_argument("--log-path", default=os.path.join("results", "sleep"))
+    parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
+    seed_everything(int(args.seed))
+
+    overlap = sorted(set(args.train) & set(args.test))
+    if overlap:
+        raise ValueError(
+            "Datasets cannot be both training sources and explicit external tests; "
+            f"internal held-out evaluation is created automatically: {overlap}."
+        )
+    if args.split_file is not None and args.train != ["hsp"]:
+        raise ValueError("--split-file currently requires exactly '--train hsp'.")
 
     experiment_name = f"{EXPERIMENT_NAME}_{args.id}" if args.id else EXPERIMENT_NAME
     if args.grouped:
@@ -721,28 +829,28 @@ def main():
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
 
-    os.makedirs(os.path.join("results", "sleep", experiment_name), exist_ok=True)
-    logger.set_log_file(os.path.join("results", "sleep", experiment_name, "output.log"))
+    os.makedirs(os.path.join(args.log_path, experiment_name), exist_ok=True)
+    logger.set_log_file(os.path.join(args.log_path, experiment_name, "output.log"))
 
     model_cfg = MODEL_CFG[args.model]
     train_total_input = model_cfg["total_input"]
     test_total_input = model_cfg.get("total_input_model", train_total_input)
 
-    train_parts, val_parts, test_parts = build_dataset_parts(args, train_total_input, test_total_input)
+    train_parts, val_parts, test_parts = build_dataset_parts(
+        args,
+        train_total_input,
+        test_total_input,
+    )
     train_dataset = combine_datasets(train_parts)
     model, trainer = build_model_and_trainer(train_dataset, args.model, args.dry)
-    expert_builder_config = {
-        "model": args.model,
-        "dataset": args.train[0] if len(args.train) == 1 else "mixed",
-        "grouped": args.grouped,
-        "dry": args.dry,
-        "epochs": trainer.epochs,
-        "total_input": train_total_input,
-    }
-    expert_dataset_template = (
-        build_expert_components(expert_builder_config)["dataset_template"]
-        if expert_builder_config["dataset"] != "mixed"
-        else train_dataset.to_unlabelled()
+    trainer.epochs = 2 if args.dry else int(args.epochs)
+    trainer.device = str(args.device)
+    trainer.warmup_device = str(args.warmup_device)
+    inference_dataset = build_dataset_template(
+        args.train[0],
+        args.grouped,
+        test_total_input,
+        assume_units_if_missing=args.assume_units_if_missing,
     )
 
     collate_ignore = ["time", "patient", "dataset"] if hasattr(train_dataset, "datasets") else ["time", "patient"]
@@ -756,24 +864,18 @@ def main():
             train_datasets=train_parts,
             val_datasets=val_parts,
             test_datasets=test_parts,
-            batch_size=BATCH_SIZE,
-            n_samples=1_000 if args.dry else N_SAMPLES,
-            num_workers_dataloader=NUM_WORKERS_DATALOADER,
+            batch_size=args.batch_size,
+            n_samples=args.n_samples,
+            num_workers_dataloader=args.num_workers_dataloader,
+            n_samples_test=args.max_test_windows,
             test_repeats=test_repeats,
-            use_energy_tracker=False,
-            use_mlflow=True,
-            log_path=os.path.join("results", "sleep"),
+            use_mlflow=not args.no_mlflow,
+            log_path=args.log_path,
             tags={"model": args.model},
             collate_fn=partial(batch_collate, ignore_list=collate_ignore),
             meta_data=vars(args),
-            expert_name=experiment_name,
             expert_task="sleep",
-            expert_builder={
-                "module": "train_sleep",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
+            inference_dataset=inference_dataset,
         )
     )
 

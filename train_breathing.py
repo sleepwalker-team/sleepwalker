@@ -30,7 +30,7 @@ from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
@@ -79,6 +79,8 @@ def _clip_to_intervals(df: pd.DataFrame | None, intervals: list[tuple[pd.Timesta
     return pd.DataFrame(clipped_rows, columns=df.columns)
 
 def prepare_patient(data_df, label_df, label_extra_df, patient=None):
+    if label_df is None:
+        return data_df, None, label_extra_df
     trimmed = trim_event(data_df, label_df, label_extra_df,["sleep"])
     if trimmed is None:
         return None
@@ -148,7 +150,7 @@ def prepare_sample(
         item["target_extra"] = target_extra
     return item
 
-def build_dataset(patients: list[str], channels: list[str], total_input:str, include_pap:bool):
+def build_dataset_template(channels: list[str], total_input: str, include_pap: bool):
     EVENT_MAPPING = {
         "entsättigung": "desaturation",
         "wach":"wake",
@@ -204,6 +206,11 @@ def build_dataset(patients: list[str], channels: list[str], total_input:str, inc
         f"Configured {len(dataset.get_input_channels())} effective input channels "
         f"from {len(channel_configs)} Ruhrland channel candidates."
     )
+    return dataset
+
+
+def build_dataset(patients: list[str], channels: list[str], total_input: str, include_pap: bool):
+    dataset = build_dataset_template(channels, total_input, include_pap)
     dataset.initialize(patients, NUM_WORKERS_DATASET)
     return dataset
 
@@ -248,12 +255,11 @@ def has_required_channels(edf_path: str, channels:list[str]) -> bool:
 
 def list_patients(source_root: str, channels: list[str], dry_run: bool, pap: bool) -> list[str]:
     patients = [
-        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if has_required_channels(patient, channels) 
+        patient
+        for patient in get_edf_files_in_repo(source_root, recursive=True)
+        if (pap or not is_pap_patient(patient))
+        and has_required_channels(patient, channels)
     ]
-
-    if not pap:
-        patients = [p for p in patients if not is_pap_patient(p)]
-
     return patients[:2] if dry_run else patients
 
 def build_model_and_trainer(train_dataset, model, scaler, class_weights, dry):
@@ -316,7 +322,7 @@ def build_model_and_trainer(train_dataset, model, scaler, class_weights, dry):
         loss_function=torch.nn.functional.cross_entropy,#torch.nn.functional.binary_cross_entropy_with_logits,
         save_every=10,
         #loss_mode="inverse",
-        balance_batches=True,
+        balance_batches=False,
         balance_gamma=0.75,
         class_weights=class_weights
     )
@@ -335,7 +341,9 @@ def main():
     parser.add_argument("--total_input", type=str, default="60s", help="Total input size")
     parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction of train patients reserved for validation. Set to 0 to disable.")
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
+    seed_everything(args.seed)
 
     experiment_name = f"breathing_{args.id}" 
     if args.dry:
@@ -350,45 +358,34 @@ def main():
 
     val_dataset = None
     if args.val_frac is not None and args.val_frac > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac)
+        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac, seed=args.seed)
     else:
         val_patients = []
 
     # with suppress_stdout_logging(logger):
     logger.context("TRAIN")
-    train_dataset = build_dataset(
-        train_patients,
-        args.channels,
-        args.total_input,
-        args.pap
-    )
+    train_dataset = build_dataset(train_patients, args.channels, args.total_input, args.pap)
     logger.uncontext()
     if len(val_patients) > 0:
         logger.context("VAL")
-        val_dataset = build_dataset(
-            val_patients,
-            args.channels,
-            args.total_input,
-            args.pap
-        )
+        val_dataset = build_dataset(val_patients, args.channels, args.total_input, args.pap)
         logger.uncontext()
     logger.context("TEST")
-    test_dataset = build_dataset(
-        test_patients,
-        args.channels,
-        args.total_input,
-        args.pap
-    )
+    test_dataset = build_dataset(test_patients, args.channels, args.total_input, args.pap)
     logger.uncontext()
 
+    class_weights = {
+        "apnea": args.apnea_weight,
+        "hypopnea": args.hypopnea_weight,
+        "regular breathing": 1.0,
+    }
     model, trainer = build_model_and_trainer(
         train_dataset,
         args.model,
         args.scaler,
-        {"apnea":args.apnea_weight, "hypopnea":args.hypopnea_weight, "regular":1.0},
+        class_weights,
         args.dry,
     )
-
     run_result = run(
         RunCfg(
             experiment_name=experiment_name,
@@ -401,14 +398,13 @@ def main():
             batch_size=BATCH_SIZE,
             n_samples=N_SAMPLES,
             num_workers_dataloader=NUM_WORKERS_DATALOADER,
+            n_samples_test=1_000 if args.dry else None,
             test_repeats=[1],
-            use_energy_tracker=False,
             tags={"model": args.model},
             collate_fn=batch_collate,
             use_mlflow=True,
             log_path=os.path.join("results", "breathing"),
             meta_data=vars(args),
-            expert_name=experiment_name,
             expert_task="breathing",
         )
     )

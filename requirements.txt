@@ -1,5 +1,6 @@
 numpy
 pandas
+cloudpickle
 pyedflib
 scipy
 torch

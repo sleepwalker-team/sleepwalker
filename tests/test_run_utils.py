@@ -6,7 +6,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sleepwalker.trainer.utils.filtering import filter_patients_by_sleep_time
-from sleepwalker.trainer.utils.splits import combine_datasets
+from sleepwalker.trainer.utils.splits import combine_datasets, load_split
 
 
 class DummyDataset:
@@ -43,3 +43,15 @@ def test_combine_datasets_returns_single_dataset_unchanged():
     dataset = object()
 
     assert combine_datasets([dataset]) is dataset
+
+
+def test_load_split_reads_yaml(tmp_path):
+    path = tmp_path / "hsp_split.yml"
+    path.write_text(
+        "method: subject-hash\ntasks:\n  sleep:\n    counts:\n      train: 3\n",
+        encoding="utf-8",
+    )
+
+    split = load_split(path)
+
+    assert split["tasks"]["sleep"]["counts"]["train"] == 3

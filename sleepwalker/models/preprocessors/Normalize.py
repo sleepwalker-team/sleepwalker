@@ -46,7 +46,7 @@ class Normalize(Preprocessor):
         if self.mean is None:
             self.mean = batch_mean
             self.M2 = batch_M2
-            self.count.fill_(batch_count)
+            self.count = self.count.new_tensor(batch_count)
         else:
             delta = batch_mean - self.mean
             total_count = self.count.item() + batch_count
@@ -56,7 +56,7 @@ class Normalize(Preprocessor):
 
             self.mean.copy_(new_mean)
             self.M2.copy_(new_M2)
-            self.count.fill_(total_count)
+            self.count = self.count.new_tensor(total_count)
 
     def requires_warmup(self) -> bool:
         """Return whether this preprocessor requires warmup."""

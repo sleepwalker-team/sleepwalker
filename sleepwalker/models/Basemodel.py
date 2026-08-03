@@ -69,7 +69,6 @@ class BaseModel(nn.Module, ABC):
         """Run the full model from raw inputs to logits or task outputs."""
         return self.classifier(self.features(x))
 
-    @abstractmethod
     def input_spec(self) -> tuple[tuple[int, ...], dict[str, Any]]:  # pragma: no cover - abstract
         """Describe the positional input shape expected by ``forward``.
 
@@ -89,7 +88,9 @@ class BaseModel(nn.Module, ABC):
             - ``ts_len``: time-axis length expected by the model
             - ``n_channels``: effective number of input channels
         """
-        ...
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement input_spec() before it can be packaged."
+        )
 
     @abstractmethod
     def _features(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - abstract

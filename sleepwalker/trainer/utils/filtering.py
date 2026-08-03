@@ -2,10 +2,58 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+
+def _summarize_sleep_time(
+    patient: str,
+    label_df: Optional[pd.DataFrame],
+    *,
+    sleep_labels: tuple[str, ...],
+    **_kwargs,
+) -> Optional[dict[str, float | str]]:
+    if label_df is None or len(label_df) == 0:
+        return None
+    required = {"Starttime", "Endtime", "Label"}
+    missing = required.difference(label_df.columns)
+    if missing:
+        raise ValueError(f"Cannot summarize sleep time; missing label columns {sorted(missing)}.")
+    duration_s = (label_df["Endtime"] - label_df["Starttime"]).dt.total_seconds()
+    sleep_seconds = duration_s[label_df["Label"].isin(sleep_labels)].sum()
+    return {"patient": patient, "sleep_seconds": float(sleep_seconds)}
+
+
+def filter_patients_by_sleep_time(
+    patients: Sequence[str],
+    dataset,
+    sleep_labels: Sequence[str],
+    quantile: float,
+    num_workers: int,
+    label: str,
+) -> list[str]:
+    """Drop symmetric sleep-duration outliers using patient-level statistics."""
+    patients = list(patients)
+    if not 0.0 <= quantile < 0.5:
+        raise ValueError("quantile must be in [0, 0.5).")
+    if len(patients) < 3:
+        return patients
+    stats = dataset.get_patient_stats(
+        patients,
+        partial(_summarize_sleep_time, sleep_labels=tuple(sleep_labels)),
+        num_workers=num_workers,
+    )
+    if len(stats) < 3 or "sleep_seconds" not in stats.columns:
+        return patients
+    lower = stats["sleep_seconds"].quantile(quantile)
+    upper = stats["sleep_seconds"].quantile(1.0 - quantile)
+    return stats.loc[
+        stats["sleep_seconds"].between(lower, upper, inclusive="both"),
+        "patient",
+    ].tolist()
 
 
 def trim_event(
@@ -13,7 +61,7 @@ def trim_event(
     label_df: Optional[pd.DataFrame],
     label_extra_df: Optional[pd.DataFrame],
     keep_events: Sequence[str] | None = None,
-) -> Optional[tuple[pd.DataFrame, Optional[pd.DataFrame]]]:
+) -> Optional[tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]]:
     """Trim leading/trailing rows until retained events occur.
 
     Keeps the interval from the first row whose label is in `keep_events`
@@ -29,7 +77,9 @@ def trim_event(
     Returns:
         `(trimmed_label_df, trimmed_label_extra_df)` or `None` if no keep-event occurs.
     """
-    if label_df is None or len(label_df) == 0:
+    if label_df is None:
+        return None, label_extra_df
+    if len(label_df) == 0:
         return None
 
     label_df = label_df.sort_values(["Starttime", "Endtime"]).reset_index(drop=True)

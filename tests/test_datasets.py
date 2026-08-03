@@ -44,7 +44,8 @@ def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending
     assert len(edf_files) > 0
     edf_files = edf_files[:num_patients]
 
-    dataset = dataset_clazz(patients = edf_files, channels = [ChannelConfig(name=channel_name, normalizer=None)], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
+    dataset = dataset_clazz(channels = [ChannelConfig(name=channel_name, normalizer=None)], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
+    dataset.initialize(edf_files)
 
     return dataset
 

@@ -85,6 +85,29 @@ def ruhrland_normalizer(channel_name: str, sample_frequency: float):
     return None
 
 
+def ruhrland_unit(channel_name: str) -> str | None:
+    """Return the expected Ruhrland EDF physical unit when it is stable."""
+    if channel_name in {
+        *RUHRLAND_CHANNEL_GROUPS["eeg"],
+        *RUHRLAND_CHANNEL_GROUPS["eog"],
+        *RUHRLAND_CHANNEL_GROUPS["chin_emg"],
+        *RUHRLAND_CHANNEL_GROUPS["leg_emg"],
+        "RIP Sum",
+        "RIP Sum Cal",
+        "Abdomen",
+        "Abdomen CaL",
+        "Inductance Abdom",
+        "Chest",
+        "Inductance Thora",
+    }:
+        return "V"
+    if channel_name in {"RIP Flow", "RIP Flow Cal"}:
+        return "V/s"
+    if channel_name in {"Saturation", "SpO2 B-B"}:
+        return "%"
+    return None
+
+
 def ruhrland_group_name(subgroup: str, grouped: bool) -> str | None:
     """Resolve the logical group label used for grouped channel sampling."""
     if not grouped:
@@ -247,6 +270,7 @@ def get_channels(
                                 include_quality=include_quality,
                                 override_quality=override_quality,
                             ),
+                            unit=ruhrland_unit(channel_name),
                         )
                     )
             continue
@@ -272,6 +296,7 @@ def get_channels(
                     include_quality=include_quality,
                     override_quality=override_quality,
                 ),
+                unit=ruhrland_unit(channel_name),
             )
         )
 

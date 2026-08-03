@@ -157,7 +157,8 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
     if data_df is None:
         return None
 
-    label_df, label_extra_df = subsample_patient_windows(label_df, label_extra_df)
+    if label_df is not None:
+        label_df, label_extra_df = subsample_patient_windows(label_df, label_extra_df)
 
     return data_df, label_df, label_extra_df
 

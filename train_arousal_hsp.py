@@ -7,15 +7,12 @@ np.seterr(all='raise')
 
 import argparse
 from collections import defaultdict
-import multiprocessing
 import os
 from functools import partial
-from typing import Optional
 
 import pandas as pd
 import yaml
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
-from tqdm import tqdm
 
 os.environ["OMP_NUM_THREADS"] = "2"
 os.environ["MKL_NUM_THREADS"] = "2"
@@ -35,14 +32,15 @@ from sleepwalker.datasets.HSP import (
     get_hsp_annotation_path,
 )
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
-from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
+from sleepwalker.datasets.utils import random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.filtering import trim_event
+from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
-from sleepwalker.utils import logger, suppress_stdout_logging
+from sleepwalker.utils import logger
 
 try:
     torch.set_num_threads(2)
@@ -51,34 +49,22 @@ except RuntimeError:
     pass
 mp.set_sharing_strategy("file_system")
 
-ROOT = "/cephfs_projects/sleepwalker/hsp"
-
 TARGET_CLASSES = ["no_arousal", "arousal"]
-DEFAULT_CONFIG = {
-    "root": ROOT,
-    "batch_size": 128,
-    "epochs": 35,
-    "n_samples": 100_000,
-    "num_workers_dataset": 8,
-    "num_workers_dataloader": 8,
-    "sample_frequency": 100,
-    "target_resolution": "1s",
-    "stride": "1s",
-    "grouped": True,
-    "channels": ["eeg", "eog", "chin_emg"],
-    "scaler": True,
-    "arousal_weight": 10,
-    "balance_batches": False,
-    "balance_gamma": 0.75,
-    "model": "utime-big",
-    "id": None,
-    "total_input": "60s",
-    "val_frac": 0.1,
-    "dry": False,
-    "use_mlflow": True,
-    "max_edf_files": None,
-    "patient_limit": None,
-    "annotated_only": True,
+
+# FIXME: Remove these. They are not necessary
+AROUSAL_CONFIG_KEYS = {
+    "root", "id", "seed", "split", "log_path", "batch_size", "epochs", "n_samples",
+    "num_workers_dataset", "num_workers_dataloader", "sample_frequency", "target_resolution",
+    "stride", "grouped", "channel_groups", "robust_scaler", "arousal_weight", "balance_batches",
+    "balance_gamma", "model", "total_input", "val_frac", "dry", "use_mlflow",
+    "require_arousal_annotation", "max_train_patients", "max_val_patients", "max_test_patients",
+    "test_window_limit", "allow_missing_channel_units", "loss", "save_every",
+}
+REQUIRED_AROUSAL_CONFIG_KEYS = {
+    "root", "seed", "batch_size", "epochs", "n_samples", "num_workers_dataset",
+    "num_workers_dataloader", "sample_frequency", "target_resolution", "stride", "grouped",
+    "channel_groups", "robust_scaler", "arousal_weight", "model", "total_input", "dry",
+    "use_mlflow", "loss", "save_every",
 }
 
 
@@ -129,12 +115,12 @@ def prepare_sample(
 
 def build_dataset(patients: list[str], cfg: dict):
     dataset = build_dataset_template(cfg)
-    dataset.initialize(patients, cfg["num_workers_dataset"])
+    dataset.initialize(patients, int(cfg["num_workers_dataset"]))
     return dataset
 
 def cfg_to_channelcfg(cfg: dict) -> list[ChannelConfig]:
     return get_channels(
-        cfg["channels"],
+        cfg["channel_groups"],
         grouped=cfg["grouped"],
         normalize=True,
         sample_frequency=cfg["sample_frequency"],
@@ -168,6 +154,7 @@ def build_dataset_template(cfg: dict):
         prepare_sample=prepare_sample,
         total_input=cfg["total_input"],
         target_resolution=cfg["target_resolution"],
+        assume_units_if_missing=bool(cfg.get("allow_missing_channel_units", False)),
     )
     dataset.classes = list(TARGET_CLASSES)
     logger.info(
@@ -177,17 +164,9 @@ def build_dataset_template(cfg: dict):
     return dataset
 
 
-def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
-    annot_path = get_hsp_annotation_path(edf_path)
-    if annot_path is None:
-        return None
-    label_counts = get_hsp_annotation_label_counts(annot_path)
-    if label_counts.get("arousal", 0) <= 0:
-        return None
-
+def has_required_channels(edf_path: str, requested: list[ChannelConfig]) -> bool:
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
-    requested = cfg_to_channelcfg(cfg)
 
     channel_by_group = defaultdict(list)
     for channel_cfg in requested:
@@ -198,38 +177,21 @@ def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
 
     for requested_channels in channel_by_group.values():
         if not any(channel in available_channels for channel in requested_channels):
-            return None
-    return edf_path
+            return False
+    return True
 
-def list_patients(cfg: dict) -> list[str]:
-    if cfg.get("annotated_only", True):
-        edf_files = get_annotated_hsp_edf_files(cfg["root"], recursive=True)
-    else:
-        edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
-    if cfg.get("max_edf_files") is not None:
-        edf_files = edf_files[: int(cfg["max_edf_files"])]
-
-    logger.progress_start(len(edf_files), desc="Collecting patients", leave=True)
-    patients = []
-    if cfg["num_workers_dataset"] > 1:
-        with multiprocessing.Pool(cfg["num_workers_dataset"]) as pool:
-            iter_objects = pool.imap_unordered(partial(is_usable, cfg=cfg), edf_files)
-            for result in iter_objects:
-                if result:
-                    patients.append(result)
-                logger.progress_advance(1)
-    else:
-        for patient in edf_files:
-            if is_usable(patient, cfg) is not None:
-                patients.append(patient)
-            logger.progress_advance(1)
-
-    logger.progress_close()
-    logger.info(f"Collected patient stats for {len(patients)}/{len(edf_files)} patients.")
-
-    if cfg.get("patient_limit") is not None:
-        patients = patients[: int(cfg["patient_limit"])]
-    return patients
+def select_patients(records: list[str], channels: list[ChannelConfig], require_arousal_annotation: bool) -> list[str]:
+    selected = []
+    for record in records:
+        if not has_required_channels(record, channels):
+            continue
+        annotation_path = get_hsp_annotation_path(record)
+        if annotation_path is None:
+            continue
+        if require_arousal_annotation and int(get_hsp_annotation_label_counts(annotation_path).get("arousal", 0)) == 0:
+            continue
+        selected.append(record)
+    return selected
 
 def build_model_and_trainer(train_dataset, cfg: dict):
     n_channels = len(train_dataset.get_input_channels())
@@ -247,7 +209,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
             activation="elu",
             mlp_size=512,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["scaler"] else None
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["robust_scaler"] else None
         )
     elif model_name == "utime-huge":
         model = UTime(
@@ -262,7 +224,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
             activation="elu",
             mlp_size=1024,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["scaler"] else None
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["robust_scaler"] else None
         )
     elif model_name == "utime-small":
         model = UTime(
@@ -277,7 +239,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
             activation="elu",
             mlp_size=64,
             dropout_p=0,
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["scaler"] else None 
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(7,n_channels)])] if not cfg["grouped"] else [RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(1, n_channels)])] if cfg["robust_scaler"] else None
         )
     elif model_name == "multi":
         if cfg["grouped"]:
@@ -301,7 +263,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
             mlp_size=64,
             dropout_p=0,
             activation="elu",
-            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels-1)])] if cfg["scaler"] else None 
+            preprocessors=[RobustScaler(lower_quantile=0.1, upper_quantile=0.9,channels=[i for i in range(0, n_channels-1)])] if cfg["robust_scaler"] else None
         )
         eeg_model = SleepTransformer(
             classes=None,
@@ -319,6 +281,8 @@ def build_model_and_trainer(train_dataset, cfg: dict):
     else:
         raise ValueError(f"Did not recoginize model {model_name}")
     
+    if cfg["loss"] != "cross_entropy":
+        raise ValueError(f"Unsupported loss {cfg['loss']!r}.")
     trainer = MulticlassTrainer(
         epochs=cfg["epochs"],
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
@@ -326,8 +290,8 @@ def build_model_and_trainer(train_dataset, cfg: dict):
             optimizer, start_factor=1, end_factor=1e-2, total_iters=50
         ), 
         classes=TARGET_CLASSES,
-        loss_function=torch.nn.functional.cross_entropy,#torch.nn.functional.binary_cross_entropy_with_logits,
-        save_every=10,
+        loss_function=torch.nn.functional.cross_entropy,
+        save_every=int(cfg["save_every"]),
         # loss_mode="inverse",
         balance_batches=cfg.get("balance_batches", False),
         balance_gamma=cfg.get("balance_gamma", 0.75),
@@ -335,43 +299,28 @@ def build_model_and_trainer(train_dataset, cfg: dict):
     )
     return model, trainer
 
-def build_expert_components(cfg: dict):
-    cfg = dict(cfg)
-    dataset = build_dataset_template(cfg)
-    model, trainer = build_model_and_trainer(dataset, cfg)
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
-
 def read_yaml_config(path: str) -> dict:
-    cfg = dict(DEFAULT_CONFIG)
     with open(path, "r", encoding="utf-8") as handle:
-        loaded_cfg = yaml.safe_load(handle) or {}
-    if not isinstance(loaded_cfg, dict):
+        cfg = yaml.safe_load(handle) or {}
+    if not isinstance(cfg, dict):
         raise ValueError(f"Config file must contain a top-level mapping: {path}")
-    cfg.update(loaded_cfg)
+    unknown = sorted(set(cfg) - AROUSAL_CONFIG_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown arousal config keys in {path}: {unknown}")
+    missing = sorted(REQUIRED_AROUSAL_CONFIG_KEYS - set(cfg))
+    if missing:
+        raise ValueError(f"Missing arousal config keys in {path}: {missing}")
     return cfg
-
-def log_patient_split(train_patients, val_patients):
-    with open('train_hsp.txt', 'w') as f:
-        for line in train_patients:
-            f.write(f"{line}\n")
-    with open('val_hsp.txt', 'w') as f:
-        for line in val_patients:
-            f.write(f"{line}\n")
-    logger.artifact("train_hsp.txt", "train.txt")
-    logger.artifact("val_hsp.txt", "val.txt")
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate an arousal model.")
-    parser.add_argument("--config", type=str, default=None, help="Path to a YAML run config.")
+    parser.add_argument("--config", type=str, required=True, help="Path to a YAML run config.")
     parser.add_argument("--id", type=str, default=None, help="ID of the experiment")
     args = parser.parse_args()
     cfg = read_yaml_config(args.config)
     if args.id is not None:
         cfg["id"] = args.id
+    seed_everything(int(cfg["seed"]))
     # cfg = normalize_config(cfg)
 
     experiment_name = "arousal" if cfg['id'] is None else f"arousal_{cfg['id']}" 
@@ -379,18 +328,42 @@ def main():
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
     
-    os.makedirs(os.path.join("results", "arousal", experiment_name), exist_ok=True)
-    logger.set_log_file(os.path.join("results", "arousal", experiment_name, "output.log"))
+    log_path = str(cfg.get("log_path", os.path.join("results", "arousal")))
+    os.makedirs(os.path.join(log_path, experiment_name), exist_ok=True)
+    logger.set_log_file(os.path.join(log_path, experiment_name, "output.log"))
 
-    train_patients = list_patients(cfg)
-    val_dataset = None
-    if cfg["val_frac"] > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=cfg["val_frac"],seed=1)
+    requested_channels = cfg_to_channelcfg(cfg)
+    require_arousal_annotation = bool(cfg.get("require_arousal_annotation", False))
+    split_path = cfg.get("split")
+    if split_path:
+        split = load_split(split_path)
+        task_split = split["tasks"]["arousal"]["edf_files"]
+        train_patients = list(task_split["train"])
+        val_patients = list(task_split["val"])
+        test_patients = list(task_split["test"])
+        for name, records in [ ("train", train_patients), ("val", val_patients), ("test", test_patients)]:
+            limit = cfg.get(f"max_{name}_patients")
+            if limit is not None:
+                records[:] = records[: int(limit)]
+        train_patients = select_patients(train_patients, requested_channels, require_arousal_annotation)
+        val_patients = select_patients(val_patients, requested_channels, require_arousal_annotation)
+        test_patients = select_patients(test_patients, requested_channels, require_arousal_annotation)
     else:
-        val_patients = []
-    log_patient_split(train_patients, val_patients)
-
-    # with suppress_stdout_logging(logger):
+        train_patients = select_patients(
+            get_annotated_hsp_edf_files(str(cfg["root"]), recursive=True),
+            requested_channels,
+            require_arousal_annotation,
+        )
+        if cfg.get("val_frac", 0.1) > 0:
+            train_patients, val_patients = random_split(
+                train_patients,
+                test_frac=cfg.get("val_frac", 0.1),
+                seed=int(cfg["seed"]),
+            )
+        else:
+            val_patients = []
+        test_patients = []
+    val_dataset = None
     logger.context("TRAIN")
     train_dataset = build_dataset(train_patients, cfg)
     logger.uncontext()
@@ -398,33 +371,14 @@ def main():
         logger.context("VAL")
         val_dataset = build_dataset(val_patients, cfg)
         logger.uncontext()
-    test_dataset = None 
+    test_dataset = None
+    if len(test_patients) > 0:
+        logger.context("TEST")
+        test_dataset = build_dataset(test_patients, cfg)
+        logger.uncontext()
 
-    trainer_cfg = dict(cfg)
-    trainer_cfg["epochs"] = 2 if cfg["dry"] else cfg["epochs"]
-    model, trainer = build_model_and_trainer(train_dataset, trainer_cfg)
-    expert_builder_config = {
-        "sample_frequency": cfg["sample_frequency"],
-        "target_resolution": cfg["target_resolution"],
-        "stride": cfg["stride"],
-        "channels": list(cfg["channels"]),
-        "clean": bool(cfg.get("clean", False)),
-        "grouped": cfg["grouped"],
-        "total_input": cfg["total_input"],
-        "model": cfg["model"],
-        "scaler": cfg["scaler"],
-        "arousal_weight": cfg["arousal_weight"],
-        "balance_batches": cfg.get("balance_batches", False),
-        "balance_gamma": cfg.get("balance_gamma", 0.75),
-        "epochs": trainer_cfg["epochs"],
-        "num_workers_dataset": cfg["num_workers_dataset"],
-        "max_edf_files": cfg.get("max_edf_files"),
-        "patient_limit": cfg.get("patient_limit"),
-        "annotated_only": cfg.get("annotated_only", True),
-    }
-    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
-
-    run_result = run(
+    model, trainer = build_model_and_trainer(train_dataset, cfg)
+    run(
         RunCfg(
             experiment_name=experiment_name,
             model_name=cfg["model"],
@@ -436,21 +390,14 @@ def main():
             batch_size=cfg["batch_size"],
             n_samples=cfg["n_samples"],
             num_workers_dataloader=cfg["num_workers_dataloader"],
+            n_samples_test=cfg.get("test_window_limit"),
             test_repeats=[1,2] if cfg["grouped"] else [1],
-            use_energy_tracker=False,
             tags={"model": cfg["model"]},
             collate_fn=batch_collate,
             use_mlflow=cfg["use_mlflow"],
-            log_path=os.path.join("results", "arousal"),
-            meta_data={**cfg, "config": args.config},
-            expert_name=experiment_name,
+            log_path=log_path,
+            meta_data=cfg,
             expert_task="arousal",
-            expert_builder={
-                "module": "train_arousal_hsp",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
         )
     )
 

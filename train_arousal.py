@@ -31,7 +31,7 @@ from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models import MultiModel, MetaModelEntry, SleepTransformer
 from sleepwalker.models.UTime import UTime
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
     "val_frac": 0.1,
     "dry": False,
     "use_mlflow": True,
+    "seed": 17,
 }
 
 
@@ -174,7 +175,7 @@ def build_dataset_template(cfg: dict):
 
 def build_dataset(patients: list[str], cfg: dict):
     dataset = build_dataset_template(cfg)
-    dataset.initialize(patients, cfg["num_workers_dataset"])
+    dataset.initialize(patients, int(cfg["num_workers_dataset"]))
     return dataset
 
 def is_pap_patient(edf_path: str) -> bool:
@@ -223,9 +224,12 @@ def has_required_channels(edf_path: str, cfg: dict) -> bool:
             return False
     return True
 
+
 def list_patients(source_root: str, cfg: dict) -> list[str]:
     patients = [
-        patient for patient in get_edf_files_in_repo(source_root, recursive=True) if not is_pap_patient(patient) and has_required_channels(patient, cfg)
+        patient
+        for patient in get_edf_files_in_repo(source_root, recursive=True)
+        if not is_pap_patient(patient) and has_required_channels(patient, cfg)
     ]
     return patients[:2] if cfg["dry"] else patients
 
@@ -327,31 +331,21 @@ def build_model_and_trainer(train_dataset, cfg: dict):
         loss_function=torch.nn.functional.cross_entropy,#torch.nn.functional.binary_cross_entropy_with_logits,
         save_every=10,
         # loss_mode="inverse",
-        balance_batches=True,
+        balance_batches=False,
         balance_gamma=0.75,
         class_weights={"no_arousal":1, "arousal":cfg["arousal_weight"]}
     )
     return model, trainer
 
 
-def build_expert_components(cfg: dict):
-    cfg = {**DEFAULT_CONFIG, **dict(cfg)}
-    dataset = build_dataset_template(cfg)
-    model, trainer = build_model_and_trainer(dataset, cfg)
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
-
-
-def read_yaml_config(path: str) -> dict:
+def read_yaml_config(path: str | None) -> dict:
     cfg = dict(DEFAULT_CONFIG)
-    with open(path, "r", encoding="utf-8") as handle:
-        loaded_cfg = yaml.safe_load(handle) or {}
-    if not isinstance(cfg, dict):
-        raise ValueError(f"Config file must contain a top-level mapping: {path}")
-    cfg.update(loaded_cfg)
+    if path is not None:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded_cfg = yaml.safe_load(handle) or {}
+        if not isinstance(loaded_cfg, dict):
+            raise ValueError(f"Config file must contain a top-level mapping: {path}")
+        cfg.update(loaded_cfg)
     return cfg
 
 # def normalize_config(raw_cfg: dict) -> dict:
@@ -389,6 +383,7 @@ def main():
     cfg = read_yaml_config(args.config)
     if args.id is not None:
         cfg["id"] = args.id
+    seed_everything(int(cfg["seed"]))
     # cfg = normalize_config(cfg)
 
     experiment_name = "arousal" if cfg['id'] is None else f"arousal_{cfg['id']}" 
@@ -404,7 +399,7 @@ def main():
 
     val_dataset = None
     if cfg["val_frac"] > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=cfg["val_frac"])
+        train_patients, val_patients = random_split(train_patients, test_frac=cfg["val_frac"], seed=int(cfg["seed"]))
     else:
         val_patients = []
 
@@ -423,21 +418,6 @@ def main():
     trainer_cfg = dict(cfg)
     trainer_cfg["epochs"] = 2 if cfg["dry"] else cfg["epochs"]
     model, trainer = build_model_and_trainer(train_dataset, trainer_cfg)
-    expert_builder_config = {
-        "sample_frequency": cfg["sample_frequency"],
-        "target_resolution": cfg["target_resolution"],
-        "stride": cfg["stride"],
-        "channels": list(cfg["channels"]),
-        "clean": cfg["clean"],
-        "grouped": cfg["grouped"],
-        "total_input": cfg["total_input"],
-        "model": cfg["model"],
-        "scaler": cfg["scaler"],
-        "arousal_weight": cfg["arousal_weight"],
-        "epochs": trainer_cfg["epochs"],
-        "num_workers_dataset": cfg["num_workers_dataset"],
-    }
-    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 
     run_result = run(
         RunCfg(
@@ -451,21 +431,14 @@ def main():
             batch_size=cfg["batch_size"],
             n_samples=cfg["n_samples"],
             num_workers_dataloader=cfg["num_workers_dataloader"],
+            n_samples_test=1_000 if cfg["dry"] else None,
             test_repeats=[1,2] if cfg["grouped"] else [1],
-            use_energy_tracker=False,
             tags={"model": cfg["model"]},
             collate_fn=batch_collate,
             use_mlflow=cfg["use_mlflow"],
             log_path=os.path.join("results", "arousal"),
             meta_data={**cfg, "config": args.config},
-            expert_name=experiment_name,
             expert_task="arousal",
-            expert_builder={
-                "module": "train_arousal",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
         )
     )
 

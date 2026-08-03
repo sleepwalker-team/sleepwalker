@@ -19,7 +19,7 @@ from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
-from sleepwalker.trainer.utils import trim_wake
+from sleepwalker.trainer.utils import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.utils import logger, MlflowSink, count_parameters
@@ -51,7 +51,7 @@ DEVICE=os.environ.get('DEVICE', 'cuda')
 #DEVICE='cpu'
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
-    trimmed = trim_wake(data_df, label_df, label_extra_df)
+    trimmed = trim_event(data_df, label_df, label_extra_df)
     if trimmed is None:
         return None
     # has_airflow = 'Nasal Pressure' in data_df.columns or 'Airflow' in data_df.columns

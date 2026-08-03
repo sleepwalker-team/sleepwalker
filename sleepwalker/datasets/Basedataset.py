@@ -5,8 +5,7 @@ configure channels and label mappings, prepare patient-level metadata, build a
 sliding-window index, and lazily materialize model-ready samples on demand.
 
 The code is used by dataset adapters under :mod:`sleepwalker.datasets`, by
-training scripts, and by deployment code that exports unlabelled dataset
-templates for later inference. Tests in ``tests/test_datasets.py`` and
+training scripts, and by deployment code. Tests in ``tests/test_datasets.py`` and
 ``tests/test_deployment.py`` exercise the window-building, lazy loading, and
 export-related behavior documented here.
 """
@@ -19,6 +18,8 @@ from collections import defaultdict
 import copy
 from dataclasses import dataclass
 from functools import partial
+import multiprocessing
+import numbers
 import os
 import random
 import time
@@ -33,7 +34,6 @@ from torch.utils.data import Dataset
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
 from sleepwalker.datasets.normalizer import Normalizer
-import multiprocessing
 
 @dataclass
 class ChannelConfig:
@@ -49,12 +49,63 @@ class ChannelConfig:
         quality_name: Optional companion channel used as per-window quality
             metadata. When present and selected, it is passed to
             ``prepare_sample`` as ``quality_data``.
+        unit: Canonical physical unit delivered to normalizers, callbacks, and
+            the model. Compatible EDF units are converted automatically.
     """
 
     name: str
     normalizer: Optional[Normalizer] = None  
     group: Optional[str] = None
     quality_name: Optional[str] = None
+    unit: Optional[str] = None
+
+
+_UNIT_DEFINITIONS = {
+    "v": ("voltage", 1.0),
+    "mv": ("voltage", 1e-3),
+    "uv": ("voltage", 1e-6),
+    "v/s": ("voltage_rate", 1.0),
+    "mv/s": ("voltage_rate", 1e-3),
+    "uv/s": ("voltage_rate", 1e-6),
+    "%": ("percentage", 1.0),
+    "percent": ("percentage", 1.0),
+    "1": ("dimensionless", 1.0),
+    "dimensionless": ("dimensionless", 1.0),
+}
+
+
+def _normalize_unit(unit: str) -> str:
+    return unit.strip().replace("µ", "u").replace("μ", "u").lower()
+
+
+def unit_conversion_factor(
+    source_unit: Optional[str],
+    target_unit: str,
+    *,
+    assume_if_missing: bool,
+) -> float:
+    """Return the multiplier from an EDF physical unit to ``target_unit``."""
+    source = "" if source_unit is None else _normalize_unit(source_unit)
+    target = _normalize_unit(target_unit)
+    if target not in _UNIT_DEFINITIONS:
+        raise ValueError(f"Unsupported target channel unit '{target_unit}'.")
+    if not source:
+        if assume_if_missing:
+            return 1.0
+        raise ValueError(
+            f"EDF channel has no unit metadata; expected '{target_unit}'. "
+            "Set assume_units_if_missing=True only when the stored values are "
+            "known to already use the expected unit."
+        )
+    if source not in _UNIT_DEFINITIONS:
+        raise ValueError(f"Unsupported EDF channel unit '{source_unit}'.")
+    source_kind, source_scale = _UNIT_DEFINITIONS[source]
+    target_kind, target_scale = _UNIT_DEFINITIONS[target]
+    if source_kind != target_kind:
+        raise ValueError(
+            f"Incompatible channel units '{source_unit}' and '{target_unit}'."
+        )
+    return source_scale / target_scale
 
 @dataclass
 class EDFFile: 
@@ -76,6 +127,7 @@ class EDFFile:
     labels: Optional[EventIndex] = None
     labels_extra: Optional[EventIndex] = None
     normalizers: Optional[dict[str, Normalizer]] = None
+    unit_factors: Optional[dict[str, float]] = None
 
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
         """Load one signal window for the prepared patient.
@@ -94,6 +146,10 @@ class EDFFile:
         """
         if self.X is None:
             x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type, True)
+            if self.unit_factors:
+                for col, factor in self.unit_factors.items():
+                    if col in x_df.columns and factor != 1.0:
+                        x_df[col] = x_df[col] * factor
             # TODO allow normalization after augmentation?  
             if self.normalizers:
                 for col, norm in self.normalizers.items():
@@ -141,7 +197,20 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
             for k, v in b.items():
                 final_dict[k].append(v)
     
-    return {k: torch.stack(v) if k not in ignore_list else v for k, v in final_dict.items()}
+    collated = {}
+    for key, values in final_dict.items():
+        if key in ignore_list:
+            collated[key] = values
+        elif all(isinstance(value, torch.Tensor) for value in values):
+            collated[key] = torch.stack(values)
+        elif all(isinstance(value, numbers.Number) for value in values):
+            collated[key] = torch.as_tensor(values)
+        else:
+            raise TypeError(
+                f"Cannot collate key '{key}' with values of type "
+                f"{sorted({type(value).__name__ for value in values})}."
+            )
+    return collated
 
 class EventIndex:
     """
@@ -438,6 +507,16 @@ class BaseDataset(Dataset, ABC):
         means both channels are replaced by their values minus the mean of
         `C3`/`C4` at each time step.
 
+    assume_units_if_missing
+        If `False`, a configured channel unit requires unit metadata in the EDF
+        header. If `True`, missing metadata is treated as already matching the
+        configured unit. Explicitly incompatible units are always rejected.
+
+    edf_unit_overrides
+        Explicit corrections for EDF headers whose unit labels are known to be
+        wrong for a particular dataset release. Corrections are applied before
+        conversion and become part of the stored expert contract.
+
     Examples
     --------
     Trim wake once per patient:
@@ -496,14 +575,17 @@ class BaseDataset(Dataset, ABC):
         prepare_target: Optional[Callable] = None,
         prepare_sample: Optional[Callable] = None,
         online_max_tries:int = 128,
+        online_retry_scope: str = "global",
         force_one_day: bool = True,
         rereference: Optional[List[List[str]]] = None, # [ ["C3-A1", "C4-A2"] ]
         group_sampling_strategy: Optional[str] = 'random', # [random, None]
+        assume_units_if_missing: bool = False,
+        edf_unit_overrides: Optional[Mapping[str, str]] = None,
     ) -> None:
         super().__init__()
         
         # Config
-        self.channels = channels
+        self.channels = list(channels)
         self.event_mapping = event_mapping
         self.remove_unmapped_events = remove_unmapped_events
         self.sample_frequency = sample_frequency
@@ -520,10 +602,14 @@ class BaseDataset(Dataset, ABC):
         self.prepare_patient_callback = prepare_patient
         self.all_patients: list[str | os.PathLike] = []
         self.online_max_tries = online_max_tries
-        # self.online_retry_scope = "global"
+        if online_retry_scope not in {"global", "patient"}:
+            raise ValueError("online_retry_scope must be 'global' or 'patient'.")
+        self.online_retry_scope = online_retry_scope
         self.initialized = False
         self.force_one_day = force_one_day
         self.rereference = rereference
+        self.assume_units_if_missing = bool(assume_units_if_missing)
+        self.edf_unit_overrides = dict(edf_unit_overrides or {})
         self.edf_files: list[EDFFile] = []
         self.lower_bounds: list[int] = []
         self.upper_bounds: list[int] = []
@@ -531,6 +617,12 @@ class BaseDataset(Dataset, ABC):
         self.channel_configs_by_name: Dict[str, ChannelConfig] = {}
         self.channel_configs_by_group: Dict[str, list[ChannelConfig]] = defaultdict(list)
         for cfg in self.channels:
+            previous = self.channel_configs_by_name.get(cfg.name)
+            if previous is not None and previous.unit != cfg.unit:
+                raise ValueError(
+                    f"Channel '{cfg.name}' is configured with conflicting units "
+                    f"{previous.unit!r} and {cfg.unit!r}."
+                )
             self.channel_configs_by_name[cfg.name] = cfg
             if cfg.group is not None:
                 self.channel_groups[cfg.group].append(cfg.name)
@@ -599,28 +691,6 @@ class BaseDataset(Dataset, ABC):
     def get_input_channels(self) -> list[str]:
         """Return the effective model input channel names after grouping."""
         return list(self.channel_groups.keys())
-
-    def to_unlabelled(self):
-        """Build an inference-time dataset template without labels.
-
-        Returns:
-            An ``UnlabelledDataset`` configured with the same signal-loading and
-            sample-building settings as this dataset.
-        """
-        from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-
-        return UnlabelledDataset(
-            channels=self.channels,
-            sample_frequency=self.sample_frequency,
-            resample_type=self.resample_type,
-            total_input=self.total_input,
-            stride=self.stride,
-            prepare_patient=self.prepare_patient_callback,
-            prepare_sample=self.prepare_sample_callback,
-            online_max_tries=self.online_max_tries,
-            force_one_day=self.force_one_day,
-            rereference=self.rereference,
-        )
 
     def __len__(self):
         return sum([f.length for f in self.edf_files])
@@ -704,13 +774,50 @@ class BaseDataset(Dataset, ABC):
         channel_names = list(dict.fromkeys(channel_names))
         normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
 
+        meta = read_edf_meta(edf_path)
+        available_channels = set(meta["signals"])
+        missing_groups = [
+            group
+            for group, candidates in self.channel_groups.items()
+            if not any(candidate in available_channels for candidate in candidates)
+        ]
+        if missing_groups:
+            raise ValueError(
+                f"Missing required logical channel groups {missing_groups}; "
+                f"available EDF channels are {sorted(available_channels)}."
+            )
+        if meta.get("source") != "pyedflib" and any(cfg.unit is not None for cfg in self.channels):
+            raise ValueError(
+                "Unit-aware loading requires an EDF header readable by pyEDFlib; "
+                "the MNE fallback does not expose model-input units reliably."
+            )
+        source_units = dict(meta.get("units", {}))
+        source_units.update(
+            {
+                channel: unit
+                for channel, unit in self.edf_unit_overrides.items()
+                if channel in available_channels
+            }
+        )
+        unit_factors = {
+            cfg.name: unit_conversion_factor(
+                source_units.get(cfg.name),
+                cfg.unit,
+                assume_if_missing=self.assume_units_if_missing,
+            )
+            for cfg in self.channels
+            if cfg.name in available_channels and cfg.unit is not None
+        }
+
         classes = set()
         extra_classes = set()
         data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type, verbose=True)
         if data_df is None or len(data_df) == 0:
             raise ValueError("Found empty EDF file")
+        for col, factor in unit_factors.items():
+            if col in data_df.columns and factor != 1.0:
+                data_df[col] = data_df[col] * factor
 
-        meta = read_edf_meta(edf_path)
         start = meta["start"]
         end = meta["end"]
 
@@ -752,19 +859,6 @@ class BaseDataset(Dataset, ABC):
                     f"Edf file: {edf_path} appears to be longer than one entire day. Is this a loading error? If not, set force_one_day = False"
                 )
 
-            if self.prepare_patient_callback is not None:
-                prepared = self.prepare_patient_callback(
-                    data_df=data_df,
-                    label_df=df,
-                    label_extra_df=df_additional,
-                    patient=edf_path,
-                )
-                if prepared is None:
-                    return None
-                data_df, df, df_additional = prepared
-                if df is None or len(df) == 0:
-                    raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
-
             classes = set(df["Label"].unique())
 
             start = max(start, df["Starttime"].min())
@@ -772,6 +866,24 @@ class BaseDataset(Dataset, ABC):
         else:
             df = None
             df_additional = None
+
+        if self.prepare_patient_callback is not None:
+            prepared = self.prepare_patient_callback(
+                data_df=data_df,
+                label_df=df,
+                label_extra_df=df_additional,
+                patient=edf_path,
+            )
+            if prepared is None:
+                return None
+            data_df, df, df_additional = prepared
+            if data_df is None or len(data_df) == 0:
+                raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
+            if self.event_mapping is not None and (df is None or len(df) == 0):
+                raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
+
+        start = max(start, data_df.index[0])
+        end = min(end, data_df.index[-1])
 
         return {
             "path": edf_path,
@@ -783,9 +895,10 @@ class BaseDataset(Dataset, ABC):
             "classes": classes,
             "extra_classes": extra_classes,
             "normalizers": normalizers,
+            "unit_factors": unit_factors,
         }
 
-    def prepare_patient(self, edf_path) -> Optional[EDFFile]:
+    def prepare_patient(self, edf_path, *, raise_errors: bool = False) -> Optional[EDFFile]:
         """Prepare one patient recording for lazy window sampling.
 
         Args:
@@ -836,6 +949,7 @@ class BaseDataset(Dataset, ABC):
                 start_date=artifacts["start"],
                 classes=artifacts["classes"].union(artifacts["extra_classes"]),
                 normalizers=artifacts["normalizers"],
+                unit_factors=artifacts["unit_factors"],
             )
             elapsed = time.perf_counter() - started_at
             if elapsed >= slow_warning_seconds:
@@ -846,6 +960,8 @@ class BaseDataset(Dataset, ABC):
             return result
         except Exception as e:
             elapsed = time.perf_counter() - started_at
+            if raise_errors:
+                raise ValueError(f"Cannot prepare EDF file {edf_path}: {e}") from e
             logger.warning(f"Cannot read edf file: {edf_path} after {elapsed:.1f}s due to {e}")
 
             return None #EDFFile(path=edf_path, classes=classes.union(extra_classes))
@@ -914,7 +1030,13 @@ class BaseDataset(Dataset, ABC):
             logger.warning(f"Failed to summarize patient {edf_path}: {exc}")
             return None
 
-    def initialize(self, patients: Sequence[str | os.PathLike], num_workers: int = 4) -> None:
+    def initialize(
+        self,
+        patients: Sequence[str | os.PathLike],
+        num_workers: int = 4,
+        *,
+        strict: bool = False,
+    ) -> None:
         """Prepare patient metadata and build the sliding-window index.
 
         Args:
@@ -939,14 +1061,17 @@ class BaseDataset(Dataset, ABC):
 
         if num_workers > 1:
             pool = multiprocessing.Pool(num_workers)
-            iter_objects = pool.imap_unordered(partial(self.prepare_patient), patients)
+            iter_objects = pool.imap_unordered(
+                partial(self.prepare_patient, raise_errors=strict),
+                patients,
+            )
         else:
             iter_objects = patients
 
         lower = 0
         for edf in iter_objects: 
             if num_workers <= 1:
-                edf = self.prepare_patient(edf)
+                edf = self.prepare_patient(edf, raise_errors=strict)
 
             if edf:
                 edf = cast(EDFFile, edf)
@@ -983,7 +1108,7 @@ class BaseDataset(Dataset, ABC):
         if len(self.channel_groups) > 0:
             available_columns = list(x_df.columns)
             selected_columns = []
-            if self.group_sampling_strategy == 'random':
+            if self.group_sampling_strategy in {'random', 'first'}:
                 renamed_columns = list(self.channel_groups.keys())
             elif self.group_sampling_strategy == 'none':
                 renamed_columns = sum([[f'{k}' for _ in range(len([channel for channel in v if channel in available_columns]))] for k, v in self.channel_groups.items()], [])
@@ -1005,6 +1130,16 @@ class BaseDataset(Dataset, ABC):
                         if selected_cfg.quality_name not in x_df.columns:
                             raise ValueError(
                                 f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
+                            )
+                        selected_quality[group] = x_df[selected_cfg.quality_name].copy()
+                elif self.group_sampling_strategy == 'first':
+                    selected_cfg = available[0]
+                    selected_columns.append(selected_cfg.name)
+                    if selected_cfg.quality_name is not None:
+                        if selected_cfg.quality_name not in x_df.columns:
+                            raise ValueError(
+                                f"Missing quality channel '{selected_cfg.quality_name}' "
+                                f"for selected channel '{selected_cfg.name}'."
                             )
                         selected_quality[group] = x_df[selected_cfg.quality_name].copy()
                 elif self.group_sampling_strategy == 'none':
@@ -1032,6 +1167,14 @@ class BaseDataset(Dataset, ABC):
         else:
             item["data"] = torch.from_numpy(x_df.values).float()
             return item
+
+    def build_sample_from_window_df(
+        self,
+        item: Dict[str, Any],
+        x_df: pd.DataFrame,
+    ) -> Optional[Dict[str, Any]]:
+        """Build a sample from an already loaded window."""
+        return self.run_build_sample(item, x_df)
 
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
         """Build one candidate item from a prepared patient and start time.
@@ -1141,7 +1284,10 @@ class BaseDataset(Dataset, ABC):
                     break
                 
                 cnt += 1
-                idx = int(np.random.randint(self.lower_bounds[pidx], self.upper_bounds[pidx]))
+                if self.online_retry_scope == "global":
+                    idx = int(np.random.choice(len(self)))
+                else:
+                    idx = int(np.random.randint(self.lower_bounds[pidx], self.upper_bounds[pidx]))
         
         if self.online_max_tries == 0 or cnt <= self.online_max_tries:
             return item

@@ -11,6 +11,7 @@ Concrete task logic lives in subclasses such as
 
 import shutil
 import tempfile
+import os
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -20,8 +21,6 @@ import torch
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from sleepwalker.deployment.package import save_expert_package
-from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.utils import logger
 
@@ -246,88 +245,6 @@ class BaseTrainer(ABC):
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
-    def predict_patient(
-        self,
-        model,
-        dataset_template,
-        edf_path,
-        batch_size: int,
-        num_workers_dataset: int = 1,
-        num_workers_loader: int = 0,
-        collate_fn=None,
-    ) -> pd.DataFrame:
-        """Predict one EDF file using a clone of an unlabelled dataset template.
-
-        Args:
-            model: Model instance to evaluate.
-            dataset_template: Dataset object implementing ``clone()`` and
-                ``initialize(...)``.
-            edf_path: EDF file to score.
-            batch_size: Inference batch size.
-            num_workers_dataset: Worker count used while initializing the
-                temporary dataset.
-            num_workers_loader: Dataloader worker count.
-            collate_fn: Optional batch collator. Defaults to
-                :func:`sleepwalker.datasets.Basedataset.batch_collate`.
-
-        Returns:
-            A prediction DataFrame assembled by :meth:`predict_loader`.
-        """
-        if not hasattr(dataset_template, "clone"):
-            raise ValueError(
-                f"Prediction dataset of type {type(dataset_template).__name__} does not implement clone()."
-            )
-        dataset = dataset_template.clone()
-        dataset.initialize([edf_path], num_workers=num_workers_dataset)
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers_loader,
-            collate_fn=batch_collate if collate_fn is None else collate_fn,
-            drop_last=False,
-            persistent_workers=num_workers_loader > 0,
-        )
-        return self.predict_loader(model, loader)
-
-    def save_package_snapshot(
-        self,
-        folder: str,
-        *,
-        model,
-        optimizer=None,
-        scheduler=None,
-        package_cfg: Optional[dict] = None,
-    ) -> str:
-        """Persist one expert package snapshot for the current trainer state.
-
-        This is a trainer-level helper rather than a nested closure so concrete
-        subclasses can trigger the same packaging behavior from custom training
-        flows. The method requires the caller to provide the current model and
-        optimizer/scheduler objects because those are owned by the fit loop, not
-        stored permanently on the trainer instance.
-
-        ``package_cfg`` defaults to ``self._expert_package_cfg``, which is
-        injected by :mod:`sleepwalker.trainer.Run` before training starts.
-        """
-        package_cfg = getattr(self, "_expert_package_cfg", None) if package_cfg is None else package_cfg
-        if package_cfg is None or package_cfg.get("dataset_template") is None:
-            raise ValueError("save_package_snapshot requires trainer._expert_package_cfg with a dataset_template.")
-
-        save_expert_package(
-            folder,
-            expert_name=str(package_cfg["expert_name"]),
-            task=str(package_cfg["task"]),
-            model=model,
-            trainer=self,
-            dataset_template=package_cfg["dataset_template"],
-            builder=package_cfg.get("builder"),
-            optimizer=optimizer,
-            scheduler=scheduler,
-            metadata=dict(package_cfg.get("metadata", {})),
-        )
-        return folder
-
     def fit(self, model, train_loader, val_loader=None):
         """Train a model and optionally track validation checkpoints.
 
@@ -379,10 +296,6 @@ class BaseTrainer(ABC):
         self.epoch_step = 0
         last_folder = None
 
-        package_cfg = getattr(self, "_expert_package_cfg", None)
-        if package_cfg is None or package_cfg.get("dataset_template") is None:
-            raise ValueError("BaseTrainer.fit requires trainer._expert_package_cfg with a dataset_template.")
-
         for epoch in range(self.epochs):
             self._set_loader_epoch(train_loader, epoch)
             model.train()
@@ -392,14 +305,10 @@ class BaseTrainer(ABC):
 
             if self.save_every > 0 and (epoch % self.save_every == 0):
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
-                last_folder = self.save_package_snapshot(
-                    tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"),
-                    model=model,
-                    optimizer=opt,
-                    scheduler=lr_scheduler,
-                    package_cfg=package_cfg,
-                )
-                logger.artifact(path=last_folder, dest=f"{epoch}")
+                last_folder = tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_")
+                last_checkpoint = os.path.join(last_folder, "model.pt")
+                torch.save(model.state_dict(), last_checkpoint)
+                logger.artifact(path=last_checkpoint, dest=f"{epoch}")
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -416,15 +325,11 @@ class BaseTrainer(ABC):
                 if self.best_model_idx is None or imin != self.best_model_idx:
                     if self.best_checkpoint is not None:
                         logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
-                        shutil.rmtree(self.best_checkpoint)
+                        shutil.rmtree(os.path.dirname(self.best_checkpoint))
 
-                    self.best_checkpoint = self.save_package_snapshot(
-                        tempfile.mkdtemp(prefix="sleepwalker_best_model_"),
-                        model=model,
-                        optimizer=opt,
-                        scheduler=lr_scheduler,
-                        package_cfg=package_cfg,
-                    )
+                    best_folder = tempfile.mkdtemp(prefix="sleepwalker_best_model_")
+                    self.best_checkpoint = os.path.join(best_folder, "model.pt")
+                    torch.save(model.state_dict(), self.best_checkpoint)
                     self.best_model_idx = imin
 
                 if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
@@ -438,8 +343,15 @@ class BaseTrainer(ABC):
 
             self.epoch_step += 1
 
+        if self.best_checkpoint is not None:
+            return {
+                "losses": losses,
+                "outputs": outputs,
+                "best_model": self.best_model_idx,
+                "checkpoint": self.best_checkpoint,
+            }
         if last_folder is not None:
-            return {"losses": losses, "outputs": outputs, "checkpoint": last_folder}
+            return {"losses": losses, "outputs": outputs, "checkpoint": os.path.join(last_folder, "model.pt")}
         return {"losses": losses, "outputs": outputs}
 
     @abstractmethod

@@ -10,21 +10,16 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import redirect_stdout
 import io
-from typing import Any,  Dict, List, Optional, Union
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import pyedflib
-from pyedflib import DO_NOT_READ_ANNOTATIONS, DO_NOT_CHECK_FILE_SIZE
+from pyedflib import DO_NOT_CHECK_FILE_SIZE, DO_NOT_READ_ANNOTATIONS, EdfReader
 import mne 
 
 from sleepwalker.utils import logger
-
-import os
-import numpy as np
-from typing import List, Tuple, Optional
-from pyedflib import EdfReader
-from scipy.signal import resample_poly
 
 def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = False) -> Tuple[bool, List[str]]:
     """
@@ -246,7 +241,10 @@ def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = Fal
 
     return readable
 
-def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) -> Dict[str, Any]:
+def read_edf_meta(
+    edf: Union[str, os.PathLike, pyedflib.EdfReader],
+    verbose: bool = False,
+) -> Dict[str, Any]:
     """Read basic metadata for an EDF file or already-open reader.
 
     Args:
@@ -262,7 +260,9 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
         MNE is used, per-channel sampling frequencies are inferred from the
         global raw object frequency.
     """
-    close_after = isinstance(edf, str)
+    close_after = isinstance(edf, (str, os.PathLike))
+    if isinstance(edf, os.PathLike):
+        edf = os.fspath(edf)
 
     f = None
     try:
@@ -279,6 +279,7 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
 
         labels = f.getSignalLabels()
         fs = {lab: float(f.getSampleFrequency(i)) for i, lab in enumerate(labels)}
+        units = {lab: str(f.getPhysicalDimension(i)).strip() for i, lab in enumerate(labels)}
         duration_s = float(f.getFileDuration())
         start = pd.Timestamp(f.getStartdatetime()).tz_localize(None)
         end = start + pd.to_timedelta(f"{duration_s}s")
@@ -288,6 +289,7 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
             "duration_s": duration_s,
             "signals": labels,
             "fs": fs,
+            "units": units,
             "source": "pyedflib",
         }
     except Exception as e:
@@ -298,6 +300,8 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
 
         labels = raw.ch_names
         fs = {lab: float(raw.info["sfreq"]) for lab in labels}
+        original_units = getattr(raw, "_orig_units", {})
+        units = {lab: str(original_units.get(lab, "")).strip() for lab in labels}
         start = raw.info["meas_date"]
         duration_s = raw.n_times / raw.info["sfreq"]
         if start is None:
@@ -311,6 +315,7 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
             "duration_s": duration_s,
             "signals": labels,
             "fs": fs,
+            "units": units,
             "source": "mne",
         }
     finally:
@@ -321,7 +326,7 @@ def read_edf_meta(edf: Union[str, pyedflib.EdfReader], verbose: bool = False) ->
                 pass
 
 def edf_to_df(
-    edf: Union[str, pyedflib.EdfReader],
+    edf: Union[str, os.PathLike, pyedflib.EdfReader],
     channels: List[str],
     start: Optional[pd.Timestamp],
     end: Optional[pd.Timestamp],
@@ -353,7 +358,9 @@ def edf_to_df(
         resampling and gap filling, but exact backend equivalence is not
         documented.
     """
-    close_after = isinstance(edf, str)
+    close_after = isinstance(edf, (str, os.PathLike))
+    if isinstance(edf, os.PathLike):
+        edf = os.fspath(edf)
     f = None
 
     try:

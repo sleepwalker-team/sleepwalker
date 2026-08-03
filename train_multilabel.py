@@ -26,7 +26,7 @@ from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.models import ExpertInterfaceEdge, MetaModel, MetaModelEntry, SleepTransformer, StructuredExpertInterfaceMetaModel
 from sleepwalker.models.UTime import UTime
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.utils import MlflowSink, logger
@@ -67,12 +67,13 @@ channels_cfgs = [
         normalizer=EEGFilterNormalizer(fs=sample_frequency),
         group="EEG",
         quality_name=impedance_channels[c],
+        unit="V",
     )
     for c in sleep_channels
 ] + [
-    ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None),
-    ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None),
-    ChannelConfig(name="Saturation", normalizer=SaturationFilterNormalizer(fs=sample_frequency,clip_range=None), group=None),
+    ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None, unit="V"),
+    ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None, unit="V"),
+    ChannelConfig(name="Saturation", normalizer=SaturationFilterNormalizer(fs=sample_frequency,clip_range=None), group=None, unit="%"),
     ChannelConfig(name="Pulse Waveform", normalizer=PulseFilterNormalizer(fs=sample_frequency), group=None),
 ]
 
@@ -153,7 +154,16 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient=Non
     return data_df, label_df, label_extra_df
 
 
-def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra=None, patient=None, time=None):
+def prepare_multilabel_sample(
+    data,
+    quality_data=None,
+    target=None,
+    target_extra=None,
+    patient=None,
+    time=None,
+    *,
+    quality_filter_enabled: bool = True,
+):
     """Apply signal-quality rejection and build one multitask sample item.
 
     Returns:
@@ -164,7 +174,7 @@ def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra
         The exact thresholds are experiment-specific and are documented here as
         current script behavior, not as validated general defaults.
     """
-    if not enable_sample_quality_filter:
+    if not quality_filter_enabled:
         item = {
             "data": torch.from_numpy(data.values).float(),
             "target": target,
@@ -211,7 +221,7 @@ def prepare_multilabel_sample(data, quality_data=None, target=None, target_extra
         item["target_extra"] = target_extra
     return item
 
-def build_dataset():
+def build_dataset(quality_filter_enabled: bool = True):
     """Build the configured Ruhrland multitask dataset template."""
     dataset = Ruhrlandklinik(
         channels=channels_cfgs,
@@ -219,7 +229,10 @@ def build_dataset():
         event_mapping=event_mapping,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_target=partial(MultiLabelTrainer.prepare_target, task_config=normalized_task_config),
-        prepare_sample=prepare_multilabel_sample,
+        prepare_sample=partial(
+            prepare_multilabel_sample,
+            quality_filter_enabled=bool(quality_filter_enabled),
+        ),
         total_input=total_input,
         target_resolution=target_resolution,
     )
@@ -277,11 +290,21 @@ def summarize_patient_quality(patient, data_df, label_df, label_extra_df):
     }
 
 
-def apply_patient_filters(dataset, patients):
+def apply_patient_filters(
+    patients,
+    *,
+    dataset,
+    quantile: float,
+    num_workers: int,
+):
     """Apply script-specific signal-QC and outlier filters to Ruhrland patients."""
     # TODO FROM HERE -> A bit too strong these filterings
     # TODO ONLY APPLY FOR TRAIN DATA?
-    stats_df = dataset.get_patient_stats(patients, summarize_patient_quality, num_workers=num_workers_dataset)
+    stats_df = dataset.get_patient_stats(
+        patients,
+        summarize_patient_quality,
+        num_workers=int(num_workers),
+    )
 
     # First apply hard physiological / signal-quality checks. These remove
     # obviously broken recordings before we compute cohort-relative quantiles.
@@ -300,8 +323,8 @@ def apply_patient_filters(dataset, patients):
     # the quantiles are estimated on already plausible PSGs rather than being
     # dominated by a few pathological recordings.
     for column in ["sleep_hours", "arousal_rate_per_hour", "desat_rate_per_hour", "respiratory_event_fraction"]:
-        lower = filtered[column].quantile(patient_filter_quantile)
-        upper = filtered[column].quantile(1 - patient_filter_quantile)
+        lower = filtered[column].quantile(float(quantile))
+        upper = filtered[column].quantile(1 - float(quantile))
         filtered = filtered[(filtered[column] >= lower) & (filtered[column] <= upper)]
 
     kept = filtered["patient"].tolist()
@@ -310,28 +333,6 @@ def apply_patient_filters(dataset, patients):
         f"task-distribution filtering."
     )
     return kept
-
-def initialize_dataset(dataset, patients):
-    """Filter patients and initialize the multitask dataset."""
-    # patients = patients[:10]
-    filtered_patients = apply_patient_filters(dataset, patients)
-    dataset.initialize(filtered_patients, num_workers=num_workers_dataset)
-    return dataset
-
-def list_split_patients(purpose: str, dry_run: bool) -> list[str]:
-    """List train or test patients with the required channel set."""
-    edf_root = edf_folder if purpose == "train" else edf_folder_test
-    patients = [p for p in get_edf_files_in_repo(edf_root, recursive=True) if has_required_channels(p)]
-    return patients[:2] if dry_run else patients
-
-
-def load_split_dataset(purpose: str, dry_run: bool, max_patients: int | None = None):
-    """Build and initialize one Ruhrland dataset split."""
-    patients = list_split_patients(purpose, dry_run)
-    if max_patients is not None:
-        patients = patients[:max_patients]
-    return initialize_dataset(build_dataset(), patients)
-
 
 def build_model(dataset, fusion: str = "metamodel"):
     """Build the current multitask composite model for Ruhrland data."""
@@ -390,6 +391,12 @@ def build_model(dataset, fusion: str = "metamodel"):
             task_config=normalized_task_config,
             input_channels=input_channels,
             models=entries,
+            task_receivers={
+                "sleep": 1,
+                "arousal": 0,
+                "breathing": 0,
+                "desat": 0,
+            },
             edges=[
                 ExpertInterfaceEdge(source=1, target=0, bottleneck_dim=8),
                 ExpertInterfaceEdge(source=0, target=1, bottleneck_dim=8),
@@ -435,20 +442,6 @@ def build_trainer(epochs_: int, device: str = "cuda:0", warmup_device: str = "cp
     )
 
 
-def build_expert_components(cfg: dict):
-    dataset = build_dataset()
-    model = build_model(dataset, fusion=str(cfg.get("fusion", "metamodel")))
-    trainer = build_trainer(
-        int(cfg.get("epochs", 1)),
-        device=str(cfg.get("device", "cuda:0")),
-        warmup_device=str(cfg.get("warmup_device", "cpu")),
-    )
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
-
 def main():
     """Build datasets, trainer, and model, then launch the multitask run."""
     global num_workers_dataset, num_workers_dataloader
@@ -468,10 +461,11 @@ def main():
     parser.add_argument("--warmup_device", type=str, default="cpu")
     parser.add_argument("--disable_sample_quality_filter", action="store_true")
     parser.add_argument("--no_mlflow", action="store_true")
+    parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
+    seed_everything(args.seed)
 
-    global enable_sample_quality_filter
-    enable_sample_quality_filter = not args.disable_sample_quality_filter
+    quality_filter_enabled = not args.disable_sample_quality_filter
     num_workers_dataset = args.num_workers_dataset
     num_workers_dataloader = args.num_workers_dataloader
 
@@ -487,11 +481,32 @@ def main():
         logger.add_sink(MlflowSink(tracking_uri="sqlite:///mlflow.sqlite", experiment=run_name))
 
     logger.context("Train")
-    train_dataset = load_split_dataset("train", dry_run=args.dry, max_patients=args.max_train_patients)
+    train_candidates = get_edf_files_in_repo(edf_folder, recursive=True)
+    if args.dry:
+        train_candidates = train_candidates[:2]
+    if args.max_train_patients is not None:
+        train_candidates = train_candidates[: args.max_train_patients]
+    train_patients = [patient for patient in train_candidates if has_required_channels(patient)]
+    train_template = build_dataset(quality_filter_enabled=quality_filter_enabled)
+    train_patients = apply_patient_filters(
+        train_patients,
+        dataset=train_template,
+        quantile=patient_filter_quantile,
+        num_workers=args.num_workers_dataset,
+    )
+    train_template.initialize(train_patients, args.num_workers_dataset)
+    train_dataset = train_template
     logger.uncontext()
 
     logger.context("Test")
-    test_dataset = load_split_dataset("test", dry_run=args.dry, max_patients=args.max_test_patients)
+    test_candidates = get_edf_files_in_repo(edf_folder_test, recursive=True)
+    if args.dry:
+        test_candidates = test_candidates[:2]
+    if args.max_test_patients is not None:
+        test_candidates = test_candidates[: args.max_test_patients]
+    test_patients = [patient for patient in test_candidates if has_required_channels(patient)]
+    test_dataset = build_dataset(quality_filter_enabled=quality_filter_enabled)
+    test_dataset.initialize(test_patients, args.num_workers_dataset)
     logger.uncontext()
 
     missing = sorted(set(train_dataset.get_classes()) - set(label for cfg in normalized_task_config.values() for label in cfg["labels"]))
@@ -501,13 +516,6 @@ def main():
     trainer = build_trainer(run_epochs, device=args.device, warmup_device=args.warmup_device)
 
     model = build_model(train_dataset, fusion=args.fusion)
-    expert_builder_config = {
-        "fusion": args.fusion,
-        "epochs": run_epochs,
-        "device": args.device,
-        "warmup_device": args.warmup_device,
-    }
-    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
     run(
         RunCfg(
             experiment_name=run_name,
@@ -520,20 +528,13 @@ def main():
             batch_size=args.batch_size,
             n_samples=1_000 if args.dry and args.n_samples is None else args.n_samples,
             num_workers_dataloader=args.num_workers_dataloader,
-            use_energy_tracker=False,
+            n_samples_test=1_000 if args.dry else None,
             use_mlflow=not args.no_mlflow,
             log_path=os.path.join("results", "multilabel"),
             tags={"fusion": args.fusion},
             collate_fn=batch_collate,
             meta_data=vars(args),
-            expert_name=run_name,
             expert_task="multilabel",
-            expert_builder={
-                "module": "train_multilabel",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
         )
     )
 

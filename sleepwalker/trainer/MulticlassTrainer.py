@@ -160,6 +160,10 @@ class MulticlassTrainer(BaseTrainer):
                 if base_callback is None:
                     raise ValueError("balance_batches requires a prepare_target callback on the training dataset.")
             if can_balance_batches:
+                # TODO: Rebuild the loader (or implement balancing in a sampler)
+                # before enabling this path. Persistent DataLoader workers hold
+                # their own dataset copies, so mutating the callback here after
+                # class-count estimation does not affect those workers.
                 for current_ds in current_datasets:
                     base_callback = getattr(current_ds, "_base_prepare_target_callback", current_ds.prepare_target_callback)
                     current_ds._base_prepare_target_callback = base_callback

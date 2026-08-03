@@ -25,7 +25,7 @@ from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
@@ -56,14 +56,15 @@ EVENT_MAPPING = {
 
 def build_channel_config(channel_name: str, sample_frequency: int) -> ChannelConfig:
     if channel_name == "Chest":
-        return ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None)
+        return ChannelConfig(name="Chest", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None, unit="V")
     if channel_name == "Abdomen":
-        return ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None)
+        return ChannelConfig(name="Abdomen", normalizer=RespirationFilterNormalizer(fs=sample_frequency), group=None, unit="V")
     if channel_name == "Saturation":
         return ChannelConfig(
             name="Saturation",
             normalizer=SaturationFilterNormalizer(fs=sample_frequency, clip_range=None),
             group=None,
+            unit="%",
         )
     if channel_name == "Pulse Waveform":
         return ChannelConfig(name="Pulse Waveform", normalizer=PulseFilterNormalizer(fs=sample_frequency), group=None)
@@ -175,6 +176,7 @@ def is_pap_patient(edf_path: str) -> bool:
     ]
     return any(ch in available_channels for ch in PAP_CHANNEL_PATTERNS)
 
+
 def has_required_channels(edf_path: str, channels: list[str]) -> bool:
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
@@ -189,29 +191,6 @@ def list_patients(source_root: str, channels: list[str], dry_run: bool) -> list[
     ]
     return patients[:2] if dry_run else patients
 
-
-def build_expert_components(cfg: dict):
-    dataset = build_dataset_template(
-        channels=list(cfg["channels"]),
-        sample_frequency=int(cfg["sample_frequency"]),
-        stride=str(cfg["stride"]),
-        total_input=str(cfg["total_input"]),
-        target_resolution=str(cfg["target_resolution"]),
-        sleep_percentage=float(cfg["sleep_percentage"]),
-    )
-    model, trainer = build_model_and_trainer(
-        dataset,
-        str(cfg["model"]),
-        int(cfg["sample_frequency"]),
-        int(cfg.get("epochs", 1)),
-        bool(cfg.get("scaler", False)),
-        int(cfg.get("desaturation_weight", 1)),
-    )
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
 
 def build_model_and_trainer(
     train_dataset,
@@ -290,7 +269,9 @@ def main():
     parser.add_argument("--num_workers_dataloader", type=int, default=NUM_WORKERS_DATALOADER, help="Workers for torch dataloaders.")
     parser.add_argument("--no_mlflow", action="store_true", help="Disable MLflow logging for smoke tests.")
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
+    seed_everything(args.seed)
 
     experiment_name = f"{EXPERIMENT_NAME}_{args.id}"
     if args.dry:
@@ -309,7 +290,7 @@ def main():
 
     val_dataset = None
     if args.val_frac is not None and args.val_frac > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac)
+        train_patients, val_patients = random_split(train_patients, test_frac=args.val_frac, seed=args.seed)
     else:
         val_patients = []
 
@@ -360,19 +341,6 @@ def main():
         args.scaler,
         args.desaturation_weight,
     )
-    expert_builder_config = {
-        "channels": list(args.channels),
-        "sample_frequency": args.sample_frequency,
-        "stride": args.stride,
-        "total_input": args.total_input,
-        "target_resolution": args.target_resolution,
-        "sleep_percentage": args.sleep_percentage,
-        "model": args.model,
-        "scaler": args.scaler,
-        "desaturation_weight": args.desaturation_weight,
-        "epochs": 2 if args.dry else args.epochs,
-    }
-    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
 
     run_result = run(
         RunCfg(
@@ -386,21 +354,14 @@ def main():
             batch_size=args.batch_size,
             n_samples=1_000 if args.dry else args.n_samples,
             num_workers_dataloader=args.num_workers_dataloader,
+            n_samples_test=1_000 if args.dry else None,
             test_repeats=[1],
-            use_energy_tracker=False,
             tags={"model": args.model},
             collate_fn=batch_collate,
             use_mlflow=not args.no_mlflow,
             log_path=os.path.join("results", "desaturation"),
             meta_data=vars(args),
-            expert_name=experiment_name,
             expert_task="desaturation",
-            expert_builder={
-                "module": "train_desaturation",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
         )
     )
 

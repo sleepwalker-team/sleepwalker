@@ -165,15 +165,37 @@ def get_hsp_annotation_path(edf_path: str | Path) -> str | None:
     return None
 
 
+def hsp_record_key(edf_path: str | Path) -> str:
+    """Return a path-independent key for one HSP subject/session recording."""
+    path = Path(edf_path)
+    subject = next((part for part in path.parts if part.startswith("sub-")), None)
+    session = next((part for part in path.parts if part.startswith("ses-")), None)
+    if subject is None or session is None:
+        raise ValueError(f"Expected HSP path with sub-* and ses-* components, got: {path}")
+    return f"{subject}/{session}/{path.name}"
+
+
+def _hsp_path_preference(edf_path: str) -> tuple[int, str]:
+    """Prefer the direct subject tree over the optional ``HSP/`` mirror."""
+    parts = Path(edf_path).parts
+    subject_idx = next((idx for idx, part in enumerate(parts) if part.startswith("sub-")), None)
+    mirrored = subject_idx is not None and subject_idx > 0 and parts[subject_idx - 1] == "HSP"
+    return (int(mirrored), edf_path)
+
+
 def get_annotated_hsp_edf_files(root: str | Path, recursive: bool = True) -> list[str]:
-    """List HSP EDF files that have a same-record annotation sidecar."""
+    """List unique HSP EDF records that have an annotation sidecar."""
     from sleepwalker.datasets.utils import get_edf_files_in_repo
 
-    return [
-        edf_path
-        for edf_path in get_edf_files_in_repo(str(root), recursive=recursive)
-        if get_hsp_annotation_path(edf_path) is not None
-    ]
+    records: dict[str, str] = {}
+    for edf_path in sorted(
+        get_edf_files_in_repo(str(root), recursive=recursive),
+        key=_hsp_path_preference,
+    ):
+        if get_hsp_annotation_path(edf_path) is None:
+            continue
+        records.setdefault(hsp_record_key(edf_path), edf_path)
+    return sorted(records.values())
 
 
 def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
@@ -256,6 +278,7 @@ def hsp_normalizer(channel_name: str, sample_frequency: float):
     if channel_name in {"EKG"}:
         return SignalFilterNormalizer(fs=sample_frequency, lowcut=0.5, highcut=8.0)
     return None
+
 
 def hsp_group_name(subgroup: str, grouped: bool) -> str | None:
     """Resolve the logical group label used for grouped channel sampling."""
@@ -344,6 +367,7 @@ def get_channels(
                                 sample_frequency=sample_frequency,
                             ),
                             group=logical_group,
+                            unit="%" if subgroup == "spo2" else "uV",
                         )
                     )
             continue
@@ -363,6 +387,7 @@ def get_channels(
                     sample_frequency=sample_frequency,
                 ),
                 group=None,
+                unit="%" if channel_name in HSP_CHANNEL_GROUPS["spo2"] else "uV",
             )
         )
 
@@ -2008,7 +2033,11 @@ class HSP(BaseDataset):
             - new sensitivity 50 µvp-p chin1-chin3, new high filters 50.0hz notch 60hz chin1-chin3 - 1001
     '''
     def __init__(self, sane_labels=True, **kwargs):
-        super().__init__(**kwargs)
+        # HSP saturation samples are percentages although their EDF headers
+        # incorrectly label these channels as microvolts.
+        overrides = {"SaO2": "%", "SpO2": "%", "SPO2": "%"}
+        overrides.update(kwargs.pop("edf_unit_overrides", {}) or {})
+        super().__init__(edf_unit_overrides=overrides, **kwargs)
         self.sane_labels = sane_labels
 
     def get_event_df(self, edf_path, start_datetime):

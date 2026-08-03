@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from functools import partial
-import multiprocessing
 import os
-from typing import Optional
 
 import torch
 import torch.multiprocessing as mp
@@ -22,13 +20,20 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.HSP import HSP, get_annotated_hsp_edf_files, get_channels, get_hsp_annotation_path
-from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
+from sleepwalker.datasets.HSP import (
+    HSP,
+    get_annotated_hsp_edf_files,
+    get_channels,
+    get_hsp_annotation_label_counts,
+    get_hsp_annotation_path,
+)
+from sleepwalker.datasets.utils import random_split
 from sleepwalker.models.UTime import UTime
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.filtering import trim_event
+from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.utils import logger, suppress_stdout_logging
 
@@ -79,6 +84,7 @@ TASKS = {
 DEFAULT_CONFIG = {
     "root": "/raid/sleepwalker/hsp",
     "task": "desaturation",
+    "id": None,
     "batch_size": 128,
     "epochs": 2,
     "n_samples": 10000,
@@ -93,23 +99,43 @@ DEFAULT_CONFIG = {
     "test_frac": 0.1,
     "dry": False,
     "use_mlflow": True,
+    "assume_units_if_missing": False,
     "max_edf_files": None,
     "patient_limit": None,
     "annotated_only": True,
     "balance_batches": False,
     "balance_gamma": 0.75,
+    "require_positive_record": False,
+    "split_file": None,
+    "max_train_patients": None,
+    "max_val_patients": None,
+    "max_test_patients": None,
+    "max_test_windows": None,
+    "log_path": None,
+    "evaluation_stride": None,
+    "seed": 17,
 }
 
 
 def read_yaml_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config file must contain a top-level mapping: {path}")
+    allowed = set(DEFAULT_CONFIG) | {
+        "channels", "target_resolution", "stride", "total_input", "class_weights"
+    }
+    unknown = sorted(set(loaded) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown event config keys in {path}: {unknown}")
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(loaded)
     task_defaults = TASKS[cfg["task"]]
     for key in ["channels", "target_resolution", "stride", "total_input"]:
         cfg.setdefault(key, task_defaults[key])
     cfg.setdefault("class_weights", task_defaults["class_weights"])
+    if cfg["evaluation_stride"] is None:
+        cfg["evaluation_stride"] = cfg["target_resolution"]
     return cfg
 
 
@@ -152,7 +178,7 @@ def cfg_to_channelcfg(cfg: dict):
     )
 
 
-def build_dataset_template(cfg: dict):
+def build_dataset_template(cfg: dict, *, stride: str | None = None):
     task_cfg = TASKS[cfg["task"]]
     prepare_target = partial(
         prepare_multiclass_target,
@@ -164,12 +190,13 @@ def build_dataset_template(cfg: dict):
         channels=cfg_to_channelcfg(cfg),
         sample_frequency=float(cfg["sample_frequency"]),
         event_mapping=task_cfg["event_mapping"],
-        stride=str(cfg["stride"]),
+        stride=str(cfg["stride"] if stride is None else stride),
         prepare_patient=prepare_patient,
         prepare_target=prepare_target,
         prepare_sample=prepare_sample,
         total_input=str(cfg["total_input"]),
         target_resolution=str(cfg["target_resolution"]),
+        assume_units_if_missing=bool(cfg.get("assume_units_if_missing", False)),
     )
     dataset.classes = list(task_cfg["classes"])
     logger.info(
@@ -179,16 +206,13 @@ def build_dataset_template(cfg: dict):
     return dataset
 
 
-def build_dataset(patients: list[str], cfg: dict):
-    dataset = build_dataset_template(cfg)
+def build_dataset(patients: list[str], cfg: dict, *, stride: str | None = None):
+    dataset = build_dataset_template(cfg, stride=stride)
     dataset.initialize(patients, int(cfg["num_workers_dataset"]))
     return dataset
 
 
-def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
-    if get_hsp_annotation_path(edf_path) is None:
-        return None
-
+def has_required_channels(edf_path: str, cfg: dict) -> bool:
     meta = read_edf_meta(edf_path)
     available_channels = set(meta["signals"])
     requested = cfg_to_channelcfg(cfg)
@@ -200,38 +224,48 @@ def is_usable(edf_path: str, cfg: dict) -> Optional[str]:
 
     for requested_channels in channel_by_group.values():
         if not any(channel in available_channels for channel in requested_channels):
-            return None
-    return edf_path
+            return False
+    return True
 
 
-def list_patients(cfg: dict) -> list[str]:
-    if cfg.get("annotated_only", True):
-        edf_files = get_annotated_hsp_edf_files(cfg["root"], recursive=True)
+def has_task_annotation(edf_path: str, task: str) -> bool:
+    annotation_path = get_hsp_annotation_path(edf_path)
+    if annotation_path is None:
+        return False
+    if task == "desaturation":
+        labels = {"desaturation"}
+    elif task == "breathing":
+        labels = {"apnea", "obstructive-apnea", "central-apnea", "mixed-apnea", "hypopnea"}
     else:
-        edf_files = get_edf_files_in_repo(cfg["root"], recursive=True)
-    if cfg.get("max_edf_files") is not None:
-        edf_files = edf_files[: int(cfg["max_edf_files"])]
+        raise ValueError(f"Unknown event task '{task}'.")
+    counts = get_hsp_annotation_label_counts(annotation_path)
+    return any(int(counts.get(label, 0)) > 0 for label in labels)
 
-    logger.progress_start(len(edf_files), desc="Collecting patients", leave=True)
-    patients = []
-    if int(cfg["num_workers_dataset"]) > 1:
-        with multiprocessing.Pool(int(cfg["num_workers_dataset"])) as pool:
-            iter_objects = pool.imap_unordered(partial(is_usable, cfg=cfg), edf_files)
-            for result in iter_objects:
-                if result:
-                    patients.append(result)
-                logger.progress_advance(1)
-    else:
-        for patient in edf_files:
-            if is_usable(patient, cfg) is not None:
-                patients.append(patient)
-            logger.progress_advance(1)
 
-    logger.progress_close()
-    logger.info(f"Collected patient stats for {len(patients)}/{len(edf_files)} patients.")
-    if cfg.get("patient_limit") is not None:
-        patients = patients[: int(cfg["patient_limit"])]
-    return patients
+def has_annotation(edf_path: str) -> bool:
+    return get_hsp_annotation_path(edf_path) is not None
+
+
+def select_patients(records: list[str], cfg: dict) -> list[str]:
+    resolved = dict(DEFAULT_CONFIG)
+    resolved.update(cfg)
+    task_defaults = TASKS[resolved["task"]]
+    for key in ["channels", "target_resolution", "stride", "total_input"]:
+        resolved.setdefault(key, task_defaults[key])
+    resolved.setdefault("class_weights", task_defaults["class_weights"])
+
+    selected = [
+        record
+        for record in records
+        if has_required_channels(record, resolved) and has_annotation(record)
+    ]
+    if bool(resolved.get("require_positive_record", False)):
+        selected = [
+            record
+            for record in selected
+            if has_task_annotation(record, str(resolved["task"]))
+        ]
+    return selected
 
 
 def build_model_and_trainer(train_dataset, cfg: dict):
@@ -277,7 +311,7 @@ def build_model_and_trainer(train_dataset, cfg: dict):
         raise ValueError(f"Did not recognize model {cfg['model']}")
 
     trainer = MulticlassTrainer(
-        epochs=2 if bool(cfg.get("dry", False)) else int(cfg["epochs"]),
+        epochs=int(cfg["epochs"]),
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4),
         lr_scheduler=lambda optimizer: torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1, end_factor=1e-2, total_iters=50
@@ -292,21 +326,6 @@ def build_model_and_trainer(train_dataset, cfg: dict):
     return model, trainer
 
 
-def build_expert_components(cfg: dict):
-    resolved = dict(DEFAULT_CONFIG)
-    resolved.update(cfg)
-    task_defaults = TASKS[resolved["task"]]
-    for key in ["channels", "target_resolution", "stride", "total_input"]:
-        resolved.setdefault(key, task_defaults[key])
-    dataset = build_dataset_template(resolved)
-    model, trainer = build_model_and_trainer(dataset, resolved)
-    return {
-        "model": model,
-        "trainer": trainer,
-        "dataset_template": dataset.to_unlabelled(),
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, required=True, help="YAML config path.")
@@ -317,28 +336,59 @@ def main():
     if args.id is not None:
         cfg["id"] = args.id
     cfg.setdefault("id", None)
+    seed_everything(int(cfg["seed"]))
 
     experiment_name = cfg["task"] if cfg["id"] is None else f"{cfg['task']}_{cfg['id']}"
     if bool(cfg.get("dry", False)):
         logger.info("Performing dry run to test pipeline!")
         experiment_name += "-dev"
 
-    log_dir = os.path.join("results", cfg["task"], experiment_name)
+    log_path = str(cfg.get("log_path") or os.path.join("results", cfg["task"]))
+    log_dir = os.path.join(log_path, experiment_name)
     os.makedirs(log_dir, exist_ok=True)
     logger.set_log_file(os.path.join(log_dir, "output.log"))
 
-    patients = list_patients(cfg)
-    if len(patients) == 0:
-        raise ValueError("No usable HSP patients found.")
-
-    if float(cfg.get("test_frac", 0.0)) > 0:
-        train_patients, test_patients = random_split(patients, test_frac=float(cfg["test_frac"]))
+    split_file = cfg.get("split_file")
+    if split_file:
+        split = load_split(split_file)
+        task_split = split["tasks"][cfg["task"]]["edf_files"]
+        train_patients = list(task_split["train"])
+        val_patients = list(task_split["val"])
+        test_patients = list(task_split["test"])
+        for name, records in [
+            ("train", train_patients),
+            ("val", val_patients),
+            ("test", test_patients),
+        ]:
+            limit = cfg.get(f"max_{name}_patients")
+            if limit is not None:
+                records[:] = records[: int(limit)]
+        train_patients = select_patients(train_patients, cfg)
+        val_patients = select_patients(val_patients, cfg)
+        test_patients = select_patients(test_patients, cfg)
     else:
-        train_patients, test_patients = list(patients), []
-    if float(cfg.get("val_frac", 0.0)) > 0:
-        train_patients, val_patients = random_split(train_patients, test_frac=float(cfg["val_frac"]))
-    else:
-        val_patients = []
+        patients = select_patients(
+            get_annotated_hsp_edf_files(str(cfg["root"]), recursive=True),
+            cfg,
+        )
+        if len(patients) == 0:
+            raise ValueError("No usable HSP patients found.")
+        if float(cfg.get("test_frac", 0.0)) > 0:
+            train_patients, test_patients = random_split(
+                patients,
+                test_frac=float(cfg["test_frac"]),
+                seed=int(cfg["seed"]),
+            )
+        else:
+            train_patients, test_patients = list(patients), []
+        if float(cfg.get("val_frac", 0.0)) > 0:
+            train_patients, val_patients = random_split(
+                train_patients,
+                test_frac=float(cfg["val_frac"]),
+                seed=int(cfg["seed"]) + 1,
+            )
+        else:
+            val_patients = []
 
     with suppress_stdout_logging(logger):
         logger.context("TRAIN")
@@ -347,31 +397,19 @@ def main():
         val_dataset = None
         if len(val_patients) > 0:
             logger.context("VAL")
-            val_dataset = build_dataset(val_patients, cfg)
+            val_dataset = build_dataset(
+                val_patients, cfg, stride=str(cfg["evaluation_stride"])
+            )
             logger.uncontext()
         test_dataset = None
         if len(test_patients) > 0:
             logger.context("TEST")
-            test_dataset = build_dataset(test_patients, cfg)
+            test_dataset = build_dataset(
+                test_patients, cfg, stride=str(cfg["evaluation_stride"])
+            )
             logger.uncontext()
 
     model, trainer = build_model_and_trainer(train_dataset, cfg)
-    expert_builder_config = {
-        "task": cfg["task"],
-        "channels": list(cfg["channels"]),
-        "sample_frequency": cfg["sample_frequency"],
-        "stride": cfg["stride"],
-        "total_input": cfg["total_input"],
-        "target_resolution": cfg["target_resolution"],
-        "sleep_percentage": cfg["sleep_percentage"],
-        "grouped": cfg["grouped"],
-        "model": cfg["model"],
-        "scaler": cfg["scaler"],
-        "class_weights": cfg.get("class_weights", TASKS[cfg["task"]]["class_weights"]),
-        "epochs": 2 if bool(cfg.get("dry", False)) else int(cfg["epochs"]),
-    }
-    expert_dataset_template = build_expert_components(expert_builder_config)["dataset_template"]
-
     run(
         RunCfg(
             experiment_name=experiment_name,
@@ -382,23 +420,16 @@ def main():
             val_datasets=[] if val_dataset is None else [val_dataset],
             test_datasets=[] if test_dataset is None else [("HSP", test_dataset)],
             batch_size=int(cfg["batch_size"]),
-            n_samples=1_000 if bool(cfg.get("dry", False)) else int(cfg["n_samples"]),
+            n_samples=int(cfg["n_samples"]),
             num_workers_dataloader=int(cfg["num_workers_dataloader"]),
+            n_samples_test=cfg.get("max_test_windows"),
             test_repeats=[1],
-            use_energy_tracker=False,
             tags={"model": cfg["model"], "task": cfg["task"], "dataset": "hsp"},
             collate_fn=batch_collate,
             use_mlflow=bool(cfg.get("use_mlflow", True)),
-            log_path=os.path.join("results", cfg["task"]),
+            log_path=log_path,
             meta_data=cfg,
-            expert_name=experiment_name,
             expert_task=cfg["task"],
-            expert_builder={
-                "module": "train_event_hsp",
-                "function": "build_expert_components",
-                "config": expert_builder_config,
-            },
-            expert_dataset_template=expert_dataset_template,
         )
     )
 

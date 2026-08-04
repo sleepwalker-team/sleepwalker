@@ -42,21 +42,12 @@ SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
 CHANNELS = [
-    ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='F4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='O2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='ABD', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='CHEST', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='SaO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='SPO2'), 
-    ChannelConfig(name='SpO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='SPO2'), 
-    ChannelConfig(name='LAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='RAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='EKG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
+    ChannelConfig('EEG', ['C4-M1', 'F4-M1', 'O2-M1', 'C3-M2', 'F3-M2', 'O1-M2'], EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+    ChannelConfig('EOG', ['E1-M2', 'E2-M1'], EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+    ChannelConfig('RIP', ['ABD', 'CHEST'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None)),
+    ChannelConfig('SPO2', ['SaO2', 'SpO2'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None)),
+    ChannelConfig('LEG-EMG', ['LAT', 'RAT'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None)),
+    ChannelConfig('ECG', ['EKG'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45)),
 ]
 
 EVENT_MAPPING = {

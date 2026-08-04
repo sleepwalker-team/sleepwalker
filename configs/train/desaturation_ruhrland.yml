@@ -1,0 +1,108 @@
+seed: 17
+data:
+  name: sleepwalker.datasets.Ruhrlandklinik.Ruhrlandklinik
+  channels:
+    - logical_name: Chest
+      physical_names: [Chest]
+      normalizer: &respiration_normalizer
+        name: sleepwalker.datasets.normalizer.RespirationFilterNormalizer.RespirationFilterNormalizer
+        fs: 75
+      unit: V
+    - logical_name: Abdomen
+      physical_names: [Abdomen]
+      normalizer: *respiration_normalizer
+      unit: V
+    - logical_name: Saturation
+      physical_names: [Saturation]
+      normalizer:
+        name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+        fs: 75
+      unit: '%'
+    - logical_name: Pulse Waveform
+      physical_names: [Pulse Waveform]
+      normalizer:
+        name: sleepwalker.datasets.normalizer.PulseFilterNormalizer.PulseFilterNormalizer
+        fs: 75
+  sample_frequency: 75
+  event_mapping:
+    wach: wake
+    n1: sleep
+    n2: sleep
+    n3: sleep
+    rem: sleep
+    entsättigung: desaturation
+  total_input: 100s
+  target_resolution: 10s
+  stride: 2s
+  output_classes: [desaturation, no desaturation]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [sleep]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: [desaturation, no desaturation]
+    filters:
+      - columns: [sleep]
+        percentage: 0.5
+        mode: min
+  prepare_sample:
+    name: sleepwalker.training.callbacks.tensor_sample
+    max_nan_fraction: 0.05
+    valid_ranges:
+      Saturation: [-5, 5]
+    min_std:
+      Chest: 0.001
+      Abdomen: 0.001
+      Pulse Waveform: 0.001
+  files:
+    train:
+      name: sleepwalker.training.files.select_edf_files
+      root: /raid/sleepwalker/ruhrlandklinik/raw/train-test-2023
+      include_pap: false
+    validation_fraction: 0.1
+    test:
+      name: sleepwalker.training.files.select_edf_files
+      root: /raid/sleepwalker/ruhrlandklinik/raw/val-2024
+      include_pap: false
+  label: Ruhrland2024
+  num_workers: 16
+model:
+  name: sleepwalker.models.UTime.UTime
+  sampling_frequency: 0.013333333333333333s
+  channel: [16, 32, 64, 128, 256]
+  maxpool: [8, 6, 4, 4, 2]
+  kernel: [5, 5, 5, 5, 5]
+  norm: channel
+  mlp_size: 256
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 50
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 10
+  loss_mode: inverse
+  early_stopping: 5
+  class_weights:
+    no desaturation: 1
+    desaturation: 1
+run:
+  experiment_name: desaturation
+  batch_size: 128
+  n_samples: 250000
+  num_workers_dataloader: 16
+  test_repeats: [1]
+  use_mlflow: true
+  log_path: results/desaturation
+  tags:
+    task: desaturation
+    dataset: ruhrland
+    model: UTime
+  expert_task: desaturation

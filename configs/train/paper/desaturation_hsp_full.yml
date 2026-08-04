@@ -1,0 +1,92 @@
+seed: 17
+data:
+  name: sleepwalker.datasets.HSP.HSP
+  channels:
+    - logical_name: SpO2
+      physical_names: [SaO2, SpO2, SPO2]
+      normalizer:
+        name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+        fs: 100
+      unit: '%'
+  sample_frequency: 100
+  event_mapping:
+    n1: sleep
+    n2: sleep
+    n3: sleep
+    rem: sleep
+    desaturation: desaturation
+  total_input: 100s
+  target_resolution: 10s
+  stride: 2s
+  split_overrides:
+    test:
+      stride: 10s
+  output_classes: [desaturation, no desaturation]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [sleep]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: [desaturation, no desaturation]
+    filters:
+      - columns: [sleep]
+        percentage: 0.5
+        mode: min
+  prepare_sample:
+    name: sleepwalker.training.callbacks.tensor_sample
+    max_nan_fraction: 0.05
+    valid_ranges:
+      SpO2: [-5, 5]
+      Saturation: [-5, 5]
+      SaO2: [-5, 5]
+    max_out_of_range_fraction: 0.05
+  files: results/hsp_expert_suite/full/hsp_split.yml
+  label: HSP
+  num_workers: 8
+model:
+  name: sleepwalker.models.UTime.UTime
+  sampling_frequency: 0.01s
+  channel: [64, 128, 128, 256]
+  kernel: [5, 5, 3, 3]
+  maxpool: [5, 5, 3, 3]
+  norm: channel
+  activation: elu
+  mlp_size: 512
+  dropout_p: 0
+  preprocessors:
+    - name: sleepwalker.models.preprocessors.RobustScaler.RobustScaler
+      lower_quantile: 0.1
+      upper_quantile: 0.9
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 30
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 10
+  balance_batches: false
+  balance_gamma: 0.75
+  class_weights:
+    desaturation: 2
+    no desaturation: 1
+run:
+  experiment_name: desaturation_full
+  model_name: utime-big
+  batch_size: 64
+  n_samples: 250000
+  num_workers_dataloader: 4
+  test_repeats: [1]
+  use_mlflow: false
+  log_path: results/hsp_expert_suite/full/desaturation
+  tags:
+    task: desaturation
+    dataset: hsp
+    model: utime-big
+  expert_task: desaturation

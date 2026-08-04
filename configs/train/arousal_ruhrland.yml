@@ -1,0 +1,93 @@
+seed: 17
+data:
+  name: sleepwalker.datasets.Ruhrlandklinik.Ruhrlandklinik
+  channels:
+    - logical_name: EEG
+      physical_names: [C3-M2, C4-M1, F3-M2, F4-M1, O1-M2, O2-M1]
+      normalizer: &eeg_normalizer
+        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+        fs: 100
+      unit: V
+    - logical_name: EOG
+      physical_names: [E1-M2, E2-M1]
+      normalizer: *eeg_normalizer
+      unit: V
+    - logical_name: Chin EMG
+      physical_names: [1-2, 1-F, 2-F]
+      unit: V
+    - logical_name: ECG
+      physical_names: [ECG]
+  sample_frequency: 100
+  event_mapping:
+    arousal: arousal
+    n1: sleep
+    n2: sleep
+    n3: sleep
+    rem: sleep
+  total_input: 60s
+  target_resolution: 1s
+  stride: 1s
+  output_classes: [no_arousal, arousal]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [sleep]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: [no_arousal, arousal]
+  files:
+    train:
+      name: sleepwalker.training.files.select_edf_files
+      root: /raid/sleepwalker/ruhrlandklinik/raw/train-test-2023
+      include_pap: false
+    validation_fraction: 0.1
+    test:
+      name: sleepwalker.training.files.select_edf_files
+      root: /raid/sleepwalker/ruhrlandklinik/raw/val-2024
+      include_pap: false
+  label: Ruhrland2024
+  num_workers: 8
+model:
+  name: sleepwalker.models.UTime.UTime
+  sampling_frequency: 0.01s
+  channel: [64, 128, 128, 256]
+  kernel: [5, 5, 3, 3]
+  maxpool: [5, 5, 3, 3]
+  norm: channel
+  activation: elu
+  mlp_size: 512
+  dropout_p: 0
+  preprocessors:
+    - name: sleepwalker.training.callbacks.robust_scaler
+      skip_first: 1
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 35
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 10
+  balance_batches: false
+  balance_gamma: 0.75
+  class_weights:
+    no_arousal: 1
+    arousal: 1
+run:
+  experiment_name: arousal
+  batch_size: 128
+  n_samples: 100000
+  num_workers_dataloader: 8
+  test_repeats: [1, 2]
+  use_mlflow: true
+  log_path: results/arousal
+  tags:
+    task: arousal
+    dataset: ruhrland
+    model: UTime
+  expert_task: arousal

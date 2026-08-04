@@ -1,0 +1,87 @@
+seed: 17
+data:
+  name: sleepwalker.datasets.HSP.HSP
+  channels:
+    - logical_name: EEG
+      physical_names: [C3-M2, C4-M1, F3-M2, F4-M1, O1-M2, O2-M1, CZ-M2, CZ-M1, C3-M1, C4-M2, F3-M1, F4-M2, O1-M1, O2-M2]
+      normalizer: 
+        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+        fs: 100
+      unit: uV
+    - logical_name: EOG
+      physical_names: [E1-M2, E2-M1, E2-M2, E1, E2, Eye Up, Eye Down]
+      normalizer: 
+        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+        fs: 100
+      unit: uV
+    - logical_name: Chin EMG
+      physical_names: [CHIN1-CHIN2, Chin1-Chin2, CHIN1-CHIN3, Chin1-Chin3, CHIN2-CHIN3, Chin2-Chin3, Chin3-Chin2, Chin3, Chin2, CHIN1, CHIN2, CHIN3, CHIN, CHINz, EMG]
+      unit: uV
+  sample_frequency: 100
+  event_mapping:
+    arousal: arousal
+    n1: sleep
+    n2: sleep
+    n3: sleep
+    rem: sleep
+  total_input: 60s
+  target_resolution: 1s
+  stride: 1s
+  output_classes: [no_arousal, arousal]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [sleep]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: [no_arousal, arousal]
+  prepare_sample:
+    name: sleepwalker.training.callbacks.tensor_sample
+  files: results/hsp_expert_suite/full/hsp_split.yml
+  label: HSP
+  num_workers: 8
+model:
+  name: sleepwalker.models.UTime.UTime
+  sampling_frequency: 0.01s
+  channel: [64, 128, 128, 256]
+  kernel: [5, 5, 3, 3]
+  maxpool: [5, 5, 3, 3]
+  norm: channel
+  activation: elu
+  mlp_size: 512
+  dropout_p: 0
+  preprocessors:
+    - name: sleepwalker.training.callbacks.robust_scaler
+      skip_first: 1
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 30
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 10
+  balance_batches: false
+  balance_gamma: 0.75
+  class_weights:
+    no_arousal: 1
+    arousal: 10
+run:
+  experiment_name: arousal_full
+  model_name: utime-big
+  batch_size: 64
+  n_samples: 250000
+  num_workers_dataloader: 4
+  test_repeats: [1, 2]
+  use_mlflow: false
+  log_path: results/hsp_expert_suite/full/arousal
+  tags:
+    task: arousal
+    dataset: hsp
+    model: utime-big
+  expert_task: arousal

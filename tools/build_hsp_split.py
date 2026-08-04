@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a deterministic subject-level HSP split shared by all expert scripts."""
+"""Build the final HSP patient split shared by all paper training runs."""
 
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ def split_name(subject: str, seed: str, fractions: dict[str, float]) -> str:
     ) / float(16**12)
     if value < float(fractions["train"]):
         return "train"
-    if value < float(fractions["train"]) + float(fractions["val"]):
-        return "val"
+    if value < float(fractions["train"]) + float(fractions["validation"]):
+        return "validation"
     return "test"
 
 
@@ -109,11 +109,16 @@ def usable_tasks(
 def build_split(config: dict[str, Any]) -> dict[str, Any]:
     root = str(config["root"])
     seed = str(config.get("seed", "sleepwalker-hsp-v1"))
-    fractions = dict(config.get("split", {"train": 0.8, "val": 0.1, "test": 0.1}))
-    if abs(sum(float(fractions[key]) for key in ["train", "val", "test"]) - 1.0) > 1e-8:
+    fractions = dict(
+        config.get("split", {"train": 0.8, "validation": 0.1, "test": 0.1})
+    )
+    if abs(
+        sum(float(fractions[key]) for key in ["train", "validation", "test"])
+        - 1.0
+    ) > 1e-8:
         raise ValueError("HSP split fractions must sum to one.")
 
-    paths_by_task = {task: [] for task in TASKS}
+    patients = []
     edf_files = get_annotated_hsp_edf_files(root, recursive=True)
     requirements = task_requirements(root)
     workers = int(config.get("num_workers_split", 2))
@@ -122,31 +127,18 @@ def build_split(config: dict[str, Any]) -> dict[str, Any]:
         with multiprocessing.Pool(workers) as pool:
             results = pool.imap_unordered(usable_tasks, work)
             for edf_path, tasks in results:
-                for task in tasks:
-                    paths_by_task[task].append(edf_path)
+                if set(tasks) == set(TASKS):
+                    patients.append(edf_path)
     else:
         for item in work:
             edf_path, tasks = usable_tasks(item)
-            for task in tasks:
-                paths_by_task[task].append(edf_path)
+            if set(tasks) == set(TASKS):
+                patients.append(edf_path)
 
-    payload: dict[str, Any] = {
-        "root": root,
-        "seed": seed,
-        "method": "subject-hash",
-        "fractions": fractions,
-        "tasks": {},
-    }
-    for task in TASKS:
-        partitions = {"train": [], "val": [], "test": []}
-        for path in sorted(paths_by_task[task]):
-            partitions[split_name(subject_id(path), seed, fractions)].append(path)
-        payload["tasks"][task] = {
-            "edf_files": partitions,
-            "counts": {name: len(paths) for name, paths in partitions.items()},
-            "total_edf_files": len(paths_by_task[task]),
-        }
-    return payload
+    split = {"train": [], "validation": [], "test": []}
+    for path in sorted(patients):
+        split[split_name(subject_id(path), seed, fractions)].append(path)
+    return split
 
 
 def main() -> None:
@@ -159,7 +151,7 @@ def main() -> None:
     split = build_split(config)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(split, sort_keys=False), encoding="utf-8")
-    print(json.dumps({task: split["tasks"][task]["counts"] for task in TASKS}, indent=2))
+    print(json.dumps({name: len(paths) for name, paths in split.items()}, indent=2))
 
 
 if __name__ == "__main__":

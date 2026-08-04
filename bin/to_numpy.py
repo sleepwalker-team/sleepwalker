@@ -26,7 +26,12 @@ for fs in [100, 200]:
 
             dataset = SleepEDFx(
                 channels = [
-                    ChannelConfig(name=ci, normalizer=EEGFilterNormalizer(fs=fs)) for ci in c
+                    ChannelConfig(
+                        logical_name=ci,
+                        physical_names=[ci],
+                        normalizer=EEGFilterNormalizer(fs=fs),
+                    )
+                    for ci in c
                 ],
                 patients = edf_files,
                 num_workers = 8,
@@ -60,7 +65,3 @@ for fs in [100, 200]:
             filename = f"sleepedfx_{c_name}_{fs}Hz_{ti}"
             np.save(filename+"_X.npy", X, allow_pickle=False)
             np.save(filename+"_Y.npy", Y, allow_pickle=False)
-
-
-
- 

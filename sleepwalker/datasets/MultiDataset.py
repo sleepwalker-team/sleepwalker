@@ -73,6 +73,10 @@ class MultiDataset(Dataset):
         self.total_input = datasets[0].total_input
         self.stride = getattr(datasets[0], "stride", datasets[0].target_resolution)
         self.channels = datasets[0].channels
+        input_channels = [dataset.get_input_channels() for dataset in datasets]
+        if any(len(channels) != len(input_channels[0]) for channels in input_channels[1:]):
+            raise ValueError("All datasets must expose the same number of input channels")
+        self.input_channels = input_channels[0]
 
     def get_n_datasets(self):
         """Return the number of component datasets."""
@@ -87,6 +91,10 @@ class MultiDataset(Dataset):
         """Return the shared timeseries length."""
         # We enforced in the c'tor that all datasets have the same classes, so pick one here
         return self.datasets[0].get_timeseries_len()
+
+    def get_input_channels(self):
+        """Return the first dataset's reference input-channel order."""
+        return list(self.input_channels)
 
     def has_extra_target(self):
         """Return whether every component dataset exposes `target_extra`."""

@@ -428,7 +428,7 @@ def test_peprocessor_chain(device="cuda"):
     preprocessors = [Spectrogram(), Normalize()]
     dataset = SyntheticDataset(
         total_input="120s",
-        channels=[ChannelConfig(name="EEG", normalizer=None)],
+        channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,

@@ -48,10 +48,14 @@ def test_combine_datasets_returns_single_dataset_unchanged():
 def test_load_split_reads_yaml(tmp_path):
     path = tmp_path / "hsp_split.yml"
     path.write_text(
-        "method: subject-hash\ntasks:\n  sleep:\n    counts:\n      train: 3\n",
+        "train: [a.edf]\nvalidation: [b.edf]\ntest: [c.edf]\n",
         encoding="utf-8",
     )
 
     split = load_split(path)
 
-    assert split["tasks"]["sleep"]["counts"]["train"] == 3
+    assert split == {
+        "train": ["a.edf"],
+        "validation": ["b.edf"],
+        "test": ["c.edf"],
+    }

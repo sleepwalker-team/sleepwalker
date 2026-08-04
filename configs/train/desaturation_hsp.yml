@@ -1,0 +1,98 @@
+# Canonical tools/train.py configuration. Each channel entry declares one
+# logical model input and all physical EDF names accepted for that input.
+
+seed: 17
+data:
+  - name: sleepwalker.datasets.HSP.HSP
+    channels:
+      - logical_name: SpO2
+        physical_names: [SaO2, SpO2, SPO2]
+        normalizer:
+          name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+          fs: 100
+        unit: '%'
+    sample_frequency: 100
+    event_mapping:
+      n1: sleep
+      n2: sleep
+      n3: sleep
+      rem: sleep
+      desaturation: desaturation
+    total_input: 100s
+    target_resolution: 10s
+    stride: 2s
+    assume_units_if_missing: false
+    output_classes: [desaturation, no desaturation]
+    prepare_patient:
+      name: sleepwalker.training.callbacks.trim_patient_to_events
+      keep_events: [sleep]
+    prepare_target:
+      name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+      target_classes: [desaturation, no desaturation]
+      percentage: 0.5
+      filters:
+        - columns: [sleep]
+          percentage: 0.5
+          mode: min
+    prepare_sample:
+      name: sleepwalker.training.callbacks.tensor_sample
+      max_nan_fraction: 0.05
+      valid_ranges:
+        SpO2: [-5, 5]
+        Saturation: [-5, 5]
+        SaO2: [-5, 5]
+      max_out_of_range_fraction: 0.05
+    files:
+      train:
+        name: sleepwalker.training.files.select_edf_files
+        root: /raid/sleepwalker/hsp
+        annotated_only: true
+        require_channels: true
+        include_pap: true
+      validation_fraction: 0.1
+      test_fraction: 0.1
+    label: HSP
+    num_workers: 2
+model:
+  name: sleepwalker.models.UTime.UTime
+  sampling_frequency: 0.01s
+  channel: [64, 128, 128, 256]
+  kernel: [5, 5, 3, 3]
+  maxpool: [5, 5, 3, 3]
+  norm: channel
+  activation: elu
+  mlp_size: 512
+  dropout_p: 0
+  preprocessors:
+    - name: sleepwalker.models.preprocessors.RobustScaler.RobustScaler
+      lower_quantile: 0.1
+      upper_quantile: 0.9
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 20
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 10
+  class_weights:
+    desaturation: 2
+    no desaturation: 1
+run:
+  experiment_name: desaturation_hsp
+  batch_size: 128
+  n_samples: 250000
+  num_workers_dataloader: 8
+  test_repeats: [1]
+  use_mlflow: true
+  log_path: results/desaturation
+  tags:
+    task: desaturation
+    dataset: hsp
+  expert_task: desaturation

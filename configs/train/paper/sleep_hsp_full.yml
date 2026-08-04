@@ -1,0 +1,62 @@
+seed: 17
+data:
+  - name: sleepwalker.datasets.HSP.HSP
+    channels:
+      - logical_name: eeg
+        physical_names: [C3-M2, C4-M1, F3-M2, F4-M1, O1-M2, O2-M1, CZ-M2, CZ-M1, C3-M1, C4-M2, F3-M1, F4-M2, O1-M1, O2-M2]
+        normalizer:
+          name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+          fs: 100
+        unit: uV
+    sample_frequency: 100
+    event_mapping:
+      wake: wake
+      n1: n1
+      n2: n2
+      n3: n3
+      rem: rem
+    total_input: 630s
+    target_resolution: 30s
+    stride: 30s
+    assume_units_if_missing: false
+    output_classes: [wake, n1, n2, n3, rem]
+    prepare_patient:
+      name: sleepwalker.training.callbacks.trim_patient_to_events
+      keep_events: [n1, n2, n3, rem]
+    prepare_target:
+      name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+      target_classes: [wake, n1, n2, n3, rem]
+    files: results/hsp_expert_suite/full/hsp_split.yml
+    label: HSP
+    num_workers: 8
+model:
+  name: sleepwalker.models.SleepTransformer.SleepTransformer
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 30
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+    weight_decay: 0.0001
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: torch.nn.functional.cross_entropy
+  save_every: 1
+  early_stopping: 15
+run:
+  experiment_name: sleep_full-grouped
+  model_name: sleeptransformer
+  batch_size: 64
+  n_samples: 250000
+  num_workers_dataloader: 4
+  test_repeats: [1, 2, 3, 4, 5, 10]
+  use_mlflow: false
+  log_path: results/hsp_expert_suite/full/sleep
+  tags:
+    task: sleep
+    dataset: hsp
+    model: sleeptransformer
+  expert_task: sleep

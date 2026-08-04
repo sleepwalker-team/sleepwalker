@@ -44,7 +44,7 @@ def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending
     assert len(edf_files) > 0
     edf_files = edf_files[:num_patients]
 
-    dataset = dataset_clazz(channels = [ChannelConfig(name=channel_name, normalizer=None)], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
+    dataset = dataset_clazz(channels=[ChannelConfig(channel_name, [channel_name])], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
     dataset.initialize(edf_files)
 
     return dataset
@@ -106,7 +106,7 @@ def test_get_item_rejects_before_loading_signal():
         }
     }
     dataset = DummyDataset(
-        channels=[ChannelConfig(name="EEG")],
+        channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
         target_resolution="30s",
@@ -146,7 +146,7 @@ def test_get_item_loads_signal_after_label_precheck():
         }
     }
     dataset = DummyDataset(
-        channels=[ChannelConfig(name="EEG")],
+        channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
         target_resolution="30s",
@@ -177,8 +177,7 @@ def test_get_item_loads_signal_after_label_precheck():
 def test_grouped_channel_selection_returns_one_channel_per_group():
     dataset = DummyDataset(
         channels=[
-            ChannelConfig(name="C3-A2", group="eeg"),
-            ChannelConfig(name="C4-A1", group="eeg"),
+            ChannelConfig("eeg", ["C3-A2", "C4-A1"]),
         ],
         sample_frequency=1,
         total_input="30s",
@@ -199,6 +198,25 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
 
     assert list(selected.columns) == ["eeg"]
     assert selected.shape[1] == 1
+
+
+def test_channel_config_resolves_per_physical_normalizers_and_quality_channels():
+    normalizer = object()
+    config = ChannelConfig(
+        logical_name="eeg",
+        physical_names=["C3-A2", "C4-A1"],
+        normalizer={"C3-A2": normalizer, "C4-A1": None},
+        quality_name={"C3-A2": "C3 quality", "C4-A1": "C4 quality"},
+        unit="uV",
+    )
+
+    assert config.normalizer_for("C3-A2") is normalizer
+    assert config.normalizer_for("C4-A1") is None
+    assert config.quality_name_for("C3-A2") == "C3 quality"
+    assert config.quality_name_for("C4-A1") == "C4 quality"
+
+    with pytest.raises(ValueError, match="unknown physical channels"):
+        ChannelConfig("eeg", ["C3-A2"], normalizer={"C4-A1": normalizer})
 
 
 def test_repeat_sampler_repeats_indices():
@@ -228,7 +246,7 @@ def test_basedataset_retry_scope_can_stay_global():
     class RetryDataset(DummyDataset):
         def __init__(self):
             super().__init__(
-                channels=[ChannelConfig(name="EEG")],
+                channels=[ChannelConfig("EEG", ["EEG"])],
                 sample_frequency=1,
                 total_input="30s",
                 target_resolution="30s",
@@ -583,7 +601,7 @@ if __name__ == '__main__':
 class CacheReadyDataset(DummyDataset):
     def __init__(self):
         super().__init__(
-            channels=[ChannelConfig(name="eeg"), ChannelConfig(name="emg")],
+            channels=[ChannelConfig("eeg", ["eeg"]), ChannelConfig("emg", ["emg"])],
             sample_frequency=2,
             total_input="2s",
             target_resolution="1s",
@@ -648,8 +666,7 @@ class GroupedCacheDataset(DummyDataset):
     def __init__(self):
         super().__init__(
             channels=[
-                ChannelConfig(name="channel-a", group="eeg"),
-                ChannelConfig(name="channel-b", group="eeg"),
+                ChannelConfig("eeg", ["channel-a", "channel-b"]),
             ],
             sample_frequency=1,
             total_input="3s",

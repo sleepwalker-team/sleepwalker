@@ -338,7 +338,7 @@ def get_channels(
     channel inventory documented in the class docstring below and intentionally
     prefer the most common referenced PSG montage names.
     """
-    requested = []
+    requested: list[ChannelConfig] = []
     seen_names = set()
     valid_groups = set(HSP_CHANNEL_GROUPS.keys())
 
@@ -352,13 +352,42 @@ def get_channels(
 
             for subgroup in subgroups:
                 logical_group = hsp_group_name(subgroup, grouped)
-                for channel_name in HSP_CHANNEL_GROUPS[subgroup]:
-                    if channel_name in seen_names:
-                        continue
-                    seen_names.add(channel_name)
+                physical_names = [
+                    channel_name
+                    for channel_name in HSP_CHANNEL_GROUPS[subgroup]
+                    if channel_name not in seen_names
+                ]
+                seen_names.update(physical_names)
+                if not physical_names:
+                    continue
+                if logical_group is not None:
+                    normalizers = {
+                        channel_name: resolve_normalizer(
+                            channel_name=channel_name,
+                            group_name=subgroup,
+                            normalize=normalize,
+                            override_normalize=override_normalize,
+                            sample_frequency=sample_frequency,
+                        )
+                        for channel_name in physical_names
+                    }
                     requested.append(
                         ChannelConfig(
-                            name=channel_name,
+                            logical_name=logical_group,
+                            physical_names=physical_names,
+                            normalizer=(
+                                None
+                                if all(value is None for value in normalizers.values())
+                                else normalizers
+                            ),
+                            unit="%" if subgroup == "spo2" else "uV",
+                        )
+                    )
+                else:
+                    requested.extend(
+                        ChannelConfig(
+                            logical_name=channel_name,
+                            physical_names=[channel_name],
                             normalizer=resolve_normalizer(
                                 channel_name=channel_name,
                                 group_name=subgroup,
@@ -366,9 +395,9 @@ def get_channels(
                                 override_normalize=override_normalize,
                                 sample_frequency=sample_frequency,
                             ),
-                            group=logical_group,
                             unit="%" if subgroup == "spo2" else "uV",
                         )
+                        for channel_name in physical_names
                     )
             continue
 
@@ -378,7 +407,8 @@ def get_channels(
         seen_names.add(channel_name)
         requested.append(
             ChannelConfig(
-                name=channel_name,
+                logical_name=channel_name,
+                physical_names=[channel_name],
                 normalizer=resolve_normalizer(
                     channel_name=channel_name,
                     group_name=None,
@@ -386,7 +416,6 @@ def get_channels(
                     override_normalize=override_normalize,
                     sample_frequency=sample_frequency,
                 ),
-                group=None,
                 unit="%" if channel_name in HSP_CHANNEL_GROUPS["spo2"] else "uV",
             )
         )

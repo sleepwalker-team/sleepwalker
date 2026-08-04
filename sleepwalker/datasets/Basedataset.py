@@ -37,27 +37,56 @@ from sleepwalker.datasets.normalizer import Normalizer
 
 @dataclass
 class ChannelConfig:
-    """Describe one requested signal channel for dataset loading.
+    """Describe one logical model input and its physical EDF alternatives.
 
     Args:
-        name: Channel name expected in the EDF file.
-        normalizer: Optional normalizer fitted per patient and applied when the
-            corresponding signal is loaded.
-        group: Optional conceptual group name. When multiple configured
-            channels share a group, one available channel is sampled per item
-            and renamed to the group name.
-        quality_name: Optional companion channel used as per-window quality
-            metadata. When present and selected, it is passed to
-            ``prepare_sample`` as ``quality_data``.
+        logical_name: Stable channel name exposed to models and callbacks.
+        physical_names: Alternative channel names accepted from an EDF file.
+        normalizer: One normalizer shared by every physical alternative, or a
+            mapping from physical name to a channel-specific normalizer.
+        quality_name: One companion quality channel shared by every physical
+            alternative, or a mapping from physical name to its companion.
         unit: Canonical physical unit delivered to normalizers, callbacks, and
             the model. Compatible EDF units are converted automatically.
     """
 
-    name: str
-    normalizer: Optional[Normalizer] = None  
-    group: Optional[str] = None
-    quality_name: Optional[str] = None
+    logical_name: str
+    physical_names: Sequence[str]
+    normalizer: Optional[Normalizer | Mapping[str, Optional[Normalizer]]] = None
+    quality_name: Optional[str | Mapping[str, Optional[str]]] = None
     unit: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.physical_names, (str, bytes)):
+            raise TypeError("physical_names must be a sequence of channel names, not a string.")
+        self.physical_names = list(self.physical_names)
+        if not self.logical_name:
+            raise ValueError("logical_name must not be empty.")
+        if not self.physical_names:
+            raise ValueError(f"Channel '{self.logical_name}' requires physical_names.")
+        if len(set(self.physical_names)) != len(self.physical_names):
+            raise ValueError(f"Channel '{self.logical_name}' contains duplicate physical names.")
+        physical_names = set(self.physical_names)
+        for field_name, value in (("normalizer", self.normalizer), ("quality_name", self.quality_name)):
+            if isinstance(value, Mapping):
+                unknown = sorted(set(value) - physical_names)
+                if unknown:
+                    raise ValueError(
+                        f"Channel '{self.logical_name}' has {field_name} entries for unknown "
+                        f"physical channels: {unknown}."
+                    )
+
+    def normalizer_for(self, physical_name: str) -> Optional[Normalizer]:
+        """Return the normalizer configured for one physical alternative."""
+        if isinstance(self.normalizer, Mapping):
+            return self.normalizer.get(physical_name)
+        return self.normalizer
+
+    def quality_name_for(self, physical_name: str) -> Optional[str]:
+        """Return the quality channel configured for one physical alternative."""
+        if isinstance(self.quality_name, Mapping):
+            return self.quality_name.get(physical_name)
+        return self.quality_name
 
 
 _UNIT_DEFINITIONS = {
@@ -437,10 +466,10 @@ class BaseDataset(Dataset, ABC):
     Parameters
     ----------
     channels
-        Sequence of `ChannelConfig` objects describing which EDF channels to
-        load. If multiple channels share the same `group`, one representative is
-        sampled per group in grouped-channel settings if group_sampling_strategy == 'random', 
-        else the group is returned as-is ('none')
+        Sequence of `ChannelConfig` objects describing logical model inputs and
+        their accepted physical EDF alternatives. One available alternative is
+        sampled per logical input when `group_sampling_strategy == 'random'`;
+        all available alternatives are returned when it is `'none'`.
 
     sample_frequency
         Target sampling frequency in Hz used when loading signal windows and
@@ -613,23 +642,22 @@ class BaseDataset(Dataset, ABC):
         self.edf_files: list[EDFFile] = []
         self.lower_bounds: list[int] = []
         self.upper_bounds: list[int] = []
-        self.channel_groups: Dict[str, list[str]] = defaultdict(list)
-        self.channel_configs_by_name: Dict[str, ChannelConfig] = {}
-        self.channel_configs_by_group: Dict[str, list[ChannelConfig]] = defaultdict(list)
+        self.channel_configs_by_logical_name: Dict[str, ChannelConfig] = {}
+        physical_owners: dict[str, str] = {}
         for cfg in self.channels:
-            previous = self.channel_configs_by_name.get(cfg.name)
-            if previous is not None and previous.unit != cfg.unit:
+            if cfg.logical_name in self.channel_configs_by_logical_name:
                 raise ValueError(
-                    f"Channel '{cfg.name}' is configured with conflicting units "
-                    f"{previous.unit!r} and {cfg.unit!r}."
+                    f"Duplicate logical channel name '{cfg.logical_name}'."
                 )
-            self.channel_configs_by_name[cfg.name] = cfg
-            if cfg.group is not None:
-                self.channel_groups[cfg.group].append(cfg.name)
-                self.channel_configs_by_group[cfg.group].append(cfg)
-            else:
-                self.channel_groups[cfg.name].append(cfg.name)
-                self.channel_configs_by_group[cfg.name].append(cfg)
+            for physical_name in cfg.physical_names:
+                previous = physical_owners.get(physical_name)
+                if previous is not None:
+                    raise ValueError(
+                        f"Physical channel '{physical_name}' belongs to both "
+                        f"'{previous}' and '{cfg.logical_name}'."
+                    )
+                physical_owners[physical_name] = cfg.logical_name
+            self.channel_configs_by_logical_name[cfg.logical_name] = cfg
         self.group_sampling_strategy = group_sampling_strategy
 
         # Events/classes
@@ -689,8 +717,8 @@ class BaseDataset(Dataset, ABC):
         return len(self.edf_files)
 
     def get_input_channels(self) -> list[str]:
-        """Return the effective model input channel names after grouping."""
-        return list(self.channel_groups.keys())
+        """Return the logical model input channel names."""
+        return list(self.channel_configs_by_logical_name)
 
     def __len__(self):
         return sum([f.length for f in self.edf_files])
@@ -768,22 +796,30 @@ class BaseDataset(Dataset, ABC):
     def _prepare_patient_artifacts(self, edf_path):
         channel_names = []
         for cfg in self.channels:
-            channel_names.append(cfg.name)
-            if cfg.quality_name is not None:
-                channel_names.append(cfg.quality_name)
+            channel_names.extend(cfg.physical_names)
+            channel_names.extend(
+                quality_name
+                for physical_name in cfg.physical_names
+                if (quality_name := cfg.quality_name_for(physical_name)) is not None
+            )
         channel_names = list(dict.fromkeys(channel_names))
-        normalizers = {c.name: copy.deepcopy(c.normalizer) for c in self.channels if c.normalizer is not None}
+        normalizers = {
+            physical_name: copy.deepcopy(normalizer)
+            for cfg in self.channels
+            for physical_name in cfg.physical_names
+            if (normalizer := cfg.normalizer_for(physical_name)) is not None
+        }
 
         meta = read_edf_meta(edf_path)
         available_channels = set(meta["signals"])
-        missing_groups = [
-            group
-            for group, candidates in self.channel_groups.items()
-            if not any(candidate in available_channels for candidate in candidates)
+        missing_channels = [
+            cfg.logical_name
+            for cfg in self.channels
+            if not any(name in available_channels for name in cfg.physical_names)
         ]
-        if missing_groups:
+        if missing_channels:
             raise ValueError(
-                f"Missing required logical channel groups {missing_groups}; "
+                f"Missing required logical channels {missing_channels}; "
                 f"available EDF channels are {sorted(available_channels)}."
             )
         if meta.get("source") != "pyedflib" and any(cfg.unit is not None for cfg in self.channels):
@@ -800,13 +836,14 @@ class BaseDataset(Dataset, ABC):
             }
         )
         unit_factors = {
-            cfg.name: unit_conversion_factor(
-                source_units.get(cfg.name),
+            physical_name: unit_conversion_factor(
+                source_units.get(physical_name),
                 cfg.unit,
                 assume_if_missing=self.assume_units_if_missing,
             )
             for cfg in self.channels
-            if cfg.name in available_channels and cfg.unit is not None
+            for physical_name in cfg.physical_names
+            if physical_name in available_channels and cfg.unit is not None
         }
 
         classes = set()
@@ -1105,46 +1142,40 @@ class BaseDataset(Dataset, ABC):
     def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """Finalize one loaded signal window into a training or inference item."""
         quality_df = None
-        if len(self.channel_groups) > 0:
+        if len(self.channels) > 0:
             available_columns = list(x_df.columns)
+            available_set = set(available_columns)
             selected_columns = []
-            if self.group_sampling_strategy in {'random', 'first'}:
-                renamed_columns = list(self.channel_groups.keys())
-            elif self.group_sampling_strategy == 'none':
-                renamed_columns = sum([[f'{k}' for _ in range(len([channel for channel in v if channel in available_columns]))] for k, v in self.channel_groups.items()], [])
-            else:
-                raise NotImplementedError('Cannot rename columns for group_sampling_strategy', self.group_sampling_strategy)
+            renamed_columns = []
             selected_quality = {}
 
-            # Emit one sampled representative per configured group and rename the
-            # result to the conceptual group name so downstream code sees stable columns.
-            for group, group_cfgs in self.channel_configs_by_group.items():
-                available = [cfg for cfg in group_cfgs if cfg.name in set(available_columns)]
+            for cfg in self.channels:
+                available = [name for name in cfg.physical_names if name in available_set]
                 if len(available) == 0:
-                    raise ValueError(f"No available channels found for group '{group}'.")
+                    raise ValueError(
+                        f"No physical channels found for logical channel '{cfg.logical_name}'."
+                    )
 
-                if self.group_sampling_strategy == 'random':
-                    selected_cfg = available[int(np.random.choice(len(available)))]
-                    selected_columns.append(selected_cfg.name)
-                    if selected_cfg.quality_name is not None:
-                        if selected_cfg.quality_name not in x_df.columns:
+                if self.group_sampling_strategy in {'random', 'first'}:
+                    selected_name = (
+                        available[int(np.random.choice(len(available)))]
+                        if self.group_sampling_strategy == 'random'
+                        else available[0]
+                    )
+                    selected_columns.append(selected_name)
+                    renamed_columns.append(cfg.logical_name)
+                    quality_name = cfg.quality_name_for(selected_name)
+                    if quality_name is not None:
+                        if quality_name not in x_df.columns:
                             raise ValueError(
-                                f"Missing quality channel '{selected_cfg.quality_name}' for selected channel '{selected_cfg.name}'."
+                                f"Missing quality channel '{quality_name}' "
+                                f"for selected channel '{selected_name}'."
                             )
-                        selected_quality[group] = x_df[selected_cfg.quality_name].copy()
-                elif self.group_sampling_strategy == 'first':
-                    selected_cfg = available[0]
-                    selected_columns.append(selected_cfg.name)
-                    if selected_cfg.quality_name is not None:
-                        if selected_cfg.quality_name not in x_df.columns:
-                            raise ValueError(
-                                f"Missing quality channel '{selected_cfg.quality_name}' "
-                                f"for selected channel '{selected_cfg.name}'."
-                            )
-                        selected_quality[group] = x_df[selected_cfg.quality_name].copy()
+                        selected_quality[cfg.logical_name] = x_df[quality_name].copy()
                 elif self.group_sampling_strategy == 'none':
                     # TODO: Quality not supported right now
-                    selected_columns.extend([c.name for c in available])
+                    selected_columns.extend(available)
+                    renamed_columns.extend([cfg.logical_name] * len(available))
                 else:
                     raise NotImplementedError('Cannot sample for group_sampling_strategy', self.group_sampling_strategy)
 

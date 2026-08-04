@@ -1,0 +1,76 @@
+seed: 17
+data:
+  - name: sleepwalker.datasets.SleepEDFx.SleepEDFx
+    channels:
+      - logical_name: EEG Fpz-Cz
+        physical_names: [EEG Fpz-Cz]
+        normalizer:
+          name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+          fs: 100
+        unit: uV
+    sample_frequency: 100
+    event_mapping:
+      sleep stage w: wake
+      sleep stage 1: n1
+      sleep stage 2: n2
+      sleep stage 3: n3
+      sleep stage 4: n3
+      sleep stage r: rem
+    total_input: 1050s
+    target_resolution: 30s
+    stride: 30s
+    assume_units_if_missing: false
+    output_classes: [wake, n1, n2, n3, rem]
+    prepare_patient:
+      name: sleepwalker.training.callbacks.trim_patient_to_events
+      keep_events: [n1, n2, n3, rem]
+    prepare_target:
+      name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+      target_classes: [wake, n1, n2, n3, rem]
+    files:
+      train:
+        name: sleepwalker.training.files.select_sleep_staging_files
+        root: /raid/sleepwalker/sleep-edfx
+        training: true
+        sleep_labels: [n1, n2, n3, rem]
+        sleep_time_filter_quantile: 0.05
+        num_workers: 8
+      validation_fraction: 0.1
+      test_fraction: 0.3
+    label: sleepedfx
+    num_workers: 8
+model:
+  name: sleepwalker.models.USleep.USleep
+  depth: 4
+  init_filters: 16
+  kernel_size: 5
+  activation: relu
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 100
+  optimizer:
+    name: torch.optim.Adam
+    lr: 5.0e-06
+    amsgrad: true
+  lr_scheduler:
+    name: torch.optim.lr_scheduler.LinearLR
+    start_factor: 1
+    end_factor: 0.01
+    total_iters: 50
+  loss_function: sleepwalker.trainer.losses.dice_loss
+  save_every: 1
+  early_stopping: 15
+  balance_batches: false
+run:
+  experiment_name: sleep_usleep
+  model_name: usleep
+  batch_size: 128
+  n_samples: 250000
+  num_workers_dataloader: 8
+  test_repeats: [1]
+  use_mlflow: true
+  log_path: results/sleep
+  tags:
+    task: sleep
+    model: usleep
+  expert_task: sleep

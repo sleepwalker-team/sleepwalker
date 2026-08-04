@@ -120,7 +120,7 @@ def test_eegfilternorm_integration():
     fs = 100
     normalizer = EEGFilterNormalizer(fs=fs)
     dataset = SyntheticDataset(
-        channels=[ChannelConfig(name="EEG", normalizer=normalizer)],
+        channels=[ChannelConfig("EEG", ["EEG"], normalizer=normalizer)],
         sample_frequency=fs,
         event_mapping={},
         remove_unmapped_events=False,

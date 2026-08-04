@@ -33,7 +33,7 @@ def make_dataset(
     normalizer=None,
 ):
     return UnlabelledDataset(
-        channels=[ChannelConfig("EEG", unit=unit, normalizer=normalizer)],
+        channels=[ChannelConfig("EEG", ["EEG"], unit=unit, normalizer=normalizer)],
         sample_frequency=10,
         total_input="60s",
         target_resolution="60s",
@@ -96,7 +96,9 @@ def test_hsp_header_correction_survives_unlabelled_clone():
         event_mapping={"desaturation": "desaturation"},
     )
 
-    assert next(channel for channel in channels if channel.name == "SaO2").unit == "%"
+    assert channels == [
+        ChannelConfig("SpO2", ["SaO2", "SpO2", "SPO2"], normalizer=None, unit="%")
+    ]
     assert {channel.unit for channel in channels} == {"%"}
     assert dataset.edf_unit_overrides["SaO2"] == "%"
     assert UnlabelledDataset.from_dataset(dataset).edf_unit_overrides["SaO2"] == "%"
@@ -149,7 +151,7 @@ def test_expert_roundtrip_preserves_objects_manifest_and_weights(tmp_path):
     loaded = Expert.load(path)
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["format_version"] == "sleepwalker-expert-v4"
+    assert manifest["format_version"] == "sleepwalker-expert-v5"
     assert manifest["input_channels"] == ["EEG"]
     assert manifest["config"]["seed"] == 7
     assert isinstance(loaded.dataset, UnlabelledDataset)
@@ -158,7 +160,7 @@ def test_expert_roundtrip_preserves_objects_manifest_and_weights(tmp_path):
 
 def test_packaging_discards_label_pipeline_from_executable_expert(tmp_path):
     labelled = HSP(
-        channels=[ChannelConfig("EEG", unit="uV")],
+        channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
         sample_frequency=10,
         total_input="60s",
         target_resolution="60s",

@@ -3,7 +3,7 @@
 The repository uses this trainer for experiments where one input window
 produces several task-specific categorical predictions, potentially at
 different temporal resolutions. The canonical example in the current tree is
-``train_multilabel.py`` together with ``MetaModel``.
+the standard multilabel configurations together with ``MetaModel``.
 """
 
 from functools import partial

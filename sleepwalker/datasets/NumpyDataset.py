@@ -95,7 +95,10 @@ class NumpyDataset:
         self.classes = list(meta.get("classes", []))
         self.label_classes = list(self.classes)
         self.input_channels = list(meta.get("input_channels", []))
-        self.channels = [ChannelConfig(name=name) for name in self.input_channels]
+        self.channels = [
+            ChannelConfig(logical_name=name, physical_names=[name])
+            for name in self.input_channels
+        ]
         self.initialized = True
         self.all_patients = list(meta.get("all_patients", []))
 

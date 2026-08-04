@@ -98,7 +98,9 @@ def test_get_channels_grouped_keeps_candidates_but_exposes_grouped_inputs():
         sample_frequency=100,
     )
 
-    assert len(channels) == 9
+    assert len(channels) == 2
+    assert channels[0].logical_name == "EEG"
+    assert channels[0].physical_names == ["C3-M2", "C4-M1", "F3-M2", "F4-M1", "O1-M2", "O2-M1"]
 
     dataset = Ruhrlandklinik(
         channels=channels,

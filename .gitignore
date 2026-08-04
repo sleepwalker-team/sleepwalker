@@ -21,6 +21,12 @@ build/
 bin/outdir
 *.log
 paper/
+!paper/
+paper/*
+!paper/_tmux_launch.sh
+!paper/run_paper_full.sh
+!configs/train/paper/
+!configs/train/paper/**
 .aim
 tmp/
 *.tar
@@ -37,7 +43,10 @@ cache/*
 results/*
 docs/
 old/
+!configs/old/
+!configs/old/**
 embeddings
 logs
 checkpoint.pt
 wandb
+configs/old

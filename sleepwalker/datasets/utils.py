@@ -171,7 +171,12 @@ def summarize_dataset(
 
     # --- (3) Dataset setup ---
     dataset = dataset_clazz(
-        channels=[ChannelConfig(name=first_channel_name, normalizer=None)],
+        channels=[
+            ChannelConfig(
+                logical_name=first_channel_name,
+                physical_names=[first_channel_name],
+            )
+        ],
         sample_frequency=100,
         event_mapping={},
         remove_unmapped_events=False,

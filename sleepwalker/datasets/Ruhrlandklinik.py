@@ -234,7 +234,7 @@ def get_channels(
         ...     },
         ... )
     """
-    requested = []
+    requested: list[ChannelConfig] = []
     seen_names = set()
     valid_groups = set(RUHRLAND_CHANNEL_GROUPS.keys())
 
@@ -248,14 +248,56 @@ def get_channels(
 
             for subgroup in subgroups:
                 logical_group = ruhrland_group_name(subgroup, grouped)
-
-                for channel_name in RUHRLAND_CHANNEL_GROUPS[subgroup]:
-                    if channel_name in seen_names:
-                        continue
-                    seen_names.add(channel_name)
+                physical_names = [
+                    channel_name
+                    for channel_name in RUHRLAND_CHANNEL_GROUPS[subgroup]
+                    if channel_name not in seen_names
+                ]
+                seen_names.update(physical_names)
+                if not physical_names:
+                    continue
+                if logical_group is not None:
+                    normalizers = {
+                        channel_name: resolve_normalizer(
+                            channel_name=channel_name,
+                            group_name=subgroup,
+                            normalize=normalize,
+                            override_normalize=override_normalize,
+                            sample_frequency=sample_frequency,
+                        )
+                        for channel_name in physical_names
+                    }
+                    quality_names = {
+                        channel_name: resolve_quality(
+                            channel_name=channel_name,
+                            group_name=subgroup,
+                            include_quality=include_quality,
+                            override_quality=override_quality,
+                        )
+                        for channel_name in physical_names
+                    }
                     requested.append(
                         ChannelConfig(
-                            name=channel_name,
+                            logical_name=logical_group,
+                            physical_names=physical_names,
+                            normalizer=(
+                                None
+                                if all(value is None for value in normalizers.values())
+                                else normalizers
+                            ),
+                            quality_name=(
+                                None
+                                if all(value is None for value in quality_names.values())
+                                else quality_names
+                            ),
+                            unit=ruhrland_unit(physical_names[0]),
+                        )
+                    )
+                else:
+                    requested.extend(
+                        ChannelConfig(
+                            logical_name=channel_name,
+                            physical_names=[channel_name],
                             normalizer=resolve_normalizer(
                                 channel_name=channel_name,
                                 group_name=subgroup,
@@ -263,7 +305,6 @@ def get_channels(
                                 override_normalize=override_normalize,
                                 sample_frequency=sample_frequency,
                             ),
-                            group=logical_group,
                             quality_name=resolve_quality(
                                 channel_name=channel_name,
                                 group_name=subgroup,
@@ -272,6 +313,7 @@ def get_channels(
                             ),
                             unit=ruhrland_unit(channel_name),
                         )
+                        for channel_name in physical_names
                     )
             continue
 
@@ -281,7 +323,8 @@ def get_channels(
         seen_names.add(channel_name)
         requested.append(
             ChannelConfig(
-                name=channel_name,
+                logical_name=channel_name,
+                physical_names=[channel_name],
                 normalizer=resolve_normalizer(
                     channel_name=channel_name,
                     group_name=None,
@@ -289,7 +332,6 @@ def get_channels(
                     override_normalize=override_normalize,
                     sample_frequency=sample_frequency,
                 ),
-                group=None,
                 quality_name=resolve_quality(
                     channel_name=channel_name,
                     group_name=None,

@@ -1,8 +1,8 @@
 """Multi-task variant of :mod:`sleepwalker.models.MultiModel`.
 
 ``MetaModel`` reuses the embedding-fusion logic from ``MultiModel`` but replaces
-the shared head with one task-specific head per configured task. The current
-main consumer is ``MultiLabelTrainer`` together with ``train_multilabel.py``.
+the shared head with one task-specific head per configured task. Its main
+consumer is ``MultiLabelTrainer`` in the standard multilabel configurations.
 """
 
 import torch

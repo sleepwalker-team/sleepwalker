@@ -1,253 +1,224 @@
-"""Expert package save/load path for repo-local research handoff.
+"""Reloadable expert artifacts for a compatible Sleepwalker checkout.
 
-An expert package is a directory-based snapshot containing two kinds of data:
-
-1. Binary training artifacts:
-   model parameters and, optionally, optimizer/scheduler state.
-2. A JSON manifest:
-   a structured explanation of what the snapshot expects at inference/load
-   time and how to reconstruct the supporting Python objects.
-
-The design intentionally favors explicitness over full portability. A package
-is meant to be understandable and reusable inside a compatible Sleepwalker
-checkout, not a standalone model interchange format. In particular:
-
-- The package stores tensor state, not source code.
-- Reload uses a builder function from the repository to reconstruct the model,
-  trainer, and dataset template.
-- The manifest records input/output and preprocessing contracts so callers can
-  validate whether a dataset or batch matches the saved expert.
-
-This module owns the filesystem layout and torch serialization mechanics,
-whereas :mod:`sleepwalker.deployment.manifest` owns the manifest schema. The
-modules remain separate because the schema is useful as a pure contract layer
-without dragging in package I/O code, but together they define one deployment
-story.
+An :class:`Expert` stores the trained model, its executable unlabelled dataset,
+and the trainer that turns model outputs into timestamped probabilities.  The
+original run configuration and Git commit document how the expert was trained.
+The artifact is intentionally a trusted research artifact, not a portable model
+interchange format.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import importlib
+from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
-import re
+import pickle
 import subprocess
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
+import cloudpickle
 import torch
+from torch.utils.data import DataLoader
 
-from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.deployment.manifest import BuilderSpec, ExpertManifest, serialize_callable
+from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
 
 
-def _safe_git_commit() -> Optional[str]:
+FORMAT_VERSION = "sleepwalker-expert-v5"
+
+
+class CloudpickleAdapter:
+    """Give PyTorch cloudpickle's pickler and the standard compatible loader."""
+
+    __name__ = "cloudpickle"
+    Pickler = cloudpickle.Pickler
+    Unpickler = pickle.Unpickler
+    dump = staticmethod(cloudpickle.dump)
+    dumps = staticmethod(cloudpickle.dumps)
+    load = staticmethod(pickle.load)
+    loads = staticmethod(pickle.loads)
+
+
+def class_name(value: Any) -> str:
+    return f"{value.__class__.__module__}.{value.__class__.__qualname__}"
+
+
+def git_value(*args: str) -> Optional[str]:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run(["git", *args], check=True, capture_output=True, text=True)
         return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         return None
 
 
-def _normalize_path(path: str | os.PathLike) -> Path:
-    out = Path(path)
-    if out.exists() and out.is_file():
-        raise ValueError(f"Expected expert package directory path, got existing file: {out}")
-    return out
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
-def _load_builder(spec: BuilderSpec):
-    module = importlib.import_module(spec.module)
-    func = getattr(module, spec.function)
-    return func
+def normalizer_details(normalizer: Any) -> Any:
+    if normalizer is None:
+        return None
+    return {"class": class_name(normalizer), "config": json_ready(vars(normalizer))}
 
 
-def _class_path(obj: Any) -> str:
-    return f"{obj.__class__.__module__}.{obj.__class__.__name__}"
-
-
-def _dataset_side_contract(dataset: Any) -> dict[str, Any]:
-    return {
-        "resample_type": getattr(dataset, "resample_type", None),
-        "rereference": getattr(dataset, "rereference", None),
-        "prepare_patient": serialize_callable(getattr(dataset, "prepare_patient_callback", None)),
-        "prepare_target": serialize_callable(getattr(dataset, "prepare_target_callback", None)),
-        "prepare_sample": serialize_callable(getattr(dataset, "prepare_sample_callback", None)),
-    }
-
-
-def _model_side_contract(model: Any) -> list[dict[str, Any]]:
-    preprocessors = []
-    for preprocessor in getattr(model, "preprocessors", []):
-        preprocessors.append(
-            {
-                "class_name": _class_path(preprocessor),
-            }
-        )
-    return preprocessors
-
-
-def _input_contract(model: Any, dataset_template: Any) -> dict[str, Any]:
-    shape, meta = model.input_spec()
-    return {
-        "tensor_layout": meta.get("layout", "BTC"),
-        "channels": list(dataset_template.get_input_channels()) if hasattr(dataset_template, "get_input_channels") else [],
-        "sample_frequency": float(getattr(dataset_template, "sample_frequency")),
-        "total_input": str(getattr(dataset_template, "total_input")),
-        "target_resolution": str(getattr(dataset_template, "target_resolution", getattr(dataset_template, "total_input"))),
-        "stride": str(getattr(dataset_template, "stride", getattr(dataset_template, "target_resolution", getattr(dataset_template, "total_input")))),
-        "ts_len": int(shape[1]),
-        "n_channels": int(shape[2]),
-    }
-
-
-def _output_contract(model: Any, trainer: Any) -> dict[str, Any]:
-    if hasattr(trainer, "task_config"):
-        return {
-            "type": "multitask",
-            "keys": list(trainer.task_config.keys()),
-            "task_config": {
-                task: {
-                    "labels": list(cfg["labels"]),
-                    "n_steps": int(cfg["n_steps"]),
-                    "target_resolution": str(cfg["target_resolution"]),
-                }
-                for task, cfg in trainer.task_config.items()
-            },
-        }
-    return {
-        "type": "single-head-multiclass",
-        "keys": ["logits"],
-        "classes": list(getattr(trainer, "classes", [])),
-    }
+def group_contract(dataset: Any) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for config in dataset.channels:
+        entry = groups.setdefault(config.logical_name, {"units": set(), "normalizers": set()})
+        entry["units"].add(config.unit)
+        for physical_name in config.physical_names:
+            normalizer = normalizer_details(config.normalizer_for(physical_name))
+            entry["normalizers"].add(
+                None if normalizer is None else json.dumps(normalizer, sort_keys=True)
+            )
+    return groups
 
 
 @dataclass
-class LoadedExpert:
-    """Live objects reconstructed from an expert package.
+class Expert:
+    """A trained specialist and everything required to run it on an EDF."""
 
-    ``LoadedExpert`` is the in-memory view of a package directory after
-    rehydration. It provides the rebuilt model/trainer/template objects plus
-    the parsed manifest and any optional optimizer/scheduler state.
-
-    What callers can expect:
-
-    - ``model`` is loaded with persisted weights.
-    - ``trainer`` and ``dataset_template`` are rebuilt through the package
-      builder when available.
-    - ``manifest`` remains the primary source of structural expectations and
-      metadata.
-
-    What callers should not expect:
-
-    - The object is not a generic training session checkpoint. Only the pieces
-      explicitly persisted into the package are available.
-    - Arbitrary runtime state outside the saved tensor files and manifest is
-      not restored.
-    """
-
+    name: str
+    task: str
     model: Any
+    dataset: UnlabelledDataset
     trainer: Any
-    dataset_template: Any
-    manifest: ExpertManifest
-    optimizer_state: Optional[dict[str, Any]] = None
-    scheduler_state: Optional[dict[str, Any]] = None
+    config: dict[str, Any] = field(default_factory=dict)
+    git_commit: Optional[str] = None
 
     @property
-    def metadata(self) -> dict[str, Any]:
-        return self.manifest.metadata
+    def output_contract(self) -> dict[str, Any]:
+        if hasattr(self.trainer, "task_config"):
+            return {
+                "type": "multitask",
+                "tasks": {
+                    task: {
+                        "classes": list(config["labels"]),
+                        "n_steps": int(config["n_steps"]),
+                        "target_resolution": str(config["target_resolution"]),
+                    }
+                    for task, config in self.trainer.task_config.items()
+                },
+            }
+        return {"type": "single-head-multiclass", "classes": list(self.trainer.classes)}
 
     def freeze(self) -> None:
-        for param in self.model.parameters():
-            param.requires_grad = False
+        for parameter in self.model.parameters():
+            parameter.requires_grad = False
 
     def unfreeze(self) -> None:
-        for param in self.model.parameters():
-            param.requires_grad = True
+        for parameter in self.model.parameters():
+            parameter.requires_grad = True
 
     def forward(self, batch_or_tensor):
-        if isinstance(batch_or_tensor, dict):
-            self.validate_batch(batch_or_tensor)
-            x = batch_or_tensor["data"]
-        else:
-            x = batch_or_tensor
-        return self.model(x)
+        value = batch_or_tensor["data"] if isinstance(batch_or_tensor, dict) else batch_or_tensor
+        return self.model(value)
 
-    def validate_batch(self, batch: dict[str, Any]) -> None:
-        if "data" not in batch:
-            raise ValueError("Batch must contain 'data'.")
-        x = batch["data"]
-        expected = self.manifest.input_contract
-        if x.ndim != 3:
-            raise ValueError(f"Expected BTC tensor with ndim=3, got shape {tuple(x.shape)}.")
-        if int(x.shape[1]) != int(expected["ts_len"]):
-            raise ValueError(f"Expected time axis {expected['ts_len']}, got {x.shape[1]}.")
-        if int(x.shape[2]) != int(expected["n_channels"]):
-            raise ValueError(f"Expected channel axis {expected['n_channels']}, got {x.shape[2]}.")
+    def assert_compatible(self, dataset: Any) -> None:
+        expected_inputs = list(self.dataset.get_input_channels())
+        actual_inputs = list(dataset.get_input_channels())
+        if actual_inputs != expected_inputs:
+            raise ValueError(f"Expected logical input channels {expected_inputs}, got {actual_inputs}.")
+        for attribute in ["sample_frequency", "resample_type", "total_input", "target_resolution", "stride"]:
+            expected = str(getattr(self.dataset, attribute))
+            actual = str(getattr(dataset, attribute))
+            if actual != expected:
+                raise ValueError(f"Expected dataset {attribute}={expected}, got {actual}.")
+        expected_groups = group_contract(self.dataset)
+        actual_groups = group_contract(dataset)
+        for group in expected_inputs:
+            expected = expected_groups[group]
+            actual = actual_groups[group]
+            if not actual["units"].issubset(expected["units"]):
+                raise ValueError(f"Expected units {expected['units']} for '{group}', got {actual['units']}.")
+            if not actual["normalizers"].issubset(expected["normalizers"]):
+                raise ValueError(f"Normalizer configuration for '{group}' does not match the expert's stored preprocessing.")
 
-    def validate_dataset(self, dataset: Any) -> None:
-        expected = self.manifest.input_contract
-        channels = list(dataset.get_input_channels()) if hasattr(dataset, "get_input_channels") else []
-        if channels != list(expected["channels"]):
-            raise ValueError(f"Expected channels {expected['channels']}, got {channels}.")
-        if float(getattr(dataset, "sample_frequency")) != float(expected["sample_frequency"]):
-            raise ValueError(
-                f"Expected sample_frequency={expected['sample_frequency']}, got {getattr(dataset, 'sample_frequency')}."
-            )
-        if str(getattr(dataset, "total_input")) != str(expected["total_input"]):
-            raise ValueError(f"Expected total_input={expected['total_input']}, got {getattr(dataset, 'total_input')}.")
-
-    def build_optimizer(self):
-        if self.trainer is None or not hasattr(self.trainer, "optimizer_fn"):
-            raise ValueError("Loaded expert does not expose trainer.optimizer_fn.")
-        optimizer = self.trainer.optimizer_fn(self.model)
-        if self.optimizer_state is not None:
-            optimizer.load_state_dict(self.optimizer_state)
-        return optimizer
-
-    def build_scheduler(self, optimizer):
-        if self.trainer is None or not hasattr(self.trainer, "lr_scheduler_fn") or self.trainer.lr_scheduler_fn is None:
-            return None
-        scheduler = self.trainer.lr_scheduler_fn(optimizer)
-        if self.scheduler_state is not None:
-            scheduler.load_state_dict(self.scheduler_state)
-        return scheduler
-
-    def predict_window(self, batch, n_repeat: int = 1):
-        if self.trainer is None:
-            raise ValueError("Loaded expert does not include a trainer.")
-        return self.trainer.predict_window(self.model, batch, n_repeat=n_repeat)
-
-    def predict_loader(self, loader):
-        if self.trainer is None:
-            raise ValueError("Loaded expert does not include a trainer.")
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, collate_fn=None):
+        self.assert_compatible(dataset)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=batch_collate if collate_fn is None else collate_fn,
+            drop_last=False,
+            persistent_workers=num_workers > 0,
+        )
         return self.trainer.predict_loader(self.model, loader)
 
-    def predict_patient(
+    def predict_edf(
         self,
-        edf_path,
-        batch_size: int,
-        num_workers_dataset: int = 1,
+        edf_path: str | os.PathLike,
+        *,
+        channels: Optional[Sequence[ChannelConfig]] = None,
+        assume_units_if_missing: Optional[bool] = None,
+        batch_size: int = 64,
+        num_workers_dataset: int = 0,
         num_workers_loader: int = 0,
         collate_fn=None,
     ):
-        if self.trainer is None or self.dataset_template is None:
-            raise ValueError("Loaded expert does not include trainer and dataset_template.")
-        return self.trainer.predict_patient(
-            self.model,
-            self.dataset_template,
-            edf_path,
-            batch_size=batch_size,
-            num_workers_dataset=num_workers_dataset,
-            num_workers_loader=num_workers_loader,
-            collate_fn=batch_collate if collate_fn is None else collate_fn,
-        )
+        dataset = self.dataset.clone(channels=channels, assume_units_if_missing=assume_units_if_missing)
+        self.assert_compatible(dataset)
+        dataset.initialize([str(edf_path)], num_workers=num_workers_dataset, strict=True)
+        if dataset.get_n_patients() != 1:
+            raise ValueError(f"Could not prepare EDF file {edf_path}.")
+        return self.predict_dataset(dataset, batch_size=batch_size, num_workers=num_workers_loader, collate_fn=collate_fn)
+
+    def save(self, path: str | os.PathLike) -> Path:
+        root = Path(path)
+        if root.exists() and not root.is_dir():
+            raise ValueError(f"Expert path must be a directory, got {root}.")
+        root.mkdir(parents=True, exist_ok=True)
+
+        payload_path = root / "expert.pt"
+        torch.save(self, payload_path, pickle_module=CloudpickleAdapter)
+        manifest = {
+            "format_version": FORMAT_VERSION,
+            "name": self.name,
+            "task": self.task,
+            "payload": payload_path.name,
+            "sha256": sha256(payload_path),
+            "model_class": class_name(self.model),
+            "dataset_class": class_name(self.dataset),
+            "trainer_class": class_name(self.trainer),
+            "input_channels": list(self.dataset.get_input_channels()),
+            "output": self.output_contract,
+            "config": self.config,
+            "git_commit": self.git_commit,
+        }
+        with (root / "manifest.json").open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True, cls=NumpyEncoder)
+            handle.write("\n")
+        return root
+
+    @classmethod
+    def load(cls, path: str | os.PathLike, *, map_location: str | torch.device = "cpu") -> "Expert":
+        root = Path(path)
+        with (root / "manifest.json").open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if manifest.get("format_version") != FORMAT_VERSION:
+            raise ValueError(f"Unsupported expert format {manifest.get('format_version')!r}.")
+        payload_path = root / manifest["payload"]
+        actual_hash = sha256(payload_path)
+        if actual_hash != manifest["sha256"]:
+            raise ValueError(f"Expert payload hash mismatch: expected {manifest['sha256']}, got {actual_hash}.")
+        expert = torch.load(payload_path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
+        if not isinstance(expert, cls):
+            raise TypeError(f"Expected an Expert payload, got {type(expert).__name__}.")
+        expert.model = expert.model.to(map_location)
+        if hasattr(expert.trainer, "device"):
+            expert.trainer.device = str(map_location)
+        if hasattr(expert.trainer, "warmup_device"):
+            expert.trainer.warmup_device = str(map_location)
+        return expert
 
 
 def save_expert_package(
@@ -255,258 +226,25 @@ def save_expert_package(
     *,
     expert_name: str,
     task: str,
-    model,
-    trainer,
-    dataset_template,
-    builder: Optional[dict[str, Any]] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
-    metadata: Optional[dict[str, Any]] = None,
-) -> LoadedExpert:
-    """Write a directory-based expert package and return its live view.
-
-    The resulting directory contains:
-
-    - ``model_state.pt``: required model parameters.
-    - ``optimizer_state.pt``: optional optimizer snapshot.
-    - ``scheduler_state.pt``: optional scheduler snapshot.
-    - ``manifest.json``: structured contract and provenance description.
-
-    The layout is intentionally small and inspectable. Users should expect a
-    package to preserve enough information to reload the model in the same
-    codebase and validate inference compatibility, but not to encapsulate the
-    full repository or arbitrary Python behavior.
-    """
-
-    out = _normalize_path(path)
-    out.mkdir(parents=True, exist_ok=True)
-
-    builder_spec = None if builder is None else BuilderSpec(
-        module=str(builder["module"]),
-        function=str(builder["function"]),
-        config=dict(builder.get("config", {})),
-    )
-
-    manifest = ExpertManifest(
-        format_version="sleepwalker-expert-v1",
-        expert_name=expert_name,
-        task=task,
-        source_git_commit=_safe_git_commit(),
-        builder=builder_spec,
-        model={
-            "class_name": _class_path(model),
-            "state_file": "model_state.pt",
-            "input_spec": {
-                "shape": list(model.input_spec()[0]),
-                "meta": model.input_spec()[1],
-            },
-        },
-        input_contract=_input_contract(model, dataset_template),
-        preprocessing_contract={
-            "dataset_side": _dataset_side_contract(dataset_template),
-            "model_side": _model_side_contract(model),
-        },
-        output_contract=_output_contract(model, trainer),
-        training_state={
-            "optimizer_file": "optimizer_state.pt" if optimizer is not None else None,
-            "scheduler_file": "scheduler_state.pt" if scheduler is not None else None,
-            "trainer_class": _class_path(trainer) if trainer is not None else None,
-            "dataset_class": _class_path(dataset_template) if dataset_template is not None else None,
-        },
-        metadata=dict(metadata or {}),
-    )
-
-    torch.save(model.state_dict(), out / "model_state.pt")
-    if optimizer is not None:
-        torch.save(optimizer.state_dict(), out / "optimizer_state.pt")
-    if scheduler is not None:
-        torch.save(scheduler.state_dict(), out / "scheduler_state.pt")
-    with (out / "manifest.json").open("w", encoding="utf-8") as f:
-        f.write(manifest.to_json() + "\n")
-
-    return LoadedExpert(
-        model=model,
-        trainer=trainer,
-        dataset_template=dataset_template,
-        manifest=manifest,
-        optimizer_state=None if optimizer is None else optimizer.state_dict(),
-        scheduler_state=None if scheduler is None else scheduler.state_dict(),
-    )
-
-
-def _manifest_from_dict(payload: dict[str, Any]) -> ExpertManifest:
-    builder_payload = payload.get("builder")
-    builder = None
-    if builder_payload is not None:
-        builder = BuilderSpec(
-            module=builder_payload["module"],
-            function=builder_payload["function"],
-            config=dict(builder_payload.get("config", {})),
-        )
-    return ExpertManifest(
-        format_version=payload["format_version"],
-        expert_name=payload["expert_name"],
-        task=payload["task"],
-        source_git_commit=payload.get("source_git_commit"),
-        builder=builder,
-        model=dict(payload["model"]),
-        input_contract=dict(payload["input_contract"]),
-        preprocessing_contract=dict(payload["preprocessing_contract"]),
-        output_contract=dict(payload["output_contract"]),
-        training_state=dict(payload["training_state"]),
-        metadata=dict(payload.get("metadata", {})),
-    )
-
-
-def _prepare_preprocessor_state_for_load(model: Any, state_dict: dict[str, Any]) -> None:
-    """Initialize lazy preprocessor buffers before loading saved state."""
-    modules = dict(model.named_modules()) if hasattr(model, "named_modules") else {"": model}
-
-    def resolve_preprocessors(module_prefix: str):
-        module = modules.get(module_prefix)
-        if module is None:
-            return None
-        return getattr(module, "preprocessors", None)
-
-    robust_pattern = re.compile(r"^(?:(?P<prefix>.+)\.)?preprocessors\.(?P<idx>\d+)\.n$")
-    for key, saved in state_dict.items():
-        match = robust_pattern.match(key)
-        if match is None or not hasattr(saved, "numel") or int(saved.numel()) == 0:
-            continue
-        preprocessors = resolve_preprocessors(match.group("prefix") or "")
-        if preprocessors is None:
-            continue
-        idx = int(match.group("idx"))
-        if idx >= len(preprocessors):
-            continue
-        preprocessor = preprocessors[idx]
-        current = getattr(preprocessor, "n", None)
-        if current is None or not hasattr(current, "numel") or int(current.numel()) != 0:
-            continue
-        if not hasattr(preprocessor, "push"):
-            continue
-        dummy = torch.zeros(1, 1, int(saved.numel()), device=saved.device, dtype=torch.float32)
-        preprocessor.push(dummy)
-
-    normalize_pattern = re.compile(r"^(?:(?P<prefix>.+)\.)?preprocessors\.(?P<idx>\d+)\.(?P<buffer>mean|M2)$")
-    for key, saved in state_dict.items():
-        match = normalize_pattern.match(key)
-        if match is None or not torch.is_tensor(saved):
-            continue
-        preprocessors = resolve_preprocessors(match.group("prefix") or "")
-        if preprocessors is None:
-            continue
-        idx = int(match.group("idx"))
-        buffer_name = match.group("buffer")
-        if idx >= len(preprocessors):
-            continue
-        preprocessor = preprocessors[idx]
-        if getattr(preprocessor, buffer_name, None) is not None:
-            continue
-        setattr(preprocessor, buffer_name, torch.zeros_like(saved))
-
-
-def load_expert_package(
-    path: str | os.PathLike,
-    *,
-    map_location: str | torch.device = "cpu",
-) -> LoadedExpert:
-    """Load a previously saved expert package from disk.
-
-    Loading proceeds in three phases:
-
-    1. Parse ``manifest.json`` to recover the schema and builder spec.
-    2. Reconstruct Python objects by calling the builder.
-    3. Load tensor state files into the reconstructed objects.
-
-    Because builder reconstruction depends on repository code, load-time
-    compatibility is a code-level contract, not just a file-format contract.
-    """
-
-    root = Path(path)
-    if not root.is_dir():
-        raise ValueError(f"Expert package path must be a directory, got {root}")
-
-    with (root / "manifest.json").open("r", encoding="utf-8") as f:
-        manifest = _manifest_from_dict(json.load(f))
-
-    if manifest.builder is None:
-        raise ValueError("Cannot load expert package without a builder spec.")
-
-    builder_fn = _load_builder(manifest.builder)
-    components = builder_fn(manifest.builder.config)
-
-    model = components["model"]
-    trainer = components.get("trainer")
-    dataset_template = components.get("dataset_template")
-
-    state_dict = torch.load(root / "model_state.pt", map_location=map_location)
-    _prepare_preprocessor_state_for_load(model, state_dict)
-    model.load_state_dict(state_dict)
-    model = model.to(map_location)
-
-    optimizer_state = None
-    scheduler_state = None
-    optimizer_file = manifest.training_state.get("optimizer_file")
-    scheduler_file = manifest.training_state.get("scheduler_file")
-    if optimizer_file:
-        optimizer_state = torch.load(root / optimizer_file, map_location="cpu")
-    if scheduler_file:
-        scheduler_state = torch.load(root / scheduler_file, map_location="cpu")
-
-    if trainer is not None and hasattr(trainer, "device"):
-        trainer.device = str(map_location)
-    if trainer is not None and hasattr(trainer, "warmup_device"):
-        trainer.warmup_device = str(map_location)
-
-    return LoadedExpert(
-        model=model,
-        trainer=trainer,
-        dataset_template=dataset_template,
-        manifest=manifest,
-        optimizer_state=optimizer_state,
-        scheduler_state=scheduler_state,
-    )
-
-
-def export_prediction_package(
-    path: str | os.PathLike,
-    *,
-    model,
-    trainer,
-    dataset,
-    metadata: Optional[dict[str, Any]] = None,
-    model_card_md: str = "",
-) -> LoadedExpert:
-    """Compatibility wrapper that saves an inference-oriented expert package.
-
-    This helper preserves the older "prediction package" naming while using the
-    same package/manifest layout as :func:`save_expert_package`.
-    """
-
-    del model_card_md
-    metadata = dict(metadata or {})
-    expert_name = str(
-        metadata.get("expert_name")
-        or metadata.get("experiment_name")
-        or Path(path).name
-    )
-    task = str(
-        metadata.get("task")
-        or metadata.get("model")
-        or "expert"
-    )
-    return save_expert_package(
-        path,
-        expert_name=expert_name,
+    model: Any,
+    trainer: Any,
+    dataset: Any,
+    config: dict[str, Any],
+    git_commit: Optional[str] = None,
+) -> Expert:
+    inference_dataset = dataset if isinstance(dataset, UnlabelledDataset) else UnlabelledDataset.from_dataset(dataset)
+    expert = Expert(
+        name=expert_name,
         task=task,
         model=model,
+        dataset=inference_dataset,
         trainer=trainer,
-        dataset_template=dataset,
-        metadata=metadata,
+        config=json_ready(config),
+        git_commit=git_value("rev-parse", "HEAD") if git_commit is None else git_commit,
     )
+    expert.save(path)
+    return expert
 
 
-def load_prediction_package(path: str | os.PathLike, map_location: str | torch.device = "cpu") -> LoadedExpert:
-    """Compatibility wrapper around :func:`load_expert_package`."""
-    return load_expert_package(path, map_location=map_location)
+def load_expert_package(path: str | os.PathLike, *, map_location: str | torch.device = "cpu") -> Expert:
+    return Expert.load(path, map_location=map_location)

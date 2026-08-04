@@ -23,10 +23,19 @@ class MetaModelEntry:
         model: Submodel instance implementing the ``BaseModel`` interface.
         input_channels: Channel names that should be sliced out of the parent
             input tensor before being passed to ``model``.
+        trainable: Whether the submodel participates in optimization. Setting
+            this to ``False`` freezes its existing parameters when the entry is
+            constructed.
     """
 
     model: BaseModel
     input_channels: list[str]
+    trainable: bool = True
+
+    def __post_init__(self):
+        if not self.trainable:
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
 
 
 class MultiModel(BaseModel):

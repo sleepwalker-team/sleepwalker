@@ -51,6 +51,7 @@ class StructuredExpertInterfaceMetaModel(BaseModel):
         input_channels: list[str],
         models: list[MetaModelEntry],
         edges: list[ExpertInterfaceEdge],
+        task_receivers: dict[str, int] | None = None,
         preprocessors=None,
     ):
         super().__init__(preprocessors=preprocessors)
@@ -86,12 +87,34 @@ class StructuredExpertInterfaceMetaModel(BaseModel):
             receiver_dim = self.feature_dims[edge.target]
             self.edge_modules.append(_InterfaceModule(sender_dim, edge.bottleneck_dim, receiver_dim, edge.gated))
 
+        if task_receivers is None:
+            if len(models) == 1:
+                task_receivers = {task: 0 for task in self.task_config}
+            elif len(models) == len(self.task_config):
+                task_receivers = {
+                    task: receiver
+                    for receiver, task in enumerate(self.task_config)
+                }
+            else:
+                raise ValueError(
+                    "task_receivers is required when tasks and experts do not have a one-to-one ordering."
+                )
+        if set(task_receivers) != set(self.task_config):
+            raise ValueError(
+                f"task_receivers must define exactly {sorted(self.task_config)}, got {sorted(task_receivers)}."
+            )
+        for task, receiver in task_receivers.items():
+            if receiver < 0 or receiver >= len(models):
+                raise ValueError(f"Receiver index for task '{task}' is out of range: {receiver}")
+        self.task_receivers = dict(task_receivers)
+
         self._feature_dim = sum(self.feature_dims)
         self.heads = torch.nn.ModuleDict()
         for task, cfg in self.task_config.items():
             if "labels" not in cfg or "n_steps" not in cfg:
                 raise ValueError(f"Task '{task}' must provide normalized config with 'labels' and 'n_steps'.")
-            self.heads[task] = torch.nn.Linear(self._feature_dim, int(cfg["n_steps"]) * len(cfg["labels"]))
+            receiver_dim = self.feature_dims[self.task_receivers[task]]
+            self.heads[task] = torch.nn.Linear(receiver_dim, int(cfg["n_steps"]) * len(cfg["labels"]))
 
     @staticmethod
     def _validate_edge(edge: ExpertInterfaceEdge, n_models: int) -> None:
@@ -104,7 +127,7 @@ class StructuredExpertInterfaceMetaModel(BaseModel):
         if edge.bottleneck_dim <= 0:
             raise ValueError(f"Edge bottleneck_dim must be positive, got {edge.bottleneck_dim}.")
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def _features(self, x: torch.Tensor) -> list[torch.Tensor]:
         embeddings = []
         for entry in self.model_entries:
             emb = entry["model"].features(x[:, :, entry["indices"]])
@@ -116,16 +139,17 @@ class StructuredExpertInterfaceMetaModel(BaseModel):
         for edge, module in zip(self.edges, self.edge_modules):
             receiver_states[edge.target] = receiver_states[edge.target] + module(embeddings[edge.source])
 
-        return torch.cat(receiver_states, dim=1)
+        return receiver_states
 
     def feature_dim(self) -> int:
         return self._feature_dim
 
-    def _classifier(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _classifier(self, x: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         out = {}
         for task, cfg in self.task_config.items():
-            logits = self.heads[task](x)
-            out[task] = logits.view(x.shape[0], int(cfg["n_steps"]), len(cfg["labels"]))
+            receiver_state = x[self.task_receivers[task]]
+            logits = self.heads[task](receiver_state)
+            out[task] = logits.view(receiver_state.shape[0], int(cfg["n_steps"]), len(cfg["labels"]))
         return out
 
     def input_spec(self):

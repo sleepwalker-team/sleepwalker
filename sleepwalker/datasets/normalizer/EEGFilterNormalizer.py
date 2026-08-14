@@ -10,4 +10,5 @@ class EEGFilterNormalizer(SignalFilterNormalizer):
             notch_freq=notch_freq,
             band_order=band_order,
             notch_q=notch_q,
+            **kwargs,
         )

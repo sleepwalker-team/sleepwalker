@@ -48,7 +48,7 @@ def test_combine_datasets_returns_single_dataset_unchanged():
 def test_load_split_reads_yaml(tmp_path):
     path = tmp_path / "hsp_split.yml"
     path.write_text(
-        "train: [a.edf]\nvalidation: [b.edf]\ntest: [c.edf]\n",
+        "folds:\n  holdout:\n    train: [a.edf]\n    validation: [b.edf]\n    test: [c.edf]\n",
         encoding="utf-8",
     )
 

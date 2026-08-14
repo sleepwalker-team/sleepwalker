@@ -104,6 +104,13 @@ class MultiDataset(Dataset):
         """Return the total number of patients across all component datasets."""
         return sum([d.get_n_patients() for d in self.datasets])
 
+    def get_patient_ranges(self) -> list[tuple[int, int]]:
+        """Return component patient ranges shifted into the combined index."""
+        ranges = []
+        for dataset, offset in zip(self.datasets, self.lower_bound):
+            ranges.extend((lower + offset, upper + offset) for lower, upper in dataset.get_patient_ranges())
+        return ranges
+
     def __len__(self):
         return self.len
     

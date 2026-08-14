@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch
 from torch.nn import functional as F
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 from sleepwalker.models.preprocessors.NormalizeAlongDim import NormalizeAlongDim
 
 class CNNBlock(nn.Module):
@@ -120,7 +120,7 @@ class gMLPBlock(nn.Module):
         out = x + residual
         return out
 
-class MRASleepNet(BaseModel):
+class MRASleepNet(BaseModel, EmbeddingModel, ClassifierModel):
     """
     Paper: MRASleepNet: a multi-resolution attention network for sleep stage classification using single-channel EEG by Yu et al. in Journal of Neural Engineering, 2022
     Code: https://github.com/YuRui8879/MRASleepNet
@@ -132,7 +132,7 @@ class MRASleepNet(BaseModel):
     - Macro F1:     0.789 / 0.754
     - Cohens Kappa: 0.786 / 0.743
     """
-    def __init__(self, *, ts_len, n_channels=None, n_features=None, classes=None):
+    def __init__(self, *, ts_len, n_channels=None, n_features=None, classes=None, sequence_len=1):
         """Construct the MRASleepNet architecture.
 
         Args:
@@ -147,6 +147,9 @@ class MRASleepNet(BaseModel):
             raise ValueError("MRASleepNet requires n_channels or n_features.")
         self.ts_len = ts_len
         self.classes = list(classes) if classes is not None else None
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
 
         self.fe = FE(self.n_channels)
         self.mra = MRA()
@@ -168,13 +171,12 @@ class MRASleepNet(BaseModel):
                 nn.Linear(192,128),
                 nn.ReLU(),
                 nn.Dropout(0.3),
-                nn.Linear(128,len(self.classes)),
-                nn.Softmax(-1)
+                nn.Linear(128, self.sequence_len * len(self.classes)),
             )
         else:
             self.fc = None
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Compute MRASleepNet features from one input batch."""
         batch_size, T, D = x.shape 
         x = x.swapaxes(1,2) # (B, D, T)
@@ -198,8 +200,9 @@ class MRASleepNet(BaseModel):
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Map features to class predictions."""
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode preprocessed inputs and map them to class predictions."""
+        x = self.encode(x)
         if self.fc is None or self.classes is None:
-            raise ValueError("MRASleepNet.classifier() requires classes to be set.")
-        return self.fc(x)
+            raise ValueError("MRASleepNet classification requires classes to be set.")
+        return self.fc(x).view(x.shape[0], self.sequence_len, len(self.classes))

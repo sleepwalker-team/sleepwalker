@@ -21,19 +21,20 @@ def test_eegfilternorm_filter_basic(fs, n_samples):
     t = np.arange(n_samples) / fs
     signal = np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(n_samples)
     norm = EEGFilterNormalizer(fs=fs)
-    filtered = norm._filter(signal)
+    filtered = norm.filter(signal)
     assert filtered.shape == signal.shape
     assert not np.isnan(filtered).any()
 
 
 @pytest.mark.parametrize("fs,n_samples", [(100, 2000), (200, 4000)])
-def test_eegfilternorm_fit_and_transform(fs, n_samples):
-    """Ensure fit() and transform() normalize data correctly."""
+def test_eegfilternorm_fixed_distribution_and_transform(fs, n_samples):
+    """Ensure fixed mean/std values normalize filtered data correctly."""
     t = np.arange(n_samples) / fs
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(n_samples)).reshape(-1, 1)
 
-    norm = EEGFilterNormalizer(fs=fs)
-    norm.fit(signal)
+    filter_only = EEGFilterNormalizer(fs=fs, normalize=False)
+    filtered = filter_only.transform(signal)
+    norm = EEGFilterNormalizer(fs=fs, mean=float(filtered.mean()), std=float(filtered.std()))
     transformed = norm.transform(signal)
 
     assert transformed.shape == signal.shape
@@ -41,14 +42,15 @@ def test_eegfilternorm_fit_and_transform(fs, n_samples):
     assert np.isclose(np.std(transformed), 1, atol=1e-1)
 
 
-@pytest.mark.parametrize("fs", [100, 200])
-def test_eegfilternorm_invalid_shape_fit(fs):
-    """fit() should raise for invalid input shape."""
+def test_eegfilternorm_can_filter_without_patient_normalization():
+    fs = 100
     t = np.arange(2000) / fs
-    signal = np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(len(t))
-    norm = EEGFilterNormalizer(fs=fs)
-    with pytest.raises(ValueError):
-        norm.fit(signal)  # wrong shape (N,)
+    signal = (3.0 + np.sin(2 * np.pi * 10 * t)).reshape(-1, 1)
+    norm = EEGFilterNormalizer(fs=fs, normalize=False)
+
+    transformed = norm.transform(signal)
+
+    assert np.allclose(transformed[:, 0], norm.filter(signal[:, 0]))
 
 
 @pytest.mark.parametrize("fs", [100, 200])
@@ -57,20 +59,13 @@ def test_eegfilternorm_invalid_shape_transform(fs):
     t = np.arange(2000) / fs
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(len(t))).reshape(-1, 1)
     norm = EEGFilterNormalizer(fs=fs)
-    norm.fit(signal)
     with pytest.raises(ValueError):
         norm.transform(signal.squeeze())
 
 
-@pytest.mark.parametrize("fs", [100, 250])
-def test_eegfilternorm_zero_variance(fs):
-    """Ensure std fallback to 1.0 for zero variance."""
-    signal = np.ones((1000, 1))
-    norm = EEGFilterNormalizer(fs=fs)
-    norm.fit(signal)
-    assert np.isclose(norm.std_, 1.0)
-    transformed = norm.transform(signal)
-    assert np.allclose(transformed, 0.0)
+def test_eegfilternorm_rejects_nonpositive_std():
+    with pytest.raises(ValueError, match="std must be finite and positive"):
+        EEGFilterNormalizer(fs=100, std=0)
 
 @pytest.mark.parametrize("lowcut,highcut,fs", [(0.1, 30, 100), (1.0, 40, 200)])
 def test_eegfilternorm_different_bandpass(lowcut, highcut, fs):
@@ -78,7 +73,6 @@ def test_eegfilternorm_different_bandpass(lowcut, highcut, fs):
     t = np.arange(2000) / fs
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(len(t))).reshape(-1, 1)
     norm = EEGFilterNormalizer(fs=fs, lowcut=lowcut, highcut=highcut)
-    norm.fit(signal)
     transformed = norm.transform(signal)
     assert np.isfinite(transformed).all()
 
@@ -91,7 +85,6 @@ def test_eegfilternorm_cuda_vs_cpu_consistency(device, fs):
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(n_samples)).reshape(-1, 1)
 
     norm_cpu = EEGFilterNormalizer(fs=fs)
-    norm_cpu.fit(signal)
     out_cpu = norm_cpu.transform(signal)
 
     if device == "cuda" and not torch.cuda.is_available():
@@ -100,7 +93,6 @@ def test_eegfilternorm_cuda_vs_cpu_consistency(device, fs):
     x_torch = torch.tensor(signal, dtype=torch.float32, device=device)
     x_np = x_torch.cpu().numpy()
     norm_gpu = EEGFilterNormalizer(fs=fs)
-    norm_gpu.fit(x_np)
     out_gpu = norm_gpu.transform(x_np)
 
     assert np.isclose(out_cpu.mean(), out_gpu.mean(), atol=1e-3)

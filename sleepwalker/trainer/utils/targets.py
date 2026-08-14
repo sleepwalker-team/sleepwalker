@@ -45,7 +45,7 @@ def resolve_multiclass_index(target, default_idx, min_event_seconds, raise_error
         return None
     return None
 
-def _passes_filters(target, filters) -> bool:
+def passes_filters(target, filters) -> bool:
     """Return whether a target window satisfies all configured filters.
 
     `filters` is a list of dicts with:
@@ -87,7 +87,7 @@ def _passes_filters(target, filters) -> bool:
     return True
 
 
-def _build_multiclass_onehot(target, target_classes: Sequence[str], percentage: float):
+def build_multiclass_onehot(target, target_classes: Sequence[str], percentage: float):
     """Convert a label window into a one-hot vector in `target_classes` order.
 
     A class is active when it covers at least `percentage` of the window.
@@ -127,6 +127,74 @@ def _build_multiclass_onehot(target, target_classes: Sequence[str], percentage: 
     onehot[target_classes.index(target_label)] = 1.0
     return onehot
 
+
+def build_soft_multiclass_target(target, target_classes: Sequence[str]):
+    """Return class probabilities from the temporal coverage in one step."""
+    target_classes = list(target_classes)
+    if len(target_classes) == 0:
+        raise ValueError("target_classes must not be empty.")
+
+    present_classes = [label for label in target_classes if label in target.columns]
+    fallback_classes = [label for label in target_classes if label not in target.columns]
+    activity = target.reindex(columns=present_classes, fill_value=0).gt(0)
+    if activity.sum(axis=1).gt(1).any():
+        return None
+
+    probabilities = torch.zeros(len(target_classes), dtype=torch.float32)
+    for label in present_classes:
+        probabilities[target_classes.index(label)] = float(activity[label].mean())
+
+    uncovered = float((~activity.any(axis=1)).mean())
+    if len(fallback_classes) == 1:
+        probabilities[target_classes.index(fallback_classes[0])] = uncovered
+    elif len(fallback_classes) > 1 or uncovered > 0:
+        return None
+
+    if not torch.isclose(probabilities.sum(), torch.tensor(1.0), atol=1e-5):
+        return None
+    return probabilities
+
+
+def build_multiclass_sequence(target, target_classes: Sequence[str], percentage: float, sequence_len: int, soft_boundaries: bool = False):
+    """Split one target window into contiguous categorical sequence steps."""
+    if sequence_len < 1:
+        raise ValueError("sequence_len must be at least 1.")
+    if len(target) % sequence_len != 0:
+        raise ValueError(f"Target length {len(target)} is not divisible by sequence_len={sequence_len}.")
+
+    step_len = len(target) // sequence_len
+    steps = []
+    for step_idx in range(sequence_len):
+        step = target.iloc[step_idx * step_len:(step_idx + 1) * step_len]
+        step_target = build_soft_multiclass_target(step, target_classes) if soft_boundaries else build_multiclass_onehot(step, target_classes=target_classes, percentage=percentage)
+        if step_target is None:
+            return None
+        steps.append(step_target)
+    return torch.stack(steps)
+
+
+def build_sequence_mask(target, sequence_len: int, step_mask: dict) -> torch.Tensor:
+    """Mark sequence steps whose configured labels cover enough of the step."""
+    unknown = set(step_mask) - {"columns", "percentage"}
+    if unknown:
+        raise ValueError(f"Unknown step_mask fields: {sorted(unknown)}.")
+    columns = list(step_mask.get("columns", []))
+    if len(columns) == 0:
+        raise ValueError("step_mask.columns must not be empty.")
+    percentage = float(step_mask.get("percentage", 0.5))
+    if not 0.0 <= percentage <= 1.0:
+        raise ValueError("step_mask.percentage must be between 0 and 1.")
+    if len(target) % sequence_len != 0:
+        raise ValueError(f"Target length {len(target)} is not divisible by sequence_len={sequence_len}.")
+
+    step_len = len(target) // sequence_len
+    mask = []
+    for step_idx in range(sequence_len):
+        step = target.iloc[step_idx * step_len:(step_idx + 1) * step_len]
+        coverage = float(step.reindex(columns=columns, fill_value=0).any(axis=1).mean())
+        mask.append(coverage >= percentage)
+    return torch.tensor(mask, dtype=torch.bool)
+
 def prepare_multiclass_target(
     target,
     target_extra=None,
@@ -136,8 +204,11 @@ def prepare_multiclass_target(
     target_classes: Sequence[str],
     percentage: float = 0.5,
     filters=None,
+    sequence_len: int = 1,
+    soft_boundaries: bool = False,
+    step_mask: dict | None = None,
 ):
-    """Build one-hot multiclass targets from a label-activity window.
+    """Build multiclass sequence targets from a label-activity window.
 
     Args:
         target: Primary label window as a time-indexed DataFrame with one
@@ -147,11 +218,16 @@ def prepare_multiclass_target(
             primary target.
         patient: Unused callback argument kept for dataset API compatibility.
         time: Unused callback argument kept for dataset API compatibility.
-        target_classes: Output class order for the returned one-hot vectors.
+        target_classes: Output class order for the returned target vectors.
         percentage: Minimum fraction of the window a class must cover to be
             considered active.
         filters: Optional filter specifications applied before target
             construction.
+        sequence_len: Number of contiguous categorical targets to construct.
+        soft_boundaries: Return probabilities equal to the temporal class
+            coverage in each step instead of thresholded one-hot labels.
+        step_mask: Optional ``columns`` and ``percentage`` specification used
+            to mark which sequence steps contribute to loss and metrics.
 
     Returns:
         A dictionary containing ``target`` and optionally ``target_extra``, or
@@ -165,30 +241,31 @@ def prepare_multiclass_target(
     """
     if target is None:
         return None
-    if not _passes_filters(target, filters):
+    if not passes_filters(target, filters):
         return None
 
-    try:
-        target_onehot = _build_multiclass_onehot(target, target_classes=target_classes, percentage=percentage)
-    except ValueError:
+    target_values = build_multiclass_sequence(target, target_classes=target_classes, percentage=percentage, sequence_len=sequence_len, soft_boundaries=soft_boundaries)
+
+    if target_values is None:
         return None
 
-    if target_onehot is None:
-        return None
-
-    item = {"target": target_onehot}
+    item = {"target": target_values}
+    if step_mask is not None:
+        target_mask = build_sequence_mask(target, sequence_len=sequence_len, step_mask=step_mask)
+        if not target_mask.any():
+            return None
+        item["target_mask"] = target_mask
     if target_extra is None:
         return item
 
-    try:
-        target_extra_onehot = _build_multiclass_onehot(
-            target_extra,
-            target_classes=target_classes,
-            percentage=percentage,
-        )
-    except ValueError:
-        target_extra_onehot = None
+    target_extra_values = build_multiclass_sequence(
+        target_extra,
+        target_classes=target_classes,
+        percentage=percentage,
+        sequence_len=sequence_len,
+        soft_boundaries=soft_boundaries,
+    )
 
-    if target_extra_onehot is not None:
-        item["target_extra"] = target_extra_onehot
+    if target_extra_values is not None:
+        item["target_extra"] = target_extra_values
     return item

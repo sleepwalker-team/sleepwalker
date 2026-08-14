@@ -3,13 +3,13 @@ import torch.nn as nn
 
 from einops import rearrange
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.models.preprocessors.WindowedSpectrogram import WindowedSpectrogram
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.utils import SinusoidalPositionalEncoding
 
 
-class CLSMaskedAutoencoder(BaseModel):
+class CLSMaskedAutoencoder(BaseModel, EmbeddingModel):
     """
     CLS-Bottleneck Masked Autoencoder (CLS-BMAE).
 
@@ -123,10 +123,7 @@ class CLSMaskedAutoencoder(BaseModel):
     def feature_dim(self):
         return self.window_size // 2 + 1
 
-    def _classifier(self, x):
-        return super()._classifier(x)
-
-    def _features(self, x):
+    def encode(self, x):
         """Full unmasked encoder pass. Returns (B, N+1, enc_dim, D) — same shape as MaskedAutoencoder.embed()."""
         B, _, N, D = x.shape
         x = rearrange(x, 'B F N D -> (B D) N F')
@@ -142,15 +139,7 @@ class CLSMaskedAutoencoder(BaseModel):
         z = rearrange(z, '(B D) N F -> B N F D', D=D, B=B)
         return z
 
-    def embed(self, x):
-        x = self.apply_preprocessors(x, len(self.preprocessors) + 1)
-        return self._features(x)
-
-    def forward(self, x):
-        x = self.apply_preprocessors(x, len(self.preprocessors) + 1)
-        return self._forward(x)
-
-    def _forward(self, x):
+    def compute(self, x):
         B, _, N, D = x.shape
         x_enc = rearrange(x, 'B F N D -> (B D) N F')
         x_enc = self.input_projection(x_enc)

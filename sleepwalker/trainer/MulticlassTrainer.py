@@ -1,9 +1,9 @@
 """Concrete trainer for single-head multiclass tasks.
 
 This trainer is used by several task-specific scripts in the repository,
-including sleep staging and event-detection variants that reduce each window to
-one categorical target. Tests cover class balancing behavior, repeated-window
-evaluation, and prediction-frame generation.
+including sleep staging and event-detection variants that emit one or more
+categorical targets per window. Tests cover class balancing behavior,
+repeated-window evaluation, and prediction-frame generation.
 """
 
 from functools import partial
@@ -19,7 +19,6 @@ import torch
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.losses import class_weights_for_loss
 from sleepwalker.utils import logger
-from sleepwalker.datasets.utils import RepeatSampler
 from sleepwalker.datasets.utils import estimate_class_cnts
 from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
 from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
@@ -39,9 +38,9 @@ class MulticlassTrainer(BaseTrainer):
         save_every: Checkpoint cadence in epochs.
         lr_scheduler: Optional scheduler factory.
         early_stopping: Optional validation patience in epochs.
+        return_best: Whether to return the lowest-loss validation checkpoint
+            instead of leaving the model at its last training epoch.
         train_transform: Optional list of per-sample transforms.
-        n_repeat_train: Number of repeated views per training sample.
-        n_repeat_test: Number of repeated views per evaluation sample.
         loss_mode: Loss reweighting mode understood by
             ``class_weights_for_loss``.
         class_weights: Optional manual per-class weights.
@@ -51,6 +50,7 @@ class MulticlassTrainer(BaseTrainer):
             probability during batch balancing. ``1.0`` reproduces the
             previous behavior, values above ``1.0`` make balancing more
             aggressive, and values between ``0`` and ``1`` make it weaker.
+        sequence_len: Number of categorical predictions emitted per window.
     """
 
     def __init__(
@@ -64,13 +64,13 @@ class MulticlassTrainer(BaseTrainer):
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
+        return_best: bool = True,
         train_transform: Optional[list[Callable]] = None,
-        n_repeat_train: int = 1,
-        n_repeat_test: int = 1,
         loss_mode: str = "regular",
         class_weights: Optional[dict[str, float]] = None,
         balance_batches: bool = False,
         balance_gamma: float = 1.0,
+        sequence_len: int = 1,
     ):
         super().__init__(
             epochs=epochs,
@@ -80,9 +80,8 @@ class MulticlassTrainer(BaseTrainer):
             save_every=save_every,
             lr_scheduler=lr_scheduler,
             early_stopping=early_stopping,
+            return_best=return_best,
             train_transform=train_transform,
-            n_repeat_train=n_repeat_train,
-            n_repeat_test=n_repeat_test,
         )
 
         self.classes = classes
@@ -93,24 +92,37 @@ class MulticlassTrainer(BaseTrainer):
         self.class_weights = dict(class_weights or {})
         self.balance_batches = balance_batches
         self.balance_gamma = float(balance_gamma)
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
+        self.target_resolution = None
+
+    def classification_contract(self) -> dict:
+        return {
+            "type": "single-head-multiclass",
+            "classes": list(self.classes),
+            "sequence_len": self.sequence_len,
+        }
 
     def _keep_balanced_target(self, target, class_cnts: list[float]) -> bool:
         target_arr = target.detach().cpu().numpy() if isinstance(target, torch.Tensor) else np.asarray(target)
         if target_arr.ndim == 0:
-            target_idx = int(target_arr.item())
+            target_indices = [int(target_arr.item())]
         elif target_arr.ndim == 1:
-            target_idx = int(np.argmax(target_arr))
+            target_indices = [int(np.argmax(target_arr))]
+        elif target_arr.ndim == 2:
+            target_indices = np.argmax(target_arr, axis=-1).tolist()
         else:
-            raise ValueError(f"Expected multiclass target with ndim <= 1, got shape {target_arr.shape}.")
+            raise ValueError(f"Expected multiclass target with ndim <= 2, got shape {target_arr.shape}.")
 
         probas = np.asarray(class_cnts, dtype=float)
         if probas.ndim != 1 or len(probas) == 0:
             raise ValueError("class_cnts must be a non-empty 1D sequence.")
-        if target_idx < 0 or target_idx >= len(probas):
-            raise ValueError(f"Target index {target_idx} out of range for {len(probas)} classes.")
+        if any(target_idx < 0 or target_idx >= len(probas) for target_idx in target_indices):
+            raise ValueError(f"Target indices {target_indices} out of range for {len(probas)} classes.")
 
         probas = probas / probas.sum()
-        raw_keep_prob = float(np.clip(probas.min() / probas[target_idx], 0.0, 1.0))
+        raw_keep_prob = min(float(np.clip(probas.min() / probas[target_idx], 0.0, 1.0)) for target_idx in target_indices)
         keep_prob = float(np.clip(raw_keep_prob ** self.balance_gamma, 0.0, 1.0))
         return random.random() <= keep_prob
 
@@ -138,6 +150,7 @@ class MulticlassTrainer(BaseTrainer):
             balancing paths.
         """
         dataset = data_loader.dataset
+        self.target_resolution = pd.to_timedelta(dataset.target_resolution)
 
         class_cnts = None
         if self.balance_batches or self.loss_mode != "regular":
@@ -185,20 +198,6 @@ class MulticlassTrainer(BaseTrainer):
         else:
             self.loss_function = self.base_loss_function
 
-    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
-        """Convert model logits into the standard multiclass prediction table."""
-        probabilities = torch.softmax(outputs.detach().cpu(), dim=1)
-        pred_idx = probabilities.argmax(dim=1)
-        frame = {
-            "patient": list(batch.get("patient", [None] * probabilities.shape[0])),
-            "time": list(batch.get("time", [None] * probabilities.shape[0])),
-            "prediction_idx": pred_idx.tolist(),
-            "prediction": [self.classes[idx] for idx in pred_idx.tolist()],
-        }
-        for class_idx, label in enumerate(self.classes):
-            frame[f"prob__{label}"] = probabilities[:, class_idx].tolist()
-        return pd.DataFrame(frame)
-
     def _log_from_cm(self, cm: np.ndarray, loss_value: float, mode: str, scope: str = "batch", step:int = 0, show_cm:bool = False):
         """Centralized metric logging from confusion matrix."""  
         total = cm.sum()  
@@ -224,7 +223,7 @@ class MulticlassTrainer(BaseTrainer):
             plt.close(fig)
             logger.info(render_confusion_table_grid([format_confusion_table(self.classes, cm)], header=f"{mode.upper()} confusion matrix", n_cols=1))
 
-    def run_epoch(self, loader, opt, model, prefix=""):
+    def run_epoch(self, loader, opt, model, prefix="", lr_scheduler=None):
         """Run one train, validation, or test epoch.
 
         Args:
@@ -237,6 +236,12 @@ class MulticlassTrainer(BaseTrainer):
         Returns:
             A tuple ``(epoch_loss, confusion_matrix)``.
         """
+        self.target_resolution = pd.to_timedelta(loader.dataset.target_resolution)
+        target_step_resolution = self.target_resolution / self.sequence_len
+        if hasattr(model, "epoch_len_s") and model.epoch_len_s is not None:
+            model_step_resolution = pd.to_timedelta(model.epoch_len_s, unit="s")
+            if model_step_resolution != target_step_resolution:
+                raise ValueError(f"Model epoch_len={model_step_resolution} does not match target_resolution / sequence_len={target_step_resolution}.")
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         nc = self.num_classes
         
@@ -245,38 +250,36 @@ class MulticlassTrainer(BaseTrainer):
         cnt = 0
 
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
-        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
-
         for batch in loader:
-            x = batch["data"].to(self.device)
-            y = batch["target"].to(self.device)
-
             if opt is not None:
-                x = self.apply_train_transform(x)
                 opt.zero_grad(set_to_none=True)
 
-            if n_repeat > 1:
-                if x.shape[0] % n_repeat != 0:
-                    raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
-                base_batch = x.shape[0] // n_repeat
-                x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
-                y = y.view(base_batch, n_repeat, *y.shape[1:])[:, 0]
+            x = batch["data"].to(self.device, non_blocking=True)
+            if opt is not None:
+                x = self.apply_train_transform(x)
+            logits = model(x)
+            y = batch["target"].to(self.device)
 
-                logits_sum = None 
-                for repeat_idx in range(n_repeat):
-                    current_logits = model(x_grouped[:, repeat_idx].contiguous())
-                    logits_sum = current_logits if logits_sum is None else logits_sum + current_logits
-                logits = logits_sum / n_repeat
+            expected_shape = (y.shape[0], self.sequence_len, self.num_classes)
+            if tuple(logits.shape) != expected_shape:
+                raise ValueError(f"Expected model logits shaped {expected_shape} ([B, S, C]), got {tuple(logits.shape)}.")
+            if tuple(y.shape) != expected_shape:
+                raise ValueError(f"Expected targets shaped {expected_shape} ([B, S, C]), got {tuple(y.shape)}. Configure the dataset prepare_target callback with the same sequence_len as the trainer.")
+            target_mask = batch.get("target_mask")
+            if target_mask is None:
+                loss = self.loss_function(logits.transpose(1, 2), y.transpose(1, 2))
+                target_mask = torch.ones(y.shape[:2], dtype=torch.bool, device=self.device)
             else:
-                logits = model(x)
+                target_mask = target_mask.to(self.device, dtype=torch.bool)
+                if tuple(target_mask.shape) != tuple(y.shape[:2]):
+                    raise ValueError(f"Expected target_mask shaped {tuple(y.shape[:2])} ([B, S]), got {tuple(target_mask.shape)}.")
+                step_loss = self.loss_function(logits.transpose(1, 2), y.transpose(1, 2), reduction="none")
+                if tuple(step_loss.shape) != tuple(target_mask.shape):
+                    raise ValueError(f"Masked multiclass loss must return [B, S], got {tuple(step_loss.shape)}.")
+                loss = step_loss[target_mask].mean()
 
-            if logits.shape[1] == 1: # TODO add this to forward deployment!
-                loss = self.loss_function(logits, y.argmax(axis=1, keepdim=True).float())
-                pred_np = (logits >= 0.5).ravel().long().cpu().numpy()
-            else:
-                loss = self.loss_function(logits, y)
-                pred_np = logits.argmax(axis=1).cpu().numpy()
-            target_np = y.argmax(axis=1).cpu().numpy()
+            pred_np = logits.argmax(dim=-1)[target_mask].cpu().numpy()
+            target_np = y.argmax(dim=-1)[target_mask].cpu().numpy()
             
             if opt is not None:
                 loss.backward()
@@ -301,6 +304,8 @@ class MulticlassTrainer(BaseTrainer):
             self.steps[mode] += 1
             logger.progress_status(desc)
             logger.progress_advance(loader.batch_size)
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 

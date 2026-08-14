@@ -14,6 +14,9 @@ class SignalFilterNormalizer(Normalizer):
         band_order=4,
         notch_q=30,
         clip_range=None,
+        normalize=True,
+        mean=0.0,
+        std=1.0,
     ):
         self.fs = fs
         self.lowcut = lowcut
@@ -22,6 +25,13 @@ class SignalFilterNormalizer(Normalizer):
         self.band_order = band_order
         self.notch_q = notch_q
         self.clip_range = clip_range
+        self.normalize = bool(normalize)
+        self.mean = float(mean)
+        self.std = float(std)
+        if not np.isfinite(self.mean):
+            raise ValueError("mean must be finite.")
+        if not np.isfinite(self.std) or self.std <= 0:
+            raise ValueError("std must be finite and positive.")
         self.nyq = 0.5 * fs
 
         self.sos_band = None
@@ -40,7 +50,7 @@ class SignalFilterNormalizer(Normalizer):
         if self.notch_freq:
             self.b_notch, self.a_notch = iirnotch(self.notch_freq / self.nyq, self.notch_q)
 
-    def _filter(self, signal):
+    def filter(self, signal):
         filtered = np.asarray(signal, dtype=float)
 
         if self.clip_range is not None:
@@ -54,22 +64,12 @@ class SignalFilterNormalizer(Normalizer):
 
         return filtered
 
-    def fit(self, X):
-        X = np.asarray(X)
-        if X.ndim != 2 or X.shape[1] != 1:
-            raise ValueError(f"Expected shape (N, 1), got {X.shape}")
-
-        filtered = self._filter(X[:, 0])
-        self.mean_ = np.mean(filtered)
-        std = np.std(filtered)
-        self.std_ = std if std > 1e-7 else 1.0
-        return self
-
     def transform(self, X):
         X = np.asarray(X)
         if X.ndim != 2 or X.shape[1] != 1:
             raise ValueError(f"Expected shape (N, 1), got {X.shape}")
 
-        filtered = self._filter(X[:, 0])
-        normalized = (filtered - self.mean_) / self.std_
-        return normalized.reshape(-1, 1)
+        filtered = self.filter(X[:, 0])
+        if self.normalize:
+            filtered = (filtered - self.mean) / self.std
+        return filtered.reshape(-1, 1)

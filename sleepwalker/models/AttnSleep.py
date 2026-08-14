@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 
 
 class SELayer(nn.Module):
@@ -168,7 +168,7 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(F.relu(self.w_1(x))))
 
 
-class AttnSleep(BaseModel):
+class AttnSleep(BaseModel, EmbeddingModel, ClassifierModel):
     """
     Paper: An Attention-Based Deep Learning Approach for Sleep Stage Classification With Single-Channel EEG by Eldele et al. in IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING 2021
     Code: https://github.com/emadeldeen24/AttnSleep
@@ -196,6 +196,7 @@ class AttnSleep(BaseModel):
         dropout: float = 0.1,
         afr_reduced_cnn_size: int = 30,
         preprocessors=None,
+        sequence_len: int = 1,
     ) -> None:
         """Construct the AttnSleep architecture.
 
@@ -216,6 +217,9 @@ class AttnSleep(BaseModel):
         self.mrcnn = MRCNN(n_channels, afr_reduced_cnn_size)
         self.h = h
         self.classes = list(classes) if classes is not None else None
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
         
         with torch.no_grad():
             x = torch.zeros(1, n_channels, ts_len)
@@ -234,9 +238,9 @@ class AttnSleep(BaseModel):
             x_encoded = self.tce(x_feat)
             flatten_len = x_encoded.flatten(1).shape[1]
         self._feature_dim = flatten_len
-        self.fc = nn.Linear(flatten_len, len(self.classes)) if self.classes is not None else None
+        self.fc = nn.Linear(flatten_len, self.sequence_len * len(self.classes)) if self.classes is not None else None
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Compute AttnSleep features from one input batch."""
         x = x.transpose(1, 2)
         x_feat = self.mrcnn(x)
@@ -257,8 +261,9 @@ class AttnSleep(BaseModel):
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Map features to class logits."""
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode preprocessed inputs and map them to class logits."""
+        x = self.encode(x)
         if self.fc is None or self.classes is None:
-            raise ValueError("AttnSleep.classifier() requires classes to be set.")
-        return self.fc(x)
+            raise ValueError("AttnSleep classification requires classes to be set.")
+        return self.fc(x).view(x.shape[0], self.sequence_len, len(self.classes))

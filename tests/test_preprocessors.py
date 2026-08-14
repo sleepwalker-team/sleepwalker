@@ -8,10 +8,32 @@ from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.models.preprocessors.Crop import Crop
 from sleepwalker.models.preprocessors.EmpiricalClipScaler import EmpiricalClipScaler
+from sleepwalker.models.preprocessors.FixedChannelStandardizer import FixedChannelStandardizer
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.NormalizeAlongDim import NormalizeAlongDim
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
 from sleepwalker.models.preprocessors.Spectrogram import Spectrogram
+
+
+def test_fixed_channel_standardizer_uses_last_dimension():
+    standardizer = FixedChannelStandardizer(means=[1.0, 10.0], standard_deviations=[2.0, 5.0])
+    data = torch.tensor([[[1.0, 15.0], [5.0, 5.0]]])
+
+    transformed = standardizer(data)
+
+    assert torch.equal(transformed, torch.tensor([[[0.0, 1.0], [2.0, -1.0]]]))
+    assert standardizer.requires_warmup() is False
+
+
+def test_fixed_channel_standardizer_rejects_invalid_statistics_and_shape():
+    with pytest.raises(ValueError, match="identical shapes"):
+        FixedChannelStandardizer(means=[0.0], standard_deviations=[1.0, 2.0])
+    with pytest.raises(ValueError, match="finite and positive"):
+        FixedChannelStandardizer(means=[0.0], standard_deviations=[0.0])
+
+    standardizer = FixedChannelStandardizer(means=[0.0, 0.0], standard_deviations=[1.0, 1.0])
+    with pytest.raises(ValueError, match="Expected 2 channels"):
+        standardizer(torch.zeros(1, 10, 1))
 
 from sleepwalker.utils import logger 
 
@@ -149,6 +171,25 @@ def test_spectrogram_with_epoch_len():
     B, F, T_, D = out.shape
     assert B == 8
     assert D == 1
+    assert torch.isfinite(out).all()
+
+
+def test_spectrogram_preserves_exact_epoch_frames():
+    spec = Spectrogram(
+        n_fft=256,
+        hop_length=100,
+        win_length=200,
+        epoch_len_samples=3000,
+        center=False,
+        drop_dc=True,
+        preserve_epochs=True,
+        log_scale="db",
+    )
+    data = torch.randn(2, 6000, 1)
+
+    out = spec(data)
+
+    assert out.shape == (2, 2, 128, 29, 1)
     assert torch.isfinite(out).all()
 
 

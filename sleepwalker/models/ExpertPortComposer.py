@@ -38,7 +38,7 @@ class PortInterfaceEdge:
             raise ValueError("Port interface bottleneck_dim must be positive.")
 
 
-class _MessageEncoder(nn.Module):
+class PortMessageEncoder(nn.Module):
     def __init__(self, source_dim: int, message_dim: int, gated: bool):
         super().__init__()
         self.norm = nn.LayerNorm(source_dim)
@@ -112,7 +112,7 @@ class ExpertPortComposer(nn.Module):
             key = self.edge_key(edge.source, edge.target)
             if key in self.message_encoders:
                 raise ValueError(f"Duplicate interface edge {edge.source}->{edge.target}.")
-            self.message_encoders[key] = _MessageEncoder(
+            self.message_encoders[key] = PortMessageEncoder(
                 self.specs[edge.source].feature_dim,
                 edge.bottleneck_dim,
                 edge.gated,
@@ -164,7 +164,7 @@ class ExpertPortComposer(nn.Module):
             return torch.stack(penalties).sum()
         return next(self.parameters()).new_zeros(())
 
-    def _validate_ports(
+    def validate_ports(
         self,
         features: Mapping[str, torch.Tensor],
         probabilities: Mapping[str, torch.Tensor],
@@ -207,7 +207,7 @@ class ExpertPortComposer(nn.Module):
         probabilities: Mapping[str, torch.Tensor],
         available: Mapping[str, torch.Tensor],
     ) -> torch.Tensor:
-        self._validate_ports(features, probabilities, available)
+        self.validate_ports(features, probabilities, available)
         receiver_state = features[self.receiver]
         if self.receiver_adapter is not None:
             receiver_state = receiver_state + self.receiver_adapter(receiver_state)

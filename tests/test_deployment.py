@@ -7,70 +7,54 @@ import torch
 
 from sleepwalker.datasets.Basedataset import ChannelConfig, unit_conversion_factor
 from sleepwalker.datasets.HSP import HSP, get_channels as get_hsp_channels
+from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.datasets.normalizer import EEGFilterNormalizer
-from sleepwalker.deployment import Expert, save_expert_package
-from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
+from sleepwalker.deployment import PackagedModel, save_packaged_model
+from sleepwalker.deployment.predictions import format_prediction_batch
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
 
 
 DATA = Path(__file__).parent / "data"
+SINGLE_CONTRACT = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 1}
 
 
-class MeanClassifier(torch.nn.Module):
-    def __init__(self):
+class MeanClassifier(BaseModel, ClassifierModel):
+    def __init__(self, n_classes: int = 2):
         super().__init__()
-        self.linear = torch.nn.Linear(1, 2)
+        self.linear = torch.nn.Linear(1, n_classes)
 
-    def forward(self, x):
-        return self.linear(x.mean(dim=1))
+    def compute(self, x):
+        return self.linear(x.mean(dim=1)).unsqueeze(1)
+
+    def input_spec(self):
+        return (1, 600, 1), {"layout": "BTC", "ts_len": 600, "n_channels": 1}
 
 
-def make_dataset(
-    *,
-    unit: str | None = "uV",
-    assume_units_if_missing: bool = False,
-    prepare_patient=None,
-    normalizer=None,
-):
+def make_dataset(*, unit: str | None = "uV", assume_units_if_missing: bool = False, normalizer=None, z_normalize: bool = False):
     return UnlabelledDataset(
         channels=[ChannelConfig("EEG", ["EEG"], unit=unit, normalizer=normalizer)],
         sample_frequency=10,
         total_input="60s",
         target_resolution="60s",
         stride="60s",
-        prepare_patient=prepare_patient,
+        z_normalize=z_normalize,
         assume_units_if_missing=assume_units_if_missing,
     )
 
 
-def make_expert(dataset=None):
-    trainer = MulticlassTrainer(
-        epochs=1,
-        optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3),
-        classes=["negative", "positive"],
-        loss_function=torch.nn.functional.cross_entropy,
-        device="cpu",
-        warmup_device="cpu",
-    )
-    return Expert(
+def make_package(dataset=None):
+    return PackagedModel(
         name="tiny",
         task="unit-test",
         model=MeanClassifier(),
         dataset=make_dataset() if dataset is None else dataset,
-        trainer=trainer,
+        classification_contract=SINGLE_CONTRACT,
         config={"seed": 7, "comment": "Synthetic round-trip test."},
     )
 
 
-@pytest.mark.parametrize(
-    ("source", "target", "factor"),
-    [
-        ("V", "uV", 1_000_000.0),
-        ("mV", "uV", 1_000.0),
-        ("µV", "uV", 1.0),
-        ("%", "percent", 1.0),
-    ],
-)
+@pytest.mark.parametrize(("source", "target", "factor"), [("V", "uV", 1_000_000.0), ("mV", "uV", 1_000.0), ("µV", "uV", 1.0), ("%", "percent", 1.0)])
 def test_unit_conversion_factor(source, target, factor):
     assert unit_conversion_factor(source, target, assume_if_missing=False) == pytest.approx(factor)
 
@@ -83,25 +67,21 @@ def test_unit_conversion_rejects_missing_and_incompatible_units():
         unit_conversion_factor("%", "uV", assume_if_missing=False)
 
 
-def test_hsp_header_correction_survives_unlabelled_clone():
-    channels = get_hsp_channels(
-        ["spo2"],
-        grouped=True,
-        normalize=False,
-        sample_frequency=100,
-    )
-    dataset = HSP(
-        channels=channels,
-        sample_frequency=100,
-        event_mapping={"desaturation": "desaturation"},
-    )
+def test_online_retry_configuration_only_exposes_budget():
+    dataset = make_dataset()
 
-    assert channels == [
-        ChannelConfig("SpO2", ["SaO2", "SpO2", "SPO2"], normalizer=None, unit="%")
-    ]
-    assert {channel.unit for channel in channels} == {"%"}
+    assert dataset.online_max_tries == 128
+    assert "online_retry_scope" not in dataset.dataset_kwargs()
+
+
+def test_hsp_header_correction_survives_unlabelled_clone():
+    channels = get_hsp_channels(["spo2"], grouped=True, normalize=False, sample_frequency=100)
+    dataset = HSP(channels=channels, sample_frequency=100, event_mapping={"desaturation": "desaturation"}, z_normalize=True)
+
+    assert channels == [ChannelConfig("SpO2", ["SaO2", "SpO2", "SPO2"], normalizer=None, unit="%")]
     assert dataset.edf_unit_overrides["SaO2"] == "%"
     assert UnlabelledDataset.from_dataset(dataset).edf_unit_overrides["SaO2"] == "%"
+    assert UnlabelledDataset.from_dataset(dataset).z_normalize is True
 
 
 def test_missing_unit_bypass_is_available_during_dataset_initialization(monkeypatch):
@@ -116,104 +96,95 @@ def test_missing_unit_bypass_is_available_during_dataset_initialization(monkeypa
 
     monkeypatch.setattr(basedataset_module, "read_edf_meta", without_units)
     path = DATA / "signals_01.edf"
-
-    strict_dataset = make_dataset(assume_units_if_missing=False)
     with pytest.raises(ValueError, match="no unit metadata"):
-        strict_dataset.initialize([path], num_workers=0, strict=True)
-
+        make_dataset().initialize([path], num_workers=0, strict=True)
     assumed_dataset = make_dataset(assume_units_if_missing=True)
     assumed_dataset.initialize([path], num_workers=0, strict=True)
     assert assumed_dataset.get_n_patients() == 1
 
 
-def test_unlabelled_dataset_runs_prepare_patient():
-    calls = []
-
-    def prepare_patient(data_df, label_df, label_extra_df, patient=None):
-        calls.append((label_df, label_extra_df, patient))
-        return data_df, label_df, label_extra_df
-
-    dataset = make_dataset(prepare_patient=prepare_patient)
-    dataset.initialize([DATA / "signals_01.edf"], num_workers=0, strict=True)
-
-    assert len(calls) == 1
-    assert calls[0][0] is None
-    assert calls[0][1] is None
-
-
-def test_expert_roundtrip_preserves_objects_manifest_and_weights(tmp_path):
-    expert = make_expert()
+def test_package_roundtrip_preserves_contract_manifest_and_weights(tmp_path):
+    package = make_package()
     with torch.no_grad():
-        expert.model.linear.weight.copy_(torch.tensor([[1.0], [-0.5]]))
-        expert.model.linear.bias.copy_(torch.tensor([0.1, -0.2]))
+        package.model.linear.weight.copy_(torch.tensor([[1.0], [-0.5]]))
+        package.model.linear.bias.copy_(torch.tensor([0.1, -0.2]))
 
-    path = expert.save(tmp_path / "expert")
-    loaded = Expert.load(path)
+    path = package.save(tmp_path / "package")
+    loaded = PackagedModel.load(path)
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["format_version"] == "sleepwalker-expert-v5"
+    assert manifest["format_version"] == "sleepwalker-packaged-model-v1"
     assert manifest["input_channels"] == ["EEG"]
-    assert manifest["config"]["seed"] == 7
+    assert manifest["classification"] == SINGLE_CONTRACT
+    assert manifest["capabilities"] == ["classification"]
     assert isinstance(loaded.dataset, UnlabelledDataset)
-    assert torch.allclose(loaded.model.linear.weight, expert.model.linear.weight)
+    assert torch.allclose(loaded.model.linear.weight, package.model.linear.weight)
 
 
-def test_packaging_discards_label_pipeline_from_executable_expert(tmp_path):
-    labelled = HSP(
-        channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
-        sample_frequency=10,
-        total_input="60s",
-        target_resolution="60s",
-        event_mapping={"desaturation": "desaturation"},
-    )
-    source = make_expert(labelled)
-    packaged = save_expert_package(
-        tmp_path / "expert",
-        expert_name=source.name,
-        task=source.task,
-        model=source.model,
-        trainer=source.trainer,
-        dataset=labelled,
-        config=source.config,
-    )
+def test_packaging_discards_label_pipeline(tmp_path):
+    labelled = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
+    packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=labelled)
 
     assert isinstance(packaged.dataset, UnlabelledDataset)
     assert packaged.dataset.event_mapping is None
-    manifest = json.loads((tmp_path / "expert" / "manifest.json").read_text())
-    assert manifest["dataset_class"].endswith("UnlabelledDataset")
 
 
-def test_expert_rejects_incompatible_preprocessing():
-    expert = make_expert()
-    incompatible = make_dataset(unit="mV")
+def test_packaging_uses_first_component_of_multidataset(tmp_path):
+    first = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
+    second = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
+    first.initialized = True
+    second.initialized = True
 
+    packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=MultiDataset([first, second]))
+
+    assert isinstance(packaged.dataset, UnlabelledDataset)
+    assert packaged.dataset.get_input_channels() == first.get_input_channels()
+
+
+def test_package_rejects_incompatible_preprocessing():
     with pytest.raises(ValueError, match="Expected units"):
-        expert.assert_compatible(incompatible)
+        make_package().assert_compatible(make_dataset(unit="mV"))
 
 
-def test_expert_rejects_changed_normalizer_configuration():
-    expert = make_expert(make_dataset(normalizer=EEGFilterNormalizer(fs=100)))
-    incompatible = make_dataset(
-        normalizer=EEGFilterNormalizer(fs=100, lowcut=0.5)
-    )
-
+def test_package_rejects_changed_normalizer_configuration():
+    package = make_package(make_dataset(normalizer=EEGFilterNormalizer(fs=100)))
     with pytest.raises(ValueError, match="Normalizer configuration"):
-        expert.assert_compatible(incompatible)
+        package.assert_compatible(make_dataset(normalizer=EEGFilterNormalizer(fs=100, lowcut=0.5)))
 
 
-def test_loaded_expert_predicts_raw_edf(tmp_path):
-    loaded = Expert.load(make_expert().save(tmp_path / "expert"))
+def test_package_rejects_changed_recording_z_normalization():
+    with pytest.raises(ValueError, match="z_normalize"):
+        make_package(make_dataset(z_normalize=True)).assert_compatible(make_dataset())
 
-    predictions = loaded.predict_edf(
-        DATA / "signals_01.edf",
-        batch_size=64,
-    )
+
+def test_loaded_package_predicts_raw_edf(tmp_path):
+    loaded = PackagedModel.load(make_package().save(tmp_path / "package"))
+    predictions = loaded.predict_edf(DATA / "signals_01.edf", batch_size=64)
 
     assert not predictions.empty
-    assert {"time", "prediction", "prob__negative", "prob__positive"}.issubset(
-        predictions.columns
-    )
+    assert {"time", "prediction", "prob__negative", "prob__positive"}.issubset(predictions.columns)
     assert pd.to_datetime(predictions["time"]).is_monotonic_increasing
+
+
+def test_sequence_predictions_use_target_start_timestamps():
+    contract = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 2}
+    start = pd.Timestamp("2024-01-01T00:00:20")
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]), target_resolution="20s")
+    assert frame["time"].tolist() == [start, start + pd.Timedelta(seconds=10)]
+
+
+def test_multitask_predictions_include_centered_task_offset():
+    contract = {
+        "type": "multitask",
+        "tasks": {
+            "sleep": {"classes": ["wake", "n2"], "n_steps": 1, "target_resolution": "30s", "target_offset": "5s"},
+            "arousal": {"classes": ["no_arousal", "arousal"], "n_steps": 40, "target_resolution": "1s", "target_offset": "0s"},
+        },
+    }
+    start = pd.Timestamp("2024-01-01T00:00:20")
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, {"sleep": torch.zeros(1, 1, 2), "arousal": torch.zeros(1, 40, 2)}, target_resolution="40s")
+    assert frame.loc[0, "sleep__time"] == start + pd.Timedelta("5s")
+    assert frame.loc[0, "arousal__step_39__time"] == start + pd.Timedelta("39s")
 
 
 def test_prediction_missing_unit_override_does_not_hide_conflicts(monkeypatch, tmp_path):
@@ -227,10 +198,6 @@ def test_prediction_missing_unit_override_does_not_hide_conflicts(monkeypatch, t
         return meta
 
     monkeypatch.setattr(basedataset_module, "read_edf_meta", conflicting_units)
-    expert = Expert.load(make_expert().save(tmp_path / "expert"))
-
+    package = PackagedModel.load(make_package().save(tmp_path / "package"))
     with pytest.raises(ValueError, match="Incompatible"):
-        expert.predict_edf(
-            DATA / "signals_01.edf",
-            assume_units_if_missing=True,
-        )
+        package.predict_edf(DATA / "signals_01.edf", assume_units_if_missing=True)

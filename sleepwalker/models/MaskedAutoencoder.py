@@ -3,12 +3,11 @@ import torch.nn as nn
 
 from einops import rearrange
 
-from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.models.preprocessors.WindowedSpectrogram import WindowedSpectrogram
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.utils import SinusoidalPositionalEncoding
 
-class MaskedAutoencoder(BaseModel):
+class MaskedAutoencoder(nn.Module):
 
     def __init__(
         self,
@@ -30,7 +29,7 @@ class MaskedAutoencoder(BaseModel):
         groups=None,
         normalize=False,
     ):
-        super().__init__(preprocessors=None)
+        super().__init__()
 
         if not groups:
             groups = {'FEAT' : []}
@@ -107,11 +106,12 @@ class MaskedAutoencoder(BaseModel):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.dec_dim))
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
-    def apply_preprocessors(self, x, modality, up = 0):
-        if up < 0:
-            up = 0
-            
-        for p in self.preprocessors[modality][:up]:
+    def apply_preprocessors(self, x, modality, up=None):
+        steps = self.preprocessors[modality]
+        up = len(steps) if up is None else up
+        if up < 0 or up > len(steps):
+            raise ValueError(f"up must be between 0 and {len(steps)}, got {up}.")
+        for p in steps[:up]:
             x = p(x)
         return x
 
@@ -151,14 +151,10 @@ class MaskedAutoencoder(BaseModel):
         # TODO: Correct?
         return self.window_size//2 + 1
 
-    def _classifier(self, x):
-        return super()._classifier(x)
+    def embed(self, x, modality):
+        return self.encode(x, modality)
 
-    def embed(self, x):
-        #x = self.apply_preprocessors(x, len(self.preprocessors)+1)
-        return self._features(x)
-
-    def _features(self, x, modality):
+    def encode(self, x, modality):
         # Project into transformer space
         B, _, N, D = x.shape
         x = rearrange(x, 'B F N D -> (B D) N F')
@@ -170,11 +166,10 @@ class MaskedAutoencoder(BaseModel):
         z = rearrange(z, '(B D) N F -> B N F D', D=D, B=B)
         return z
 
-    def forward(self, x):
-        #x = self.apply_preprocessors(x, len(self.preprocessors)+1)
-        return self._forward(x)
+    def forward(self, x, modality):
+        return self.reconstruct(x, modality)
 
-    def _forward(self, x, modality):
+    def reconstruct(self, x, modality):
         # Project into transformer space
         B, _, N, D = x.shape
         x = rearrange(x, 'B F N D -> (B D) N F')

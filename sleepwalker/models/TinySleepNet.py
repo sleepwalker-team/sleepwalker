@@ -2,20 +2,16 @@
 
 The repository uses this module as one of several interchangeable sleep-stage
 classification backbones. It follows the broad CNN-plus-recurrent structure of
-TinySleepNet while exposing repository-specific options such as different output
-aggregation strategies and optional omission of the recurrent stage.
+TinySleepNet while optionally omitting the recurrent stage.
 """
 
-from typing import Iterable, Optional
+from typing import Optional
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import pandas as pd
-import numpy as np
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 
-class TinySleepNet(BaseModel):
+class TinySleepNet(BaseModel, EmbeddingModel, ClassifierModel):
     """Build a TinySleepNet-style model for sleep staging.
 
     Args:
@@ -30,9 +26,8 @@ class TinySleepNet(BaseModel):
         n_rnn_units: Hidden size of the optional recurrent stage.
         n_rnn_layers: Number of recurrent layers.
         use_lstm: Whether to apply the recurrent stage after the CNN front-end.
-        output_strategy: How to reduce recurrent outputs. Current code supports
-            ``flatten``, ``last``, ``center``, ``mean``, and ``sequence``.
         preprocessors: Optional preprocessors applied by ``BaseModel``.
+        sequence_len: Number of center-aligned chunks to return.
 
     Notes:
         The file retains paper references from the original implementation, but
@@ -50,22 +45,27 @@ class TinySleepNet(BaseModel):
         n_rnn_units=128,
         n_rnn_layers=1,
         use_lstm=False,
-        output_strategy = "flatten",
-        preprocessors: Optional[Iterable] = None
+        preprocessors: Optional[list[nn.Module]] = None,
+        sequence_len: int = 1,
     ):
-        super().__init__(preprocessors)
+        super().__init__(preprocessors=preprocessors)
 
         self.classes = list(classes) if classes is not None else None
         self.ts_len = ts_len
         self.n_channels = n_channels
         self.use_lstm = use_lstm
         self.seq_len = seq_len
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
+        if self.sequence_len > self.seq_len:
+            raise ValueError(f"sequence_len={self.sequence_len} exceeds seq_len={self.seq_len}.")
         self.n_rnn_units = n_rnn_units
         self.n_rnn_layers = n_rnn_layers
         self.sampling_frequency = sampling_frequency
 
         if self.ts_len % self.seq_len != 0:
-            raise ValueError(f"seq_len len (= {seq_len}) must be divisible by the total length of the input (= {self.ts_len})")
+            raise ValueError(f"ts_len={self.ts_len} must be divisible by seq_len={self.seq_len}.")
 
         first_filter_size = int(self.sampling_frequency / 2)
         first_filter_stride = int(self.sampling_frequency / 16)
@@ -107,11 +107,8 @@ class TinySleepNet(BaseModel):
             #x = x.permute(0,2,1) # (B*S, D, chunk_len)
             self.cnn_output_size = self.cnn(x).shape[1]
         
-        self.output_strategy = output_strategy
-        if self.use_lstm:
-            self._feature_dim = self.n_rnn_units * self.seq_len if self.output_strategy == "flatten" else self.n_rnn_units
-        else:
-            self._feature_dim = self.cnn_output_size
+        output_feature_size = self.n_rnn_units if self.use_lstm else self.cnn_output_size
+        self._feature_dim = self.sequence_len * output_feature_size
         if self.use_lstm:
             self.lstm = nn.LSTM(
                 input_size=self.cnn_output_size,  
@@ -120,28 +117,16 @@ class TinySleepNet(BaseModel):
                 batch_first=True,
                 dropout=0.5 if self.n_rnn_layers > 1 else 0.0
             )
-            if self.classes is not None:
-                if self.output_strategy == "flatten":
-                    self.fc = nn.Linear(self.n_rnn_units * self.seq_len, len(self.classes))
-                else:
-                    self.fc = nn.Linear(self.n_rnn_units, len(self.classes))
-            else:
-                self.fc = None
-        else:
-            self.fc = nn.Linear(self.cnn_output_size, len(self.classes)) if self.classes is not None else None
+        self.fc = nn.Linear(output_feature_size, len(self.classes)) if self.classes is not None else None
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Extract CNN or CNN-plus-RNN features from input windows.
 
         Args:
             x: Input tensor shaped ``[batch, time, channels]``.
 
         Returns:
-            Either a flattened feature tensor or a sequence of features,
-            depending on ``use_lstm`` and ``output_strategy``.
-
-        Raises:
-            ValueError: If an unknown output strategy is configured.
+            Center-aligned sequence features flattened to ``[B, S*E]``.
         """
         # x: (B, T, D)
         B, T, D = x.shape
@@ -152,30 +137,17 @@ class TinySleepNet(BaseModel):
         x = x.reshape(B * self.seq_len, D, chunk_len)    # (B * self.seq_len, D, chunk_len)
         
         x = self.cnn(x)  # (B*S, F)
+        x = x.view(B, self.seq_len, self.cnn_output_size)
 
         if self.use_lstm:
-            x = x.view(B, self.seq_len, self.cnn_output_size)  # (B, S, F)
             lstm_out, (hn, cn) = self.lstm(x)
-            
-            if self.output_strategy == "flatten":
-                x = lstm_out.contiguous()
-                x = x.view(B, -1)  
-            elif self.output_strategy == "last":
-                x = lstm_out[:, -1, :] 
-            elif self.output_strategy == "center":
-                x = lstm_out[:, self.seq_len // 2, :]  
-            elif self.output_strategy == "mean":
-                x = lstm_out.mean(dim=1)
-            elif self.output_strategy == "sequence":
-                x = lstm_out
-            else:
-                valid_strategies = ["flatten", "last", "center", "sequence"]
-                raise ValueError(f"Unknown output strategy: {self.output_strategy}. Valid strategies are: {valid_strategies}")
+            x = lstm_out
 
-        return x
+        sequence_start = (self.seq_len - self.sequence_len) // 2
+        return x[:, sequence_start:sequence_start + self.sequence_len].reshape(B, -1)
 
     def feature_dim(self) -> int:
-        """Return the feature size produced by :meth:`_features`."""
+        """Return the feature size produced by :meth:`encode`."""
         return self._feature_dim
 
     def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
@@ -185,11 +157,11 @@ class TinySleepNet(BaseModel):
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Project extracted features into class logits.
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode preprocessed inputs and project them into class logits.
 
         Args:
-            x: Feature tensor returned by :meth:`_features`.
+            x: Preprocessed model input.
 
         Returns:
             A class-logit tensor.
@@ -197,6 +169,12 @@ class TinySleepNet(BaseModel):
         Raises:
             ValueError: If the model was created without ``classes``.
         """
+        x = self.encode(x)
         if self.fc is None or self.classes is None:
-            raise ValueError("TinySleepNet.classifier() requires classes to be set.")
+            raise ValueError("TinySleepNet classification requires classes to be set.")
+        feature_size = self.n_rnn_units if self.use_lstm else self.cnn_output_size
+        expected = self.sequence_len * feature_size
+        if x.ndim != 2 or x.shape[-1] != expected:
+            raise ValueError(f"Expected TinySleepNet features shaped [B, {expected}], got {tuple(x.shape)}.")
+        x = x.view(x.shape[0], self.sequence_len, feature_size)
         return self.fc(x)

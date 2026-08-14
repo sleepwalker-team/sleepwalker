@@ -5,26 +5,26 @@ from functools import partial
 from torch.utils.data import DataLoader, Dataset
 
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.models.Basemodel import BaseModel
-from sleepwalker.models.MetaModel import MetaModel, MetaModelEntry
+from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
+from sleepwalker.models.CompositeModel import CompositeModel, CompositeModelEntry
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.losses import class_weights_for_loss, estimate_multilabel_class_cnts
 
 
-class DummyEmbeddingModel(BaseModel):
+class DummyEmbeddingModel(BaseModel, EmbeddingModel):
     def __init__(self, n_channels, feature_dim):
         super().__init__()
         self.proj = torch.nn.Linear(n_channels, feature_dim, bias=False)
         self._feature_dim = feature_dim
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x.mean(dim=1))
 
     def feature_dim(self) -> int:
         return self._feature_dim
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encode(x)
 
 
 class MultiLabelBatchDataset(Dataset):
@@ -40,6 +40,21 @@ class MultiLabelBatchDataset(Dataset):
         return self.items[idx]
 
 
+def make_multitask_item(task_config, task_indices, task_masks=None):
+    max_steps = max(cfg["n_steps"] for cfg in task_config.values())
+    max_classes = max(len(cfg["labels"]) for cfg in task_config.values())
+    target = torch.zeros((len(task_config), max_steps, max_classes), dtype=torch.float32)
+    target_mask = torch.zeros((len(task_config), max_steps), dtype=torch.bool)
+    for task_idx, (task, cfg) in enumerate(task_config.items()):
+        indices = torch.tensor(task_indices[task], dtype=torch.long)
+        if len(indices) != cfg["n_steps"]:
+            raise ValueError(f"Expected {cfg['n_steps']} indices for {task}, got {len(indices)}.")
+        target[task_idx, :cfg["n_steps"], :len(cfg["labels"])] = torch.nn.functional.one_hot(indices, len(cfg["labels"])).float()
+        mask = torch.ones(cfg["n_steps"], dtype=torch.bool) if task_masks is None or task not in task_masks else torch.tensor(task_masks[task], dtype=torch.bool)
+        target_mask[task_idx, :cfg["n_steps"]] = mask
+    return {"data": torch.zeros(4, 1), "target": target, "target_mask": target_mask}
+
+
 def build_trainer(**kwargs):
     task_config = {
         "sleep staging": {
@@ -47,15 +62,16 @@ def build_trainer(**kwargs):
             "default": None,
             "percentage": 0.5,
             "target_resolution": "30s",
+            "sequence_len": 1,
         },
         "breathing": {
             "labels": ["apnea", "hypopnea", "regular breathing"],
             "default": "regular breathing",
             "percentage": 0.5,
             "target_resolution": "10s",
+            "sequence_len": 3,
         },
     }
-    task_config = MultiLabelTrainer.normalize_task_config(task_config)
     task_config = {
         task: {**cfg, "loss_function": torch.nn.functional.cross_entropy}
         for task, cfg in task_config.items()
@@ -95,11 +111,24 @@ def test_trainer_builds_task_metadata():
 
 def test_build_multitask_target_uses_task_steps():
     trainer = build_trainer()
-    y = trainer.build_multitask_target(make_target_df(), trainer.task_config)
+    y, target_mask = trainer.build_multitask_target(make_target_df(), trainer.task_config)
 
-    assert y.shape == (2, 3)
-    assert y[0].tolist() == [2, -1, -1]
-    assert y[1].tolist() == [0, 2, 1]
+    assert y.shape == (2, 3, 5)
+    assert y[0, :1, :5].argmax(dim=-1).tolist() == [2]
+    assert y[1, :3, :3].argmax(dim=-1).tolist() == [0, 2, 1]
+    assert target_mask.tolist() == [[True, False, False], [True, True, True]]
+
+
+def test_prepare_target_normalizes_raw_task_config():
+    task_config = {
+        "sleep staging": {"labels": ["wake", "n1", "n2", "n3", "rem"], "default": None, "target_resolution": "30s", "sequence_len": 1},
+        "breathing": {"labels": ["apnea", "hypopnea", "regular breathing"], "default": "regular breathing", "target_resolution": "10s", "sequence_len": 3},
+    }
+
+    prepared = MultiLabelTrainer.prepare_target(make_target_df(), task_config=task_config)
+
+    assert prepared["target"].shape == (2, 3, 5)
+    assert prepared["target_mask"].tolist() == [[True, False, False], [True, True, True]]
 
 
 def test_build_multitask_target_rejects_multiple_active_labels_within_step():
@@ -107,7 +136,7 @@ def test_build_multitask_target_rejects_multiple_active_labels_within_step():
     target = make_target_df()
     target.loc[target.index[:10], "hypopnea"] = 1
 
-    with pytest.raises(ValueError, match="Task 'breathing', step 0"):
+    with pytest.raises(ValueError, match="task 'breathing'"):
         trainer.build_multitask_target(target, trainer.task_config)
 
 
@@ -121,35 +150,60 @@ def test_build_multitask_target_returns_none_when_raise_error_is_false():
 
 def test_build_multitask_target_uses_task_specific_percentage():
     task_config = {
-        "sleep staging": {"labels": ["wake", "n1"], "default": None, "percentage": 0.8, "target_resolution": "20s"},
-        "breathing": {"labels": ["apnea", "regular breathing"], "default": "regular breathing", "percentage": 0.2, "target_resolution": "10s"},
+        "sleep staging": {"labels": ["wake", "n1"], "default": None, "percentage": 0.8, "target_resolution": "20s", "sequence_len": 1},
+        "breathing": {"labels": ["apnea", "regular breathing"], "default": "regular breathing", "percentage": 0.2, "target_resolution": "10s", "sequence_len": 2},
     }
     task_config = MultiLabelTrainer.normalize_task_config(task_config)
     idx = pd.date_range("2024-01-01", periods=20, freq="1s")
     target = pd.DataFrame(0, index=idx, columns=["wake", "n1", "apnea", "regular breathing"])
     target.loc[idx[:17], "n1"] = 1
     target.loc[idx[:3], "apnea"] = 1
-    target.loc[idx[10:12], "apnea"] = 1
+    target.loc[idx[10:11], "apnea"] = 1
 
-    y = MultiLabelTrainer.build_multitask_target(target, task_config)
+    y, target_mask = MultiLabelTrainer.build_multitask_target(target, task_config)
 
-    assert y.tolist() == [[1, -1], [0, 1]]
+    assert y[0, :1, :2].argmax(dim=-1).tolist() == [1]
+    assert y[1, :2, :2].argmax(dim=-1).tolist() == [0, 1]
+    assert target_mask.tolist() == [[True, False], [True, True]]
 
 
-def test_trainer_rejects_non_divisible_task_resolution():
+def test_build_multitask_target_centers_explicit_spans_and_builds_soft_step_masks():
+    task_config = MultiLabelTrainer.normalize_task_config({
+        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "2s", "sequence_len": 2},
+        "event": {
+            "labels": ["no_event", "event"],
+            "default": "no_event",
+            "target_resolution": "1s",
+            "sequence_len": 8,
+            "soft_boundaries": True,
+            "step_mask": {"columns": ["n2"], "percentage": 0.5},
+        },
+    })
+    index = pd.date_range("2024-01-01", periods=16, freq="500ms")
+    target = pd.DataFrame(0, index=index, columns=["wake", "n2", "event"])
+    target.loc[index[4:12], "n2"] = 1
+    target.loc[index[0], "event"] = 1
+
+    values, target_mask = MultiLabelTrainer.build_multitask_target(target, task_config)
+
+    assert task_config["sleep"]["target_offset"] == pd.Timedelta("2s")
+    assert values[0, :2, :2].argmax(dim=-1).tolist() == [1, 1]
+    assert torch.allclose(values[1, 0, :2], torch.tensor([0.5, 0.5]))
+    assert target_mask[0].tolist() == [True, True, False, False, False, False, False, False]
+    assert target_mask[1].tolist() == [False, False, True, True, True, True, False, False]
+
+
+def test_trainer_requires_explicit_sequence_len():
     task_config = {
-        "sleep staging": {"labels": ["wake", "n1"], "default": None, "target_resolution": "30s"},
+        "sleep staging": {"labels": ["wake", "n1"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "breathing": {"labels": ["apnea", "regular breathing"], "default": "regular breathing", "target_resolution": "7s"},
     }
 
-    with pytest.raises(ValueError, match="must divide"):
+    with pytest.raises(ValueError, match="Task 'breathing' is missing sequence_len"):
         MultiLabelTrainer(
             epochs=1,
             optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3),
-            task_config={
-                task: {**cfg, "loss_function": torch.nn.functional.cross_entropy}
-                for task, cfg in MultiLabelTrainer.normalize_task_config(task_config).items()
-            },
+            task_config={task: {**cfg, "loss_function": torch.nn.functional.cross_entropy} for task, cfg in task_config.items()},
             device="cpu",
             warmup_device="cpu",
         )
@@ -162,28 +216,22 @@ def test_trainer_rejects_unknown_condition_label():
 
 def test_run_epoch_masks_conditioned_tasks_during_wake():
     task_config = MultiLabelTrainer.normalize_task_config({
-        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s"},
-        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s"},
+        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
+        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
     })
     dataset = MultiLabelBatchDataset([
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[1, -1, -1], [0, 0, 0]], dtype=torch.long),
-        },
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[0, -1, -1], [1, 1, 1]], dtype=torch.long),
-        },
+        make_multitask_item(task_config, {"sleep": [1], "breathing": [0, 0, 0]}),
+        make_multitask_item(task_config, {"sleep": [0], "breathing": [1, 1, 1]}),
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = MetaModel(
+    model = CompositeModel(
         task_config=task_config,
         input_channels=["sig"],
-        models=[MetaModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
+        models=[CompositeModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
     )
     with torch.no_grad():
-        model.model_entries[0]["model"].proj.weight.zero_()
+        model.embedding_models[0].proj.weight.zero_()
         model.heads["sleep"].weight.zero_()
         model.heads["sleep"].bias.copy_(torch.tensor([0.0, 1.0]))
         model.heads["breathing"].weight.zero_()
@@ -218,29 +266,23 @@ def test_run_epoch_masks_conditioned_tasks_during_wake():
 
 def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_has_multiple_steps():
     task_config = MultiLabelTrainer.normalize_task_config({
-        "coarse": {"labels": ["off", "on"], "default": None, "target_resolution": "30s"},
-        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "10s"},
-        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s"},
+        "coarse": {"labels": ["off", "on"], "default": None, "target_resolution": "30s", "sequence_len": 1},
+        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "10s", "sequence_len": 3},
+        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
     })
     dataset = MultiLabelBatchDataset([
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[0, -1, -1], [0, 1, 0], [0, 1, 0]], dtype=torch.long),
-        },
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[0, -1, -1], [0, 0, 0], [1, 1, 1]], dtype=torch.long),
-        },
+        make_multitask_item(task_config, {"coarse": [0], "sleep": [0, 1, 0], "breathing": [0, 1, 0]}),
+        make_multitask_item(task_config, {"coarse": [0], "sleep": [0, 0, 0], "breathing": [1, 1, 1]}),
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = MetaModel(
+    model = CompositeModel(
         task_config=task_config,
         input_channels=["sig"],
-        models=[MetaModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
+        models=[CompositeModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
     )
     with torch.no_grad():
-        model.model_entries[0]["model"].proj.weight.zero_()
+        model.embedding_models[0].proj.weight.zero_()
         model.heads["coarse"].weight.zero_()
         model.heads["coarse"].bias.copy_(torch.tensor([1.0, 0.0]))
         model.heads["sleep"].weight.zero_()
@@ -266,23 +308,18 @@ def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_h
 
 def test_estimate_class_cnts_respects_conditioning():
     task_config = MultiLabelTrainer.normalize_task_config({
-        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s"},
+        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "breathing": {
             "labels": ["apnea", "regular"],
             "default": "regular",
             "target_resolution": "10s",
+            "sequence_len": 3,
             "loss_mode": "inverse-log",
         },
     })
     dataset = build_dataset([
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[1, -1, -1], [0, 1, 0]], dtype=torch.long),
-        },
-        {
-            "data": torch.zeros(4, 1),
-            "target": torch.tensor([[0, -1, -1], [1, 1, 1]], dtype=torch.long),
-        },
+        make_multitask_item(task_config, {"sleep": [1], "breathing": [0, 1, 0]}),
+        make_multitask_item(task_config, {"sleep": [0], "breathing": [1, 1, 1]}),
     ])
 
     class_cnts = estimate_multilabel_class_cnts(
@@ -312,12 +349,14 @@ def test_configure_losses_uses_explicit_task_weights_when_given():
             "labels": ["wake", "n2"],
             "default": None,
             "target_resolution": "30s",
+            "sequence_len": 1,
             "class_weights": {"wake": 2.0, "n2": 5.0},
         },
         "breathing": {
             "labels": ["apnea", "regular"],
             "default": "regular",
             "target_resolution": "10s",
+            "sequence_len": 3,
             "class_weights": {"apnea": 7.0, "regular": 3.0},
         },
     })
@@ -341,12 +380,14 @@ def test_configure_losses_derives_task_weights_from_class_counts():
             "labels": ["wake", "n2"],
             "default": None,
             "target_resolution": "30s",
+            "sequence_len": 1,
             "loss_mode": "inverse",
         },
         "breathing": {
             "labels": ["apnea", "regular"],
             "default": "regular",
             "target_resolution": "10s",
+            "sequence_len": 3,
             "loss_mode": "inverse",
         },
     })
@@ -373,14 +414,11 @@ def test_configure_losses_derives_task_weights_from_class_counts():
 
 def test_prepare_target_respects_task_specific_class_counts(monkeypatch):
     task_config = MultiLabelTrainer.normalize_task_config({
-        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s"},
-        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s"},
+        "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
+        "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
     })
-    monkeypatch.setattr(
-        MultiLabelTrainer,
-        "build_multitask_target",
-        staticmethod(lambda targets, task_config, raise_error=False: torch.tensor([[1, -1, -1], [0, 1, 0]], dtype=torch.long)),
-    )
+    prepared = make_multitask_item(task_config, {"sleep": [1], "breathing": [0, 1, 0]})
+    monkeypatch.setattr(MultiLabelTrainer, "build_multitask_target", staticmethod(lambda targets, task_config, raise_error=False: (prepared["target"], prepared["target_mask"])))
 
     random_values = iter([0.1, 0.3])
     monkeypatch.setattr("sleepwalker.trainer.MultiLabelTrainer.random.random", lambda: next(random_values))

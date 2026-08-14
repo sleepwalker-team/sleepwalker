@@ -32,7 +32,6 @@ def _clip_to_intervals(
 
 
 def prepare_patient(
-    data_df,
     label_df,
     label_extra_df,
     patient=None,
@@ -41,13 +40,13 @@ def prepare_patient(
 ):
     """Retain sleep intervals overlapping a desaturation for breathing labels."""
     if label_df is None:
-        return data_df, None, label_extra_df
-    trimmed = trim_event(data_df, label_df, label_extra_df, ["sleep"])
+        return None, label_extra_df
+    trimmed = trim_event(label_df, label_extra_df, ["sleep"])
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
 
-    trimmed = trim_event(data_df, label_df, label_extra_df, ["desaturation"])
+    trimmed = trim_event(label_df, label_extra_df, ["desaturation"])
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
@@ -89,5 +88,4 @@ def prepare_patient(
     clipped = _clip_to_intervals(labels, overlap_intervals)
     if clipped is None or len(clipped) == 0:
         return None
-    return data_df, clipped, label_extra_df
-
+    return clipped, label_extra_df

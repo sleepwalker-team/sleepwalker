@@ -11,10 +11,9 @@ from sklearn.pipeline import Pipeline
 import torch
 from torch.utils.data import DataLoader
 from abc import ABC
-from torch.optim.lr_scheduler import OneCycleLR
 
-from sleepwalker.models.Basemodel import BaseModel
 from sleepwalker.utils import logger
+from sleepwalker.trainer.BaseTrainer import build_lr_scheduler
 from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
 
 def masked_mse(y_pred, y_true, mask):
@@ -90,7 +89,7 @@ class MaskedAutoencoderTrainer(ABC):
     def _log_loss(self, loss, mode, scope='batch', step=0):
         logger.metric(f"{scope}/{mode}/loss", loss, step=step) 
 
-    def warmup_preprocessors(self, model: BaseModel, data_loader:DataLoader, device:str = "cuda") -> BaseModel:
+    def warmup_preprocessors(self, model: torch.nn.Module, data_loader:DataLoader, device:str = "cuda") -> torch.nn.Module:
         model.to(device)
         total_batches = len(data_loader)
         batch_size = data_loader.batch_size  
@@ -111,7 +110,7 @@ class MaskedAutoencoderTrainer(ABC):
 
         return model
 
-    def run_epoch(self, loader, opt, model, prefix=""):
+    def run_epoch(self, loader, opt, model, prefix="", lr_scheduler=None):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         
         loss_sum = 0
@@ -129,8 +128,8 @@ class MaskedAutoencoderTrainer(ABC):
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
                 channel_mask = batch[f'mask_{modality}'].to(self.device)
-                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
-                _y_pred, _mask = model._forward(_x, modality)
+                _x = model.apply_preprocessors(_x, modality)
+                _y_pred, _mask = model(_x, modality)
                 # Mask the output mask with whatever channels are present
                 _mask = _mask * channel_mask[:, None, None, :]
 
@@ -159,6 +158,8 @@ class MaskedAutoencoderTrainer(ABC):
             self.steps[mode] += 1
             logger.progress_status(desc)
             logger.progress_advance(loader.batch_size)
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
@@ -181,8 +182,8 @@ class MaskedAutoencoderTrainer(ABC):
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
                 channel_mask = batch[f'mask_{modality}'].to(self.device)  # (B, C)
-                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
-                feats = model._features(_x, modality)  
+                _x = model.apply_preprocessors(_x, modality)
+                feats = model.encode(_x, modality)
                 embeddings[modality] = masked_mean(feats, channel_mask)
 
             X_train.append(embeddings)
@@ -209,8 +210,8 @@ class MaskedAutoencoderTrainer(ABC):
             for modality in self.groups:
                 _x = batch[f'data_{modality}'].to(self.device)
                 channel_mask = batch[f'mask_{modality}'].to(self.device)  # (B, C)
-                _x = model.apply_preprocessors(_x, modality, len(model.preprocessors)+1)
-                feats = model._features(_x, modality)  
+                _x = model.apply_preprocessors(_x, modality)
+                feats = model.encode(_x, modality)
                 embeddings[modality] = masked_mean(feats, channel_mask)
 
             X_test.append(embeddings)
@@ -248,15 +249,10 @@ class MaskedAutoencoderTrainer(ABC):
         cm = confusion_matrix(y_test, y_pred)
         self._log_from_cm(cm, mode=label, scope='epoch', step=self.epoch_step)
     
-    def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None, warmup_loader=None):
+    def fit(self, model: torch.nn.Module, train_loader, val_loader=None, test_loader=None, warmup_loader=None):
         opt = self.optimizer_fn(model)
 
-        if self.lr_scheduler_fn is not None:
-            lr_scheduler = self.lr_scheduler_fn(opt)
-            if isinstance(lr_scheduler, OneCycleLR):
-                raise ValueError(f"OneCycleLR is currently not supported") # TODO
-        else:
-            lr_scheduler = None
+        lr_scheduler, scheduler_per_batch = build_lr_scheduler(self.lr_scheduler_fn, opt, self.epochs, len(train_loader))
 
         if self.early_stopping_patience and val_loader is None:
             logger.warning(f"early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
@@ -280,7 +276,7 @@ class MaskedAutoencoderTrainer(ABC):
 
         for epoch in range(self.epochs):
             model.train()
-            loss = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
+            loss = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]", lr_scheduler if scheduler_per_batch else None)
             losses.append({"train":loss})
 
             if self.save_every > 0 and (epoch % self.save_every == 0):
@@ -292,7 +288,7 @@ class MaskedAutoencoderTrainer(ABC):
                 if lr_scheduler:
                     logger.artifact(path=os.path.join(self.last_folder, "scheduler.pt"), dest=f"{epoch}")
 
-            if lr_scheduler is not None:
+            if lr_scheduler is not None and not scheduler_per_batch:
                 lr_scheduler.step()
 
             if val_loader is not None:

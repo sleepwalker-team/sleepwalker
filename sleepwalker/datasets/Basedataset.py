@@ -35,6 +35,51 @@ from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
 from sleepwalker.datasets.normalizer import Normalizer
 
+
+def prepare_tensor_sample(
+    data,
+    quality_data=None,
+    target=None,
+    target_extra=None,
+    patient=None,
+    time=None,
+    *,
+    max_nan_fraction: float | None = None,
+    quality_max_mean: Mapping[str, float] | None = None,
+    valid_ranges: Mapping[str, Sequence[float]] | None = None,
+    max_out_of_range_fraction: float = 0.05,
+    min_std: Mapping[str, float] | None = None,
+    **item,
+):
+    """Build the standard tensor sample with optional signal-quality checks."""
+    if max_nan_fraction is not None and float(data.isna().mean().mean()) > float(max_nan_fraction):
+        return None
+
+    for channel, maximum in dict(quality_max_mean or {}).items():
+        if quality_data is not None and channel in quality_data.columns and float(quality_data[channel].astype(float).mean()) > float(maximum):
+            return None
+
+    for channel, bounds in dict(valid_ranges or {}).items():
+        if channel not in data.columns:
+            continue
+        if len(bounds) != 2:
+            raise ValueError(f"valid_ranges[{channel!r}] must contain [minimum, maximum].")
+        lower, upper = float(bounds[0]), float(bounds[1])
+        invalid = (data[channel] < lower) | (data[channel] > upper)
+        if float(invalid.mean()) > float(max_out_of_range_fraction):
+            return None
+
+    for channel, minimum in dict(min_std or {}).items():
+        if channel in data.columns and float(data[channel].std()) < float(minimum):
+            return None
+
+    result = {"data": torch.from_numpy(data.values).float(), "patient": patient, "time": time, **item}
+    if target is not None:
+        result["target"] = target
+    if target_extra is not None:
+        result["target_extra"] = target_extra
+    return result
+
 @dataclass
 class ChannelConfig:
     """Describe one logical model input and its physical EDF alternatives.
@@ -136,6 +181,16 @@ def unit_conversion_factor(
         )
     return source_scale / target_scale
 
+
+def apply_normalizers(data_df: pd.DataFrame, normalizers: Optional[Mapping[str, Normalizer]]) -> pd.DataFrame:
+    """Apply configured channel normalizers in place and return the frame."""
+    if normalizers:
+        for col, normalizer in normalizers.items():
+            if col in data_df.columns:
+                values = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
+                data_df[col] = normalizer.transform(values).ravel()
+    return data_df
+
 @dataclass
 class EDFFile: 
     """Prepared patient descriptor used after dataset initialization.
@@ -157,6 +212,7 @@ class EDFFile:
     labels_extra: Optional[EventIndex] = None
     normalizers: Optional[dict[str, Normalizer]] = None
     unit_factors: Optional[dict[str, float]] = None
+    z_statistics: Optional[dict[str, tuple[float, float]]] = None
 
     def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
         """Load one signal window for the prepared patient.
@@ -170,8 +226,8 @@ class EDFFile:
 
         Returns:
             A DataFrame indexed by timestamps and containing the configured
-            signal columns. If patient-level normalizers were fitted during
-            preparation, they are applied column-wise before returning.
+            signal columns. Fixed dataset normalizers are applied column-wise
+            before returning.
         """
         if self.X is None:
             x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type, True)
@@ -180,15 +236,20 @@ class EDFFile:
                     if col in x_df.columns and factor != 1.0:
                         x_df[col] = x_df[col] * factor
             # TODO allow normalization after augmentation?  
-            if self.normalizers:
-                for col, norm in self.normalizers.items():
-                    if col in x_df.columns:
-                        vals = x_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                        x_df[col] = norm.transform(vals).ravel()
-
-            return x_df
+            return apply_normalizers(x_df, self.normalizers)
         else:
             return self.X.loc[start_date:end_date]
+
+    def apply_z_normalization(self, data_df: pd.DataFrame) -> pd.DataFrame:
+        """Apply fixed full-recording z-score statistics in place."""
+        if self.z_statistics is None:
+            return data_df
+        missing = sorted(set(self.z_statistics) - set(data_df.columns))
+        if missing:
+            raise ValueError(f"Missing channels required for recording z-normalization: {missing}.")
+        for col, (mean, standard_deviation) in self.z_statistics.items():
+            data_df[col] = (data_df[col] - mean) / standard_deviation
+        return data_df
     
     def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
         """Sample the optional secondary target timeline for one window."""
@@ -358,8 +419,9 @@ class BaseDataset(Dataset, ABC):
     full patient signals in memory after initialization.
 
     Instead, the workflow is:
-    - `initialize(...)` scans the selected patients, prepares labels, and builds
-      an index of valid sliding-window positions
+    - `initialize(...)` reads headers and annotations, then builds an index of
+      valid sliding-window positions without loading complete signals unless
+      `z_normalize=True`
     - `__getitem__` uses that index to choose a candidate item
     - the corresponding EDF signal window is loaded lazily only when needed
 
@@ -378,9 +440,8 @@ class BaseDataset(Dataset, ABC):
     - filtering in `prepare_target` is cheap and usually preferable
     - filtering in `prepare_sample` is more expensive because signal I/O has
       already happened
-    - expensive patient-wide checks in `prepare_patient` run only once per
-      patient, but they still need the full patient signal to be loaded during
-      preparation
+    - `prepare_patient` is annotation-only; use
+      `get_patient_stats(...)` for explicit full-signal cohort analysis
 
     Sparse window indexing
     ----------------------
@@ -400,16 +461,14 @@ class BaseDataset(Dataset, ABC):
     help you place logic in the right stage.
 
     `prepare_patient`
-        Runs once per patient after the full patient signal and mapped labels
-        have been loaded.
+        Runs once per patient after metadata and mapped labels have been loaded.
 
         Use this for whole-patient logic such as:
         - trimming leading/trailing wake
         - rejecting patients with too few valid labels
-        - rejecting patients with obviously broken signals
 
-        This is the most expensive hook because it sees the full loaded signal.
-        Only put logic here that really needs patient-wide context.
+        Use this hook for annotation-wide logic. Signal-wide cohort logic
+        belongs in `get_patient_stats(...)` so ordinary indexing stays cheap.
 
     `prepare_target`
         Runs once per candidate item before the signal window is loaded. It
@@ -440,7 +499,7 @@ class BaseDataset(Dataset, ABC):
 
     Which hook should I use?
     ------------------------
-    Use `prepare_patient` when the decision depends on the full patient.
+    Use `prepare_patient` when the decision depends on the full annotation set.
 
     Example:
     - trim wake at the start/end of the night
@@ -504,9 +563,9 @@ class BaseDataset(Dataset, ABC):
         `False`, unmapped labels are kept as-is.
 
     prepare_patient
-        Optional callback for whole-patient preparation. It receives
-        `data_df`, `label_df`, `label_extra_df`, and `patient`.
-        It should return `(data_df, label_df, label_extra_df)` or `None`.
+        Optional callback for whole-patient annotation preparation. It receives
+        `label_df`, `label_extra_df`, and `patient`.
+        It should return `(label_df, label_extra_df)` or `None`.
 
     prepare_target
         Optional callback for per-item target preparation. It receives
@@ -519,9 +578,10 @@ class BaseDataset(Dataset, ABC):
         the final item dictionary or `None`.
 
     online_max_tries
-        Maximum number of times `__getitem__` retries random alternative windows
-        when a sampled item gets rejected by `prepare_target` or
-        `prepare_sample`.
+        Number of attempts `__getitem__` makes first within the sampled patient
+        and then across the full dataset when candidates are rejected by
+        `prepare_target` or `prepare_sample`. This gives twice this number of
+        attempts in total. A value of zero only tries the requested window.
 
     force_one_day
         If `True`, reject patients whose mapped labels appear to span more than
@@ -535,6 +595,16 @@ class BaseDataset(Dataset, ABC):
         `rereference=[["C3", "C4"]]`
         means both channels are replaced by their values minus the mean of
         `C3`/`C4` at each time step.
+
+    z_normalize
+        If `True`, load every complete recording during initialization and
+        compute a separate mean and standard deviation for each available
+        physical signal. Configured channel normalizers run first,
+        rereferencing runs second, and recording z-normalization is always the
+        final built-in signal normalization step. The resulting scalar
+        statistics are stored on the prepared `EDFFile`; complete signals are
+        not retained in memory. This option makes initialization substantially
+        more expensive.
 
     assume_units_if_missing
         If `False`, a configured channel unit requires unit metadata in the EDF
@@ -551,12 +621,11 @@ class BaseDataset(Dataset, ABC):
     Trim wake once per patient:
 
     ```python
-    def prepare_patient(data_df, label_df, label_extra_df, patient=None):
-        trimmed = trim_event(data_df, label_df, label_extra_df)
+    def prepare_patient(label_df, label_extra_df, patient=None):
+        trimmed = trim_event(label_df, label_extra_df)
         if trimmed is None:
             return None
-        label_df, label_extra_df = trimmed
-        return data_df, label_df, label_extra_df
+        return trimmed
     ```
 
     Build a multiclass target and reject low-sleep windows cheaply:
@@ -600,13 +669,13 @@ class BaseDataset(Dataset, ABC):
         stride: Optional[str | pd.Timedelta] = None,
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
-        prepare_patient: Optional[Callable[[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]], Optional[tuple[pd.DataFrame, Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
+        prepare_patient: Optional[Callable[..., Optional[tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
         prepare_target: Optional[Callable] = None,
-        prepare_sample: Optional[Callable] = None,
+        prepare_sample: Callable = prepare_tensor_sample,
         online_max_tries:int = 128,
-        online_retry_scope: str = "global",
         force_one_day: bool = True,
         rereference: Optional[List[List[str]]] = None, # [ ["C3-A1", "C4-A2"] ]
+        z_normalize: bool = False,
         group_sampling_strategy: Optional[str] = 'random', # [random, None]
         assume_units_if_missing: bool = False,
         edf_unit_overrides: Optional[Mapping[str, str]] = None,
@@ -630,13 +699,15 @@ class BaseDataset(Dataset, ABC):
         self.prepare_sample_callback = prepare_sample
         self.prepare_patient_callback = prepare_patient
         self.all_patients: list[str | os.PathLike] = []
-        self.online_max_tries = online_max_tries
-        if online_retry_scope not in {"global", "patient"}:
-            raise ValueError("online_retry_scope must be 'global' or 'patient'.")
-        self.online_retry_scope = online_retry_scope
+        self.online_max_tries = int(online_max_tries)
+        if self.online_max_tries < 0:
+            raise ValueError("online_max_tries must not be negative.")
         self.initialized = False
         self.force_one_day = force_one_day
         self.rereference = rereference
+        self.z_normalize = bool(z_normalize)
+        if self.z_normalize and self.rereference:
+            logger.warning("z_normalize=True with rereferencing enabled: recording z-normalization is applied after rereferencing.")
         self.assume_units_if_missing = bool(assume_units_if_missing)
         self.edf_unit_overrides = dict(edf_unit_overrides or {})
         self.edf_files: list[EDFFile] = []
@@ -709,16 +780,44 @@ class BaseDataset(Dataset, ABC):
 
     def get_timeseries_len(self) -> int:
         """Return the expected number of signal samples per item."""
-        freq = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
-        return int(self.total_input.total_seconds() / freq.total_seconds())
+        return int(round(self.total_input.total_seconds() * float(self.sample_frequency)))
 
     def get_n_patients(self) -> int:
         """Return the number of prepared patient recordings."""
         return len(self.edf_files)
 
+    def get_patient_ranges(self) -> list[tuple[int, int]]:
+        """Return each prepared patient's half-open range in the global index."""
+        if not self.initialized:
+            raise ValueError(f"{self.__class__.__name__} is not initialized. Call initialize(...) before requesting patient ranges.")
+        return list(zip(self.lower_bounds, self.upper_bounds))
+
     def get_input_channels(self) -> list[str]:
         """Return the logical model input channel names."""
         return list(self.channel_configs_by_logical_name)
+
+    def apply_rereference(self, data_df: pd.DataFrame) -> pd.DataFrame:
+        """Apply configured average-reference groups in place."""
+        if self.rereference:
+            for reference_channels in self.rereference:
+                available = [channel for channel in reference_channels if channel in data_df.columns]
+                if available:
+                    data_df[available] = data_df[available].values - data_df[available].values.mean(axis=1)[:, None]
+        return data_df
+
+    def calculate_z_statistics(self, data_df: pd.DataFrame, channels: Sequence[str]) -> dict[str, tuple[float, float]]:
+        """Calculate finite full-recording mean/std pairs for physical channels."""
+        statistics = {}
+        for channel in channels:
+            values = data_df[channel].to_numpy(dtype=float)
+            if values.size == 0 or not np.isfinite(values).all():
+                raise ValueError(f"Cannot z-normalize channel '{channel}' with empty or non-finite recording data.")
+            mean = float(np.mean(values))
+            standard_deviation = float(np.std(values))
+            if not np.isfinite(mean) or not np.isfinite(standard_deviation) or standard_deviation <= 0:
+                raise ValueError(f"Cannot z-normalize channel '{channel}' with mean={mean} and std={standard_deviation}.")
+            statistics[channel] = (mean, standard_deviation)
+        return statistics
 
     def __len__(self):
         return sum([f.length for f in self.edf_files])
@@ -793,7 +892,7 @@ class BaseDataset(Dataset, ABC):
             return np.empty(0, dtype=np.int64)
         return np.concatenate(offsets)
 
-    def _prepare_patient_artifacts(self, edf_path):
+    def _prepare_patient_artifacts(self, edf_path, *, load_signal: bool = False):
         channel_names = []
         for cfg in self.channels:
             channel_names.extend(cfg.physical_names)
@@ -846,25 +945,24 @@ class BaseDataset(Dataset, ABC):
             if physical_name in available_channels and cfg.unit is not None
         }
 
+        channels = [channel for channel in channel_names if channel in available_channels]
         classes = set()
         extra_classes = set()
-        data_df = edf_to_df(edf_path, channel_names, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type, verbose=True)
-        if data_df is None or len(data_df) == 0:
-            raise ValueError("Found empty EDF file")
-        for col, factor in unit_factors.items():
-            if col in data_df.columns and factor != 1.0:
-                data_df[col] = data_df[col] * factor
-
         start = meta["start"]
         end = meta["end"]
+        if start is None or end is None:
+            raise ValueError(f"EDF file {edf_path} has no recording timestamps.")
 
-        start = max(data_df.index[0], start)
-        end = min(data_df.index[-1], end)
-
-        for col in normalizers.keys():
-            if col in data_df.columns:
-                X = data_df[col].to_numpy(dtype=float).reshape(-1, 1)
-                normalizers[col].fit(X=X)
+        data_df = None
+        if load_signal:
+            data_df = edf_to_df(edf_path, channels, start=None, end=None, frequency=self.sample_frequency, how=self.resample_type, verbose=True)
+            if data_df is None or len(data_df) == 0:
+                raise ValueError("Found empty EDF file")
+            for col, factor in unit_factors.items():
+                if col in data_df.columns and factor != 1.0:
+                    data_df[col] = data_df[col] * factor
+            start = max(data_df.index[0], start)
+            end = min(data_df.index[-1], end)
 
         if self.event_mapping is not None:
             if self.has_extra_target():
@@ -906,25 +1004,38 @@ class BaseDataset(Dataset, ABC):
 
         if self.prepare_patient_callback is not None:
             prepared = self.prepare_patient_callback(
-                data_df=data_df,
                 label_df=df,
                 label_extra_df=df_additional,
                 patient=edf_path,
             )
             if prepared is None:
                 return None
-            data_df, df, df_additional = prepared
-            if data_df is None or len(data_df) == 0:
-                raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
+            df, df_additional = prepared
             if self.event_mapping is not None and (df is None or len(df) == 0):
                 raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
 
-        start = max(start, data_df.index[0])
-        end = min(end, data_df.index[-1])
+        if data_df is not None:
+            start = max(start, data_df.index[0])
+            end = min(end, data_df.index[-1])
+
+        z_statistics = None
+        if self.z_normalize:
+            if data_df is None:
+                raise ValueError("z_normalize=True requires complete recording data during patient preparation.")
+            data_df = apply_normalizers(data_df, normalizers)
+            data_df = self.apply_rereference(data_df)
+            signal_channels = list(dict.fromkeys(
+                physical_name
+                for cfg in self.channels
+                for physical_name in cfg.physical_names
+                if physical_name in available_channels
+            ))
+            z_statistics = self.calculate_z_statistics(data_df, signal_channels)
 
         return {
             "path": edf_path,
             "data_df": data_df,
+            "channels": channels,
             "start": start,
             "end": end,
             "label_df": df,
@@ -933,6 +1044,7 @@ class BaseDataset(Dataset, ABC):
             "extra_classes": extra_classes,
             "normalizers": normalizers,
             "unit_factors": unit_factors,
+            "z_statistics": z_statistics,
         }
 
     def prepare_patient(self, edf_path, *, raise_errors: bool = False) -> Optional[EDFFile]:
@@ -942,7 +1054,7 @@ class BaseDataset(Dataset, ABC):
             edf_path: Path to an EDF file.
 
         Returns:
-            An :class:`EDFFile` descriptor with fitted normalizers, event
+            An :class:`EDFFile` descriptor with fixed normalizers, event
             indices, and a precomputed window count, or ``None`` if patient
             preparation rejects the file.
 
@@ -951,9 +1063,9 @@ class BaseDataset(Dataset, ABC):
                 appears inconsistent with the configured assumptions.
         """
         started_at = time.perf_counter()
-        slow_warning_seconds = float(os.environ.get("SLEEPWALKER_SLOW_PATIENT_SECONDS", "20"))
+        slow_warning_seconds = 30
         try:
-            artifacts = self._prepare_patient_artifacts(edf_path)
+            artifacts = self._prepare_patient_artifacts(edf_path, load_signal=self.z_normalize)
             if artifacts is None:
                 return None
 
@@ -978,7 +1090,7 @@ class BaseDataset(Dataset, ABC):
             result = EDFFile(
                 path=edf_path,
                 X=None,
-                channels=list(artifacts["data_df"].columns),
+                channels=artifacts["channels"],
                 start_offsets=start_offsets,
                 length=n_items,
                 labels=EventIndex(label_df) if label_df is not None else None,
@@ -987,6 +1099,7 @@ class BaseDataset(Dataset, ABC):
                 classes=artifacts["classes"].union(artifacts["extra_classes"]),
                 normalizers=artifacts["normalizers"],
                 unit_factors=artifacts["unit_factors"],
+                z_statistics=artifacts["z_statistics"],
             )
             elapsed = time.perf_counter() - started_at
             if elapsed >= slow_warning_seconds:
@@ -1049,7 +1162,7 @@ class BaseDataset(Dataset, ABC):
 
     def _summarize_patient(self, edf_path, summarize_patient: Callable):
         try:
-            artifacts = self._prepare_patient_artifacts(edf_path)
+            artifacts = self._prepare_patient_artifacts(edf_path, load_signal=True)
             if artifacts is None:
                 return None
             row = summarize_patient(
@@ -1085,7 +1198,8 @@ class BaseDataset(Dataset, ABC):
             Initialization is intentionally explicit because it can be
             expensive. Training scripts often call :meth:`get_patient_stats`
             first to filter patients before paying the full initialization
-            cost.
+            cost. When ``z_normalize=True``, initialization also loads every
+            complete recording once to calculate its channel statistics.
         """
         self.all_patients = list(patients)
         self.initialized = False
@@ -1185,19 +1299,15 @@ class BaseDataset(Dataset, ABC):
             if len(selected_quality) > 0:
                 quality_df = pd.DataFrame(selected_quality, index=x_df.index)
 
-        if self.prepare_sample_callback is not None:
-            return self.prepare_sample_callback(
-                data=x_df,
-                quality_data=quality_df,
-                target=item.get("target"),
-                target_extra=item.get("target_extra"),
-                patient=item.get("patient"),
-                time=item.get("time"),
-                **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
-            )
-        else:
-            item["data"] = torch.from_numpy(x_df.values).float()
-            return item
+        return self.prepare_sample_callback(
+            data=x_df,
+            quality_data=quality_df,
+            target=item.get("target"),
+            target_extra=item.get("target_extra"),
+            patient=item.get("patient"),
+            time=item.get("time"),
+            **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
+        )
 
     def build_sample_from_window_df(
         self,
@@ -1223,11 +1333,11 @@ class BaseDataset(Dataset, ABC):
             confirmed by ``tests/test_datasets.py``.
         """
         end_date = start_date + self.total_input
-        t_center = start_date + (self.total_input // 2 - self.target_resolution // 2)
-        item: Dict[str, Any] = {"patient": file.path, "time": t_center}
+        target_start = start_date + (self.total_input // 2 - self.target_resolution // 2)
+        item: Dict[str, Any] = {"patient": file.path, "time": target_start}
 
         if file.labels:
-            start_date_label = t_center
+            start_date_label = target_start
             end_date_label = start_date_label + self.target_resolution
 
             item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
@@ -1248,12 +1358,8 @@ class BaseDataset(Dataset, ABC):
             item.update(prepared_target)
 
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
-        
-        if self.rereference:
-            for refchannels in self.rereference:
-                ref_cols = [r for r in refchannels if r in x_df.columns]
-                if ref_cols:
-                    x_df[ref_cols] = x_df[ref_cols].values - x_df[ref_cols].values.mean(axis=1)[:,None]
+        self.apply_rereference(x_df)
+        file.apply_z_normalization(x_df)
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for
@@ -1279,7 +1385,7 @@ class BaseDataset(Dataset, ABC):
         return item
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Return one sample, retrying alternate windows when necessary.
+        """Return one sample, retrying locally and then globally when necessary.
 
         Args:
             idx: Global window index into the prepared patient list.
@@ -1289,38 +1395,60 @@ class BaseDataset(Dataset, ABC):
 
         Raises:
             ValueError: If the dataset was not initialized or if repeated
-                rejection exceeds ``online_max_tries``.
+                rejection exhausts both retry phases.
         """
         if not self.initialized:
             raise ValueError(f"{self.__class__.__name__} is not initialized. Call initialize(...) before using __getitem__.")
-        cnt = 0
-        item = None
+
+        original_idx = idx
+        original_pidx = bisect.bisect_right(self.upper_bounds, original_idx)
+        original_file = self.edf_files[original_pidx]
+        total_attempts = max(1, 2 * self.online_max_tries)
         last_exception = None
-        while True:
+        none_returns = 0
+        last_file = original_file
+        last_idx = original_idx
+
+        for attempt in range(total_attempts):
             pidx = bisect.bisect_right(self.upper_bounds, idx)
             file = self.edf_files[pidx]
+            last_file = file
+            last_idx = idx
 
             new_idx = idx - self.lower_bounds[pidx] 
             if file.start_offsets is not None:
                 cur_date = file.start_date + self.stride * int(file.start_offsets[new_idx])
             else:
                 cur_date = file.start_date + self.stride * new_idx 
-            
+
+            item = None
+            attempt_exception = None
             try:
                 item = self.get_item(file, cur_date)
-            except Exception as e:
-                last_exception = e
-            finally:
-                if cnt > self.online_max_tries or item is not None:
-                    break
-                
-                cnt += 1
-                if self.online_retry_scope == "global":
-                    idx = int(np.random.choice(len(self)))
-                else:
-                    idx = int(np.random.randint(self.lower_bounds[pidx], self.upper_bounds[pidx]))
-        
-        if self.online_max_tries == 0 or cnt <= self.online_max_tries:
-            return item
-        else:
-            raise ValueError(f"Tried to get a clean item for {self.online_max_tries} tries in {self.__class__.__name__ } with no success. Last patient was {file.path}. Exception was {last_exception}") # TODO add stacktrace for better reporting
+            except Exception as exception:
+                attempt_exception = exception
+                last_exception = exception
+
+            if item is not None:
+                return item
+
+            if attempt_exception is None:
+                none_returns += 1
+
+            if attempt == total_attempts - 1:
+                break
+            if attempt < self.online_max_tries - 1:
+                idx = int(np.random.randint(self.lower_bounds[original_pidx], self.upper_bounds[original_pidx]))
+            else:
+                if attempt == self.online_max_tries - 1:
+                    logger.warning(f"Exhausted {self.online_max_tries} patient-local attempts for index {original_idx} from patient {original_file.path}; switching to global attempts.")
+                idx = int(np.random.choice(len(self)))
+
+        message = (
+            f"Failed to get a clean item in {self.__class__.__name__} after {self.online_max_tries} patient-local attempts and {self.online_max_tries} global attempts. "
+            f"Original index was {original_idx} from patient {original_file.path}; last index was {last_idx} from patient {last_file.path}. "
+            f"get_item returned None {none_returns} times. Last exception was {last_exception}."
+        )
+        if last_exception is not None:
+            raise ValueError(message) from last_exception
+        raise ValueError(message)

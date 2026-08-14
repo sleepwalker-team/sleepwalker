@@ -1,28 +1,13 @@
-"""U-Time style architectures used by the repository's event-detection scripts.
+"""Configurable U-Time style models for classification and sequence output."""
 
-This module contains an explicitly non-final PyTorch port of U-Time-inspired
-models. The implementation is used by several current ``train_*.py`` scripts
-for tasks such as arousal, desaturation, limb-movement, and body-position
-prediction. The file also defines local normalization and convolution blocks
-used only by this architecture family.
-
-Notes:
-    The original source already notes that this is an approximate port with
-    several deviations from the cited implementations. The docstrings below
-    therefore describe repository behavior, not paper equivalence.
-"""
-
-import random
-from typing import Iterable, Optional
-import numpy as np
+import math
+from typing import Optional
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sleepwalker.utils import logger
-
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 
 class ChannelWiseNormalization(nn.Module):
     """Normalize each channel independently across the time axis."""
@@ -203,7 +188,7 @@ class Decoder(nn.Module):
         
         return x
 
-class UTime(BaseModel):
+class UTime(BaseModel, EmbeddingModel, ClassifierModel):
     """Build a configurable U-Time style model.
 
     This implementation supports both pooled classification and per-epoch
@@ -214,8 +199,8 @@ class UTime(BaseModel):
     Args:
         ts_len: Expected input length in samples.
         n_channels: Number of input channels in each window.
-        sampling_frequency: Sampling interval or frequency value accepted by
-            ``pandas.to_timedelta`` in current callers.
+        sampling_frequency: Sampling interval such as ``"10ms"`` or a numeric
+            sampling frequency in Hz.
         classes: Optional class labels. When omitted, the model exposes
             features only.
         activation: Activation used inside convolution blocks.
@@ -228,7 +213,10 @@ class UTime(BaseModel):
         kernel: Kernel size per level or a scalar repeated across levels.
         mlp_size: Output feature size for pooled classification mode.
         conv: Convolution implementation variant.
-        epoch_len: Optional epoch size for sequence-style outputs.
+        epoch_len: Duration pooled into each sequence output. This is the
+            per-step prediction resolution, not the input-window duration or
+            complete labelled target span. Sequence mode covers
+            ``sequence_len * epoch_len`` centered within the decoded input.
     """
     def __init__(self, 
         ts_len, 
@@ -245,15 +233,32 @@ class UTime(BaseModel):
         mlp_size = 32, 
         conv = "regular", 
         epoch_len = None,
-        preprocessors: Optional[Iterable] = None
+        preprocessors: Optional[list[nn.Module]] = None,
+        sequence_len: int = 1,
         ):
-        super(UTime, self).__init__(preprocessors)
+        super().__init__(preprocessors=preprocessors)
 
         self.classes = list(classes) if classes is not None else None
         self.ts_len = ts_len
         self.n_channels = n_channels
-        self.fs = pd.to_timedelta(sampling_frequency)
+        self.fs = pd.to_timedelta(1.0 / float(sampling_frequency), unit="s") if isinstance(sampling_frequency, (int, float)) else pd.to_timedelta(sampling_frequency)
         self.mlp_size = mlp_size
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
+        if activation not in {"relu", "elu"}:
+            raise ValueError(f"Unknown activation: {activation}")
+        if norm not in {"batch", "channel", "layer", None}:
+            raise ValueError(f"Unknown normalization mode: {norm}")
+        if conv not in {"regular", "depthwise", "depthwise-first"}:
+            raise ValueError(f"Unknown convolution mode: {conv}")
+
+        if isinstance(channel, list):
+            if n_layers is not None and n_layers != len(channel):
+                raise ValueError(f"n_layers={n_layers} does not match the {len(channel)} configured channel levels.")
+            n_layers = len(channel)
+        elif n_layers is None:
+            n_layers = 4
 
         if isinstance(maxpool, int):
             maxpool = [maxpool for _ in range(n_layers)]
@@ -264,15 +269,19 @@ class UTime(BaseModel):
         if not isinstance(channel, list) and n_layers is not None:
             channel = [channel * 2 ** i for i in range(n_layers)]
 
-        if len(kernel) != len(maxpool):
-           raise ValueError(f"Number of kernels and number of maxpool operations must be the same! {len(kernel)} !=  {len(maxpool)} (kernel_size != maxpool)") 
+        if len(kernel) != len(maxpool) or len(kernel) != len(channel):
+            raise ValueError(f"UTime requires one kernel and pooling factor per channel level, got channels={len(channel)}, kernels={len(kernel)}, pools={len(maxpool)}.")
 
         channel = [self.n_channels] + channel
 
         self.epoch_len_str = epoch_len
         if self.epoch_len_str is not None:
-            self.epoch_len_s = pd.Timedelta(epoch_len).total_seconds()
-            self.samples_per_epoch = int(self.epoch_len_s / self.fs.total_seconds())
+            self.epoch_len_s = pd.to_timedelta(epoch_len).total_seconds()
+            samples_per_epoch = self.epoch_len_s / self.fs.total_seconds()
+            rounded_samples = round(samples_per_epoch)
+            if samples_per_epoch <= 0 or not math.isclose(samples_per_epoch, rounded_samples, rel_tol=0, abs_tol=1e-6):
+                raise ValueError(f"epoch_len={epoch_len} does not contain an integer number of samples at interval {self.fs}.")
+            self.samples_per_epoch = int(rounded_samples)
             self.avg_pool = nn.AvgPool1d(kernel_size=self.samples_per_epoch, stride=self.samples_per_epoch)
         else:
             self.epoch_len_s = None
@@ -285,23 +294,20 @@ class UTime(BaseModel):
 
         if self.epoch_len_s is None:
             if self.classes is not None:
-                self.fc = nn.Linear(mlp_size, len(self.classes))
+                self.fc = nn.Linear(mlp_size, self.sequence_len * len(self.classes))
             else:
                 self.fc = None
             self.final_conv = nn.Conv1d(channel[0], mlp_size, kernel_size=1)
             self._feature_dim = mlp_size
         else:
-            if self.classes is not None:
-                self.final_conv = nn.Conv1d(channel[0], len(self.classes), kernel_size=1)
-            else:
-                self.final_conv = nn.Conv1d(channel[0], mlp_size, kernel_size=1)
-            if self.ts_len is not None and self.samples_per_epoch is not None and self.ts_len % self.samples_per_epoch == 0:
-                feature_channels = len(self.classes) if self.classes is not None else mlp_size
-                self._feature_dim = (self.ts_len // self.samples_per_epoch) * feature_channels
-            else:
-                raise ValueError("UTime requires ts_len aligned with samples_per_epoch to expose feature_dim().")
+            self.final_conv = nn.Conv1d(channel[0], mlp_size, kernel_size=1)
+            self.fc = nn.Linear(mlp_size, len(self.classes)) if self.classes is not None else None
+            output_samples = self.sequence_len * self.samples_per_epoch
+            if self.ts_len is not None and output_samples > self.ts_len:
+                raise ValueError(f"sequence_len={self.sequence_len} and epoch_len={epoch_len} require {output_samples} samples, but ts_len={self.ts_len}.")
+            self._feature_dim = self.sequence_len * mlp_size
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Compute pooled or sequence-aligned features from raw windows.
 
         Args:
@@ -309,38 +315,37 @@ class UTime(BaseModel):
 
         Returns:
             A pooled feature tensor for classification mode or a flattened
-            sequence representation when ``epoch_len`` is configured.
+            sequence representation when ``epoch_len`` is configured. In
+            sequence mode, each output averages one ``epoch_len`` interval and
+            the complete output span is centered in the input context.
 
         Raises:
             ValueError: If the time axis cannot be segmented into epochs.
         """
         B, T, D = x.shape
-        if self.samples_per_epoch is not None:
-            if T % self.samples_per_epoch != 0:
-                raise ValueError(f"Input time axis T={T} is not divisible by samples_per_epoch={self.samples_per_epoch}. Ensure input length matches the expected epoch segmentation.")
-            N = T // self.samples_per_epoch
-            x = x.view(B, N, self.samples_per_epoch, D).permute(0,1,3,2).reshape(B*N, D, self.samples_per_epoch)
-        else:
-            x = x.swapaxes(1,2)
-        #     T = x.shape[-1]
+        if D != self.n_channels:
+            raise ValueError(f"Expected {self.n_channels} input channels, got {D}.")
+        x = x.swapaxes(1, 2)
 
         x, connections = self.encoder(x)
         bottleneck_embeddings = self.bottleneck(x)
         x = self.decoder(bottleneck_embeddings, connections)
-        #decoded = x[:,:self.n_features,:T].swapaxes(1,2)
         x = self.final_conv(x)
 
-        feature_embeddings = x
-
         if self.samples_per_epoch is not None:
+            output_samples = self.sequence_len * self.samples_per_epoch
+            if output_samples > x.shape[-1]:
+                raise ValueError(f"UTime needs {output_samples} decoded samples for sequence output, but produced {x.shape[-1]}.")
+            start = (x.shape[-1] - output_samples) // 2
+            x = x[..., start:start + output_samples]
             x = self.avg_pool(x)
-            x = x.squeeze(-1).view(B, N * len(self.classes))
+            x = x.transpose(1, 2).reshape(B, -1)
         else:
             x = x.mean(dim=2)
         return x
 
     def feature_dim(self) -> int:
-        """Return the feature size exposed by :meth:`_features`."""
+        """Return the feature size exposed by :meth:`encode`."""
         return self._feature_dim
 
     def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
@@ -350,27 +355,29 @@ class UTime(BaseModel):
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Project features into class logits.
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode preprocessed inputs and project them into class logits.
 
         Args:
-            x: Feature tensor returned by :meth:`_features`.
+            x: Preprocessed model input.
 
         Returns:
-            Class logits shaped either ``[batch, classes]`` or
-            ``[batch, steps, classes]`` depending on the configured output
-            mode.
+            Class logits shaped ``[batch, sequence_len, classes]``.
 
         Raises:
             ValueError: If the model was created without classes or if flattened
                 sequence features do not align with the class dimension.
         """
+        x = self.encode(x)
         if self.classes is None:
-            raise ValueError("UTime.classifier() requires classes to be set.")
+            raise ValueError("UTime classification requires classes to be set.")
         if self.samples_per_epoch is not None:
-            if x.shape[-1] % len(self.classes) != 0:
-                raise ValueError("Flattened UTime sequence features do not align with the class dimension.")
-            return x.view(x.shape[0], x.shape[-1] // len(self.classes), len(self.classes))
+            expected = self.sequence_len * self.mlp_size
+            if x.shape[-1] != expected:
+                raise ValueError(f"Expected {expected} flattened UTime features, got {x.shape[-1]}.")
+            if self.fc is None:
+                raise ValueError("UTime classification requires classes to be set.")
+            return self.fc(x.view(x.shape[0], self.sequence_len, self.mlp_size))
         if self.fc is None:
-            raise ValueError("UTime.classifier() requires classes to be set.")
-        return self.fc(x)
+            raise ValueError("UTime classification requires classes to be set.")
+        return self.fc(x).view(x.shape[0], self.sequence_len, len(self.classes))

@@ -57,7 +57,6 @@ def filter_patients_by_sleep_time(
 
 
 def trim_event(
-    data_df: Optional[pd.DataFrame],
     label_df: Optional[pd.DataFrame],
     label_extra_df: Optional[pd.DataFrame],
     keep_events: Sequence[str] | None = None,
@@ -68,7 +67,6 @@ def trim_event(
     to the last row whose label is in `keep_events`.
 
     Args:
-        data_df: Currently unused; kept for compatibility.
         label_df: Primary event table.
         label_extra_df: Optional secondary event table clipped to the retained interval.
         keep_events: Labels that define the retained region. When omitted, the

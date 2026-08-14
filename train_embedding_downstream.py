@@ -73,14 +73,10 @@ def prepare_multiclass_sample(data, target, task_config, **item):
         new_item[f'data_{modality_name}'] = torch.from_numpy(modality_df.values).float()
 
     # Build all different target annotations
-    t = MultiLabelTrainer.build_multitask_target(target, task_config)
-    for task_name, cfg, labels in zip(task_config.keys(), task_config.values(), t):
-        labels = labels[:cfg['n_steps']]
-        # Take middle slice
-        middle = len(labels) // 2
-        _target = torch.zeros((len(cfg['labels'])))
-        _target[int(labels[middle])] = 1
-        new_item[f'target_{task_name}'] = _target.float()
+    targets, _ = MultiLabelTrainer.build_multitask_target(target, task_config)
+    for task_idx, (task_name, cfg) in enumerate(task_config.items()):
+        task_targets = targets[task_idx, :cfg['n_steps'], :len(cfg['labels'])]
+        new_item[f'target_{task_name}'] = task_targets[len(task_targets) // 2]
 
     return new_item
 
@@ -90,6 +86,7 @@ task_config = {
         'default': 'regular',
         'percentage': 0.5,
         'target_resolution': '10s',
+        'sequence_len': 3,
         'embeddings': ['RIP', 'SPO2'],
         'n_slices': 50,
         'class_weights': {0: 4, 1: 4, 2: 1},
@@ -101,6 +98,7 @@ task_config = {
         'default': 'no lm',
         'percentage': 0.5,
         'target_resolution': '1s',
+        'sequence_len': 30,
         'embeddings': ['LEG-EMG'],
         'class_weights': {0: 10, 1: 1},
         'n_slices': 10,
@@ -131,6 +129,7 @@ task_config = {
         'default': None,
         'percentage': 0.5,
         'target_resolution': '30s',
+        'sequence_len': 1,
         'embeddings': ['EEG', 'EOG'],
         'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
@@ -322,9 +321,8 @@ class AttentionClassifierTrainer:
         emb = {}
         for m in self.modalities:
             _x = batch[f'data_{m}'].to(self.device)
-            _x = self.base_model.apply_preprocessors(
-                _x, m, len(self.base_model.preprocessors) + 1)
-            emb[m] = self.base_model._features(_x, m)
+            _x = self.base_model.apply_preprocessors(_x, m)
+            emb[m] = self.base_model.encode(_x, m)
         return emb, batch['patient']
 
     def _assemble(self, emb):

@@ -1,11 +1,7 @@
-from .package import (
-    Expert,
-    load_expert_package,
-    save_expert_package,
-)
+from .package import PackagedModel, load_packaged_model, save_packaged_model
 
 __all__ = [
-    "Expert",
-    "load_expert_package",
-    "save_expert_package",
+    "PackagedModel",
+    "load_packaged_model",
+    "save_packaged_model",
 ]

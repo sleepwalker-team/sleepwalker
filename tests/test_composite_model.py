@@ -1,12 +1,11 @@
 import torch
 from torch.utils.data import DataLoader
 
-from sleepwalker.models.Basemodel import BaseModel
-from sleepwalker.models.MultiModel import MultiModel
-from sleepwalker.models.MetaModel import MetaModel, MetaModelEntry
+from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
+from sleepwalker.models.CompositeModel import CompositeModel, CompositeModelEntry
 
 
-class DummyEmbeddingModel(BaseModel):
+class DummyEmbeddingModel(BaseModel, EmbeddingModel):
     def __init__(self, n_channels, feature_dim):
         super().__init__()
         self.n_channels = n_channels
@@ -14,15 +13,15 @@ class DummyEmbeddingModel(BaseModel):
         self.proj = torch.nn.Linear(n_channels, feature_dim, bias=False)
         self.last_input = None
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         self.last_input = x.detach().clone()
         return self.proj(x.mean(dim=1))
 
     def feature_dim(self) -> int:
         return self._feature_dim
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encode(x)
 
     def input_spec(self):
         return (1, 2, self.n_channels), {"layout": "BTC", "ts_len": 2, "n_channels": self.n_channels}
@@ -45,19 +44,19 @@ class AddConstant(torch.nn.Module):
         return x + self.value
 
 
-def test_metamodel_slices_channels_fuses_embeddings_and_applies_task_heads():
+def test_composite_model_slices_channels_fuses_embeddings_and_applies_task_heads():
     m1 = DummyEmbeddingModel(2, 2)
     m2 = DummyEmbeddingModel(1, 1)
 
-    model = MetaModel(
+    model = CompositeModel(
         task_config={
-            "sleep staging": {"task": "sleep staging", "labels": ["c1", "c2", "c3"], "n_steps": 1, "target_resolution": "30s"},
-            "breathing": {"task": "breathing", "labels": ["b1", "b2"], "n_steps": 3, "target_resolution": "10s"},
+            "sleep staging": {"task": "sleep staging", "labels": ["c1", "c2", "c3"], "sequence_len": 1, "target_resolution": "30s"},
+            "breathing": {"task": "breathing", "labels": ["b1", "b2"], "sequence_len": 3, "target_resolution": "10s"},
         },
         input_channels=["a", "b", "c"],
         models=[
-            MetaModelEntry(m1, ["a", "c"]),
-            MetaModelEntry(m2, ["b"]),
+            CompositeModelEntry(m1, ["a", "c"]),
+            CompositeModelEntry(m2, ["b"]),
         ],
     )
 
@@ -73,16 +72,16 @@ def test_metamodel_slices_channels_fuses_embeddings_and_applies_task_heads():
     assert torch.equal(m2.last_input, x[:, :, [1]])
 
 
-def test_multimodel_slices_channels_fuses_embeddings_and_applies_single_head():
+def test_composite_model_applies_single_head():
     m1 = DummyEmbeddingModel(2, 2)
     m2 = DummyEmbeddingModel(1, 1)
 
-    model = MultiModel(
+    model = CompositeModel(
         classes=["c1", "c2", "c3"],
         input_channels=["a", "b", "c"],
         models=[
-            MetaModelEntry(m1, ["a", "c"]),
-            MetaModelEntry(m2, ["b"]),
+            CompositeModelEntry(m1, ["a", "c"]),
+            CompositeModelEntry(m2, ["b"]),
         ],
     )
 
@@ -91,24 +90,24 @@ def test_multimodel_slices_channels_fuses_embeddings_and_applies_single_head():
     )
     y = model(x)
 
-    assert y.shape == (1, 3)
+    assert y.shape == (1, 1, 3)
     assert torch.equal(m1.last_input, x[:, :, [0, 2]])
     assert torch.equal(m2.last_input, x[:, :, [1]])
 
 
-def test_metamodel_applies_and_warms_nested_preprocessors():
-    meta_pre = AddConstant(1.0, warmup=True)
+def test_composite_model_applies_and_warms_nested_preprocessors():
+    composite_pre = AddConstant(1.0, warmup=True)
     sub_pre = AddConstant(2.0, warmup=True)
     m1 = DummyEmbeddingModel(1, 1)
     m1.preprocessors.append(sub_pre)
 
-    model = MetaModel(
+    model = CompositeModel(
         task_config={
-            "sleep staging": {"task": "sleep staging", "labels": ["c1"], "n_steps": 1, "target_resolution": "30s"},
+            "sleep staging": {"task": "sleep staging", "labels": ["c1"], "sequence_len": 1, "target_resolution": "30s"},
         },
         input_channels=["a"],
-        models=[MetaModelEntry(m1, ["a"])],
-        preprocessors=[meta_pre],
+        models=[CompositeModelEntry(m1, ["a"])],
+        preprocessors=[composite_pre],
     )
 
     x = torch.zeros(1, 2, 1)
@@ -117,7 +116,7 @@ def test_metamodel_applies_and_warms_nested_preprocessors():
     assert torch.equal(m1.last_input, torch.full((1, 2, 1), 3.0))
 
     loader = DataLoader([{"data": x[0], "target": torch.zeros(1, 1, dtype=torch.long)}], batch_size=1)
-    model._warmup_preprocessors(loader, device="cpu")
+    model.warmup_preprocessor(loader, device="cpu")
 
-    assert meta_pre.update_calls == 1
+    assert composite_pre.update_calls == 1
     assert sub_pre.update_calls == 1

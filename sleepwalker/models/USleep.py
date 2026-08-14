@@ -1,220 +1,181 @@
+"""U-Sleep architecture with continuous encoder/decoder sequence processing."""
+
+import math
+
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 from sleepwalker.models.preprocessors.RobustScaler import RobustScaler
-from sleepwalker.utils import logger
 
-class ConvBlock(nn.Module):
-    """Two-layer convolutional block used in the U-shaped encoder/decoder."""
-    def __init__(self, in_channels, out_channels, kernel_size, activation, dilation, padding):
-        super().__init__()
 
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding, dilation=dilation)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=padding, dilation=dilation)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        if isinstance(activation, tuple):
-            self.a1 = nn.ELU() if activation[0] == 'elu' else nn.Tanh() if activation[0] == "tanh" else nn.ReLU()
-            self.a2 = nn.ELU() if activation[1] == 'elu' else nn.Tanh() if activation[1] == "tanh" else nn.ReLU()
-        else:
-            self.a1 = nn.ELU() if activation == 'elu' else nn.Tanh() if activation == "tanh" else nn.ReLU()
-            self.a2 = nn.ELU() if activation == 'elu' else nn.Tanh() if activation == "tanh" else nn.ReLU()
+class USleep(BaseModel, EmbeddingModel, ClassifierModel):
+    """Implement the published U-Sleep encoder, decoder, and sequence head.
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.a1(x)
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.a2(x)
-        return x
-
-class USleep(BaseModel):
+    The complete input window is processed continuously. The dense temporal
+    representation is center-aligned to ``sequence_len`` epochs, average
+    pooled per epoch, and mapped to logits shaped ``[B, S, C]``.
     """
-    U-Time: A Fully Convolutional Network for Time Series Segmentation Applied to Sleep Staging by Perslev et al. in NeurIPs, 2019
-    Code: https://github.com/perslev/U-Time
 
-    Model size: 1.2 Mio (paper) vs. 1.8 Mio parameters (this config)
-
-    Expected performance (sleep-edf-39 / sleep-edf-153) in the paper:
-    - Accuracy:     -
-    - Macro F1:     0.79 / 0.76
-    - Cohens Kappa: -
-
-    Summary of differences to the paper:
-      - Resampling: We use nearest neighbor resampling, whereas the paper uses scipy.signal.resample_poly
-      - RobustScaler: We use an online implementation of RobustScaler, whereas the paper uses sklearn.preprocessing.RobustScaler
-      - (IMPORTANT) This UTime/Usleep architecture does _not_ fully match the original paper! This implementation is more general and allows for a very flexible configuration of the structure of the network. Arguably, this has nothing to do with the original model anymore. 
-    """
-    def __init__(self, 
+    def __init__(
+        self,
         *,
-        ts_len, 
+        ts_len,
         n_channels,
         classes=None,
         sampling_frequency,
-        depth=4,
-        init_filters=16,
-        kernel_size=5,
+        depth=12,
+        init_filters=5,
+        kernel_size=9,
         dilation=1,
         epoch_len="30s",
-        output_strategy='mean', 
-        activation="relu",
-        ):
-        """Construct the current USleep variant used in this repository.
-
-        Args:
-            ts_len: Input sequence length in samples.
-            n_channels: Number of input channels.
-            classes: Optional output class names.
-            sampling_frequency: Sampling frequency in Hz.
-            depth: Encoder/decoder depth. Current code caps this at 4.
-            init_filters: Initial number of convolutional filters.
-            kernel_size: Convolution kernel size.
-            dilation: Convolution dilation.
-            epoch_len: Epoch duration used for temporal segmentation.
-            output_strategy: Temporal reduction mode.
-            activation: Activation function name.
-        """
+        activation="elu",
+        dense_classifier_activation="tanh",
+        transition_window=1,
+        complexity_factor=2,
+        sequence_len=1,
+    ):
         super().__init__(preprocessors=[RobustScaler()])
 
         self.classes = list(classes) if classes is not None else None
-        self.ts_len = ts_len
-        self.n_channels = n_channels
-        self.sampling_frequency = sampling_frequency
+        self.ts_len = int(ts_len)
+        self.n_channels = int(n_channels)
+        self.sampling_frequency = float(sampling_frequency)
+        self.depth = int(depth)
+        self.sequence_len = int(sequence_len)
+        if self.depth < 1:
+            raise ValueError("depth must be at least 1.")
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
+        if kernel_size % 2 == 0:
+            raise ValueError("USleep requires an odd kernel_size for same padding.")
+        if activation not in {"elu", "relu", "tanh"}:
+            raise ValueError(f"Unknown activation: {activation}")
+        if dense_classifier_activation not in {"elu", "relu", "tanh"}:
+            raise ValueError(f"Unknown dense classifier activation: {dense_classifier_activation}")
+        if complexity_factor <= 0:
+            raise ValueError("complexity_factor must be positive.")
 
-        if depth >= 5:
-            depth = 4
-            logger.warning("Depth >= 5 is not supported by the original U-Time configuration. Restricting to depth = 4.")
-
-        self.output_strategy = output_strategy
+        self.activation_name = activation
+        self.dense_activation_name = dense_classifier_activation
         self.epoch_len_str = epoch_len
+        self.epoch_len_s = pd.to_timedelta(epoch_len).total_seconds()
+        samples_per_epoch = self.epoch_len_s * self.sampling_frequency
+        rounded_samples = round(samples_per_epoch)
+        if samples_per_epoch <= 0 or not math.isclose(samples_per_epoch, rounded_samples, rel_tol=0, abs_tol=1e-6):
+            raise ValueError(f"epoch_len={epoch_len} does not contain an integer number of samples at {sampling_frequency} Hz.")
+        self.samples_per_epoch = int(rounded_samples)
+        output_samples = self.sequence_len * self.samples_per_epoch
+        if output_samples > self.ts_len:
+            raise ValueError(f"sequence_len={self.sequence_len} and epoch_len={epoch_len} require {output_samples} samples, but ts_len={self.ts_len}.")
 
-        self.epoch_len_s = pd.Timedelta(epoch_len).total_seconds()
-        if self.epoch_len_s <= 0:
-            raise ValueError("Epoch length must be positive.")
+        channel_factor = math.sqrt(float(complexity_factor))
+        base_filters = int(init_filters)
+        in_channels = self.n_channels
+        self.encoder_convs = nn.ModuleList()
+        self.encoder_norms = nn.ModuleList()
+        encoder_channels = []
+        for _ in range(self.depth):
+            out_channels = int(base_filters * channel_factor)
+            self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size // 2, dilation=dilation))
+            self.encoder_norms.append(nn.BatchNorm1d(out_channels))
+            encoder_channels.append(out_channels)
+            in_channels = out_channels
+            base_filters = int(base_filters * math.sqrt(2))
 
-        self.samples_per_epoch = int(self.epoch_len_s * self.sampling_frequency)
-        if self.samples_per_epoch <= 0:
-            raise ValueError(f"Epoch length '{epoch_len}' and sampling rate '{self.sampling_rate}' result in non-positive number of samples per epoch.")
+        bottom_channels = int(base_filters * channel_factor)
+        self.bottom_conv = nn.Conv1d(in_channels, bottom_channels, kernel_size, padding=kernel_size // 2)
+        self.bottom_norm = nn.BatchNorm1d(bottom_channels)
 
-        self.depth = depth
-        self.pools = [10, 8, 6, 4][:depth]
-        self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
-        self.residuals = []
+        self.upsample_convs = nn.ModuleList()
+        self.upsample_norms = nn.ModuleList()
+        self.decoder_convs = nn.ModuleList()
+        self.decoder_norms = nn.ModuleList()
+        in_channels = bottom_channels
+        for residual_channels in reversed(encoder_channels):
+            base_filters = int(math.ceil(base_filters / math.sqrt(2)))
+            out_channels = int(base_filters * channel_factor)
+            self.upsample_convs.append(nn.Conv1d(in_channels, out_channels, 2, padding="same"))
+            self.upsample_norms.append(nn.BatchNorm1d(out_channels))
+            self.decoder_convs.append(nn.Conv1d(out_channels + residual_channels, out_channels, kernel_size, padding=kernel_size // 2))
+            self.decoder_norms.append(nn.BatchNorm1d(out_channels))
+            in_channels = out_channels
 
-        in_ch = self.n_channels
-        filters = init_filters
-        self.encoder_channels = []
-
-        for d in range(depth):
-            self.encoder.append(ConvBlock(in_ch, filters, kernel_size, activation, dilation, padding=kernel_size//2))
-            self.encoder_channels.append(filters)
-            in_ch = filters
-            filters *= 2
-
-        self.bottom_channels = filters
-        self.bottom = ConvBlock(in_ch, self.bottom_channels, kernel_size, activation, 1, padding=kernel_size//2)
-
-        for i, ch in enumerate(reversed(self.encoder_channels)):
-            if i == self.depth - 1:
-                self.decoder.append(ConvBlock(in_channels=self.bottom_channels + ch, out_channels=ch,
-                                    kernel_size=kernel_size, activation=(activation, "tanh"),
-                                    dilation=1, padding=kernel_size//2))
-            else:
-                self.decoder.append(ConvBlock(in_channels=self.bottom_channels + ch, out_channels=ch,
-                                    kernel_size=kernel_size, activation=activation,
-                                    dilation=1, padding=kernel_size//2))
-            self.bottom_channels = ch
-
-        feature_channels = len(self.classes) if self.classes is not None else self.bottom_channels
-        self.final_conv = nn.Conv1d(self.bottom_channels, feature_channels, kernel_size=1)
-        self.avg_pool = nn.AvgPool1d(kernel_size=self.samples_per_epoch, stride=self.samples_per_epoch)
-        self.act = nn.ELU() if activation == 'elu' else nn.Tanh() if activation == "tanh" else nn.ReLU()
-        self._feature_dim = (self.ts_len // self.samples_per_epoch) * feature_channels if self.output_strategy == "flatten" else feature_channels
-        if self.classes is not None and self.output_strategy == "flatten":
-            N = self.ts_len // self.samples_per_epoch
-            self.fc = nn.Linear(N*len(self.classes), len(self.classes))
+        dense_base_channels = len(self.classes) if self.classes is not None else in_channels
+        self.dense_channels = max(1, int(dense_base_channels * channel_factor))
+        self.dense_conv = nn.Conv1d(in_channels, self.dense_channels, 1)
+        self._feature_dim = self.sequence_len * self.dense_channels
+        if self.classes is not None:
+            self.sequence_conv1 = nn.Conv1d(self.dense_channels, len(self.classes), transition_window, padding="same")
+            self.sequence_conv2 = nn.Conv1d(len(self.classes), len(self.classes), transition_window, padding="same")
         else:
-            self.fc = None
+            self.sequence_conv1 = None
+            self.sequence_conv2 = None
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor: 
-        """Compute USleep features from one input batch."""
-        B, T, D = x.shape
-        if T % self.samples_per_epoch != 0:
-            raise ValueError(f"Input time axis T={T} is not divisible by samples_per_epoch={self.samples_per_epoch}. Ensure input length matches the expected epoch segmentation.")
+    def activate(self, x, activation_name):
+        if activation_name == "elu":
+            return F.elu(x)
+        if activation_name == "tanh":
+            return torch.tanh(x)
+        return F.relu(x)
 
-        N = T // self.samples_per_epoch
-
-        x = x.view(B, N, self.samples_per_epoch, D).permute(0,1,3,2).reshape(B*N, D, self.samples_per_epoch)
-        self.residuals = []
-
-        # Encoder
-        for enc, p in zip(self.encoder, self.pools):
-            x = enc(x)
-            self.residuals.append(x)
-            x = F.max_pool1d(x, kernel_size=p)
-
-        # Bottom
-        x = self.bottom(x)
-
-        # Decoder
-        for dec, res, p in zip(self.decoder, reversed(self.residuals), reversed(self.pools)):
-            x = F.interpolate(x, scale_factor=p, mode='nearest')
-            if x.shape[-1] != res.shape[-1]:
-                diff = res.shape[-1] - x.shape[-1]
-                x = F.pad(x, (0, diff))
-            x = torch.cat([res, x], dim=1)
-            x = dec(x)
-
-        # Final classifier
-        x = self.final_conv(x)
-        x = self.avg_pool(x)
-        x = x.squeeze(-1).view(B, N, self.final_conv.out_channels)
-
-        if self.output_strategy == 'mean':
-            x = x.mean(dim=1) 
-        elif self.output_strategy == 'center':
-            x = x[:, x.shape[1] // 2, :]
-        elif self.output_strategy == 'last':
-            x = x[:, -1, :]
-        elif self.output_strategy == 'flatten':
-            x = x.view(B, -1)
-        elif self.output_strategy == "sequence":
-            x = x.reshape(B*N, -1)
-        else:
-            raise ValueError(f"Unknown temporal reduction mode: {self.output_strategy}")
-
+    def match_residual(self, x, residual):
+        """Center-crop or pad decoder features to a residual connection."""
+        difference = x.shape[-1] - residual.shape[-1]
+        if difference > 0:
+            start = difference // 2 + difference % 2
+            return x[..., start:start + residual.shape[-1]]
+        if difference < 0:
+            missing = -difference
+            return F.pad(x, (missing // 2, missing // 2 + missing % 2))
         return x
 
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3 or x.shape[-1] != self.n_channels:
+            raise ValueError(f"Expected input shaped [B, T, {self.n_channels}], got {tuple(x.shape)}.")
+        x = x.transpose(1, 2)
+        residuals = []
+        for conv, norm in zip(self.encoder_convs, self.encoder_norms):
+            x = norm(self.activate(conv(x), self.activation_name))
+            x = F.pad(x, (x.shape[-1] % 2, 0))
+            residuals.append(x)
+            x = F.max_pool1d(x, 2)
+
+        x = self.bottom_norm(self.activate(self.bottom_conv(x), self.activation_name))
+        for up_conv, up_norm, decoder_conv, decoder_norm, residual in zip(self.upsample_convs, self.upsample_norms, self.decoder_convs, self.decoder_norms, reversed(residuals)):
+            x = F.interpolate(x, scale_factor=2, mode="nearest")
+            x = up_norm(self.activate(up_conv(x), self.activation_name))
+            x = self.match_residual(x, residual)
+            x = torch.cat([residual, x], dim=1)
+            x = decoder_norm(self.activate(decoder_conv(x), self.activation_name))
+
+        x = self.activate(self.dense_conv(x), self.dense_activation_name)
+        output_samples = self.sequence_len * self.samples_per_epoch
+        if output_samples > x.shape[-1]:
+            raise ValueError(f"USleep needs {output_samples} decoded samples for sequence output, but produced {x.shape[-1]}.")
+        start = (x.shape[-1] - output_samples) // 2
+        x = x[..., start:start + output_samples]
+        x = F.avg_pool1d(x, self.samples_per_epoch, self.samples_per_epoch)
+        return x.transpose(1, 2).reshape(x.shape[0], -1)
+
     def feature_dim(self) -> int:
-        """Return the dimensionality of the produced feature vector."""
         return self._feature_dim
 
     def input_spec(self) -> tuple[tuple[int, ...], dict[str, int | str]]:
-        """Describe the raw BTC input shape expected by ``forward``."""
         return (
             (1, self.ts_len, self.n_channels),
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Map features to class logits or sequence outputs."""
-        if self.classes is None:
-            raise ValueError("USleep.classifier() requires classes to be set.")
-        if self.output_strategy == "flatten":
-            if self.fc is None:
-                raise ValueError("USleep.classifier() requires classes to be set.")
-            return self.fc(x)
-        if self.output_strategy == "sequence":
-            if x.shape[-1] != len(self.classes):
-                raise ValueError("USleep sequence features do not align with the class dimension.")
-            return x
-        if x.shape[-1] != len(self.classes):
-            raise ValueError("USleep features do not align with the class dimension.")
-        return x
-        
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.encode(x)
+        if self.classes is None or self.sequence_conv1 is None or self.sequence_conv2 is None:
+            raise ValueError("USleep classification requires classes to be set.")
+        expected = self.sequence_len * self.dense_channels
+        if x.ndim != 2 or x.shape[-1] != expected:
+            raise ValueError(f"Expected USleep features shaped [B, {expected}], got {tuple(x.shape)}.")
+        x = x.view(x.shape[0], self.sequence_len, self.dense_channels).transpose(1, 2)
+        x = self.activate(self.sequence_conv1(x), self.activation_name)
+        return self.sequence_conv2(x).transpose(1, 2)

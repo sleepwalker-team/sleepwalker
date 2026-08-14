@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
+from collections import Counter
+import multiprocessing
 from pathlib import Path
 from typing import Sequence
 
+import pandas as pd
+
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.datasets.Basedataset import BaseDataset
-from sleepwalker.datasets.HSP import (
-    get_annotated_hsp_edf_files,
-    get_hsp_annotation_label_counts,
-    get_hsp_annotation_path,
-)
-from sleepwalker.datasets.utils import get_edf_files_in_repo
-from sleepwalker.trainer.utils.filtering import filter_patients_by_sleep_time
+from sleepwalker.utils import logger
 
 
 PAP_CHANNEL_PATTERNS = (
@@ -34,115 +32,70 @@ PAP_CHANNEL_PATTERNS = (
     "AchievedAlveolar",
 )
 
-SLEEP_STAGING_LABELS = ("n1", "n2", "n3", "rem")
+def edf_filter_result(
+    item: tuple[
+        str,
+        tuple[tuple[str, ...], ...],
+        float | None,
+        tuple[str, ...],
+    ],
+) -> tuple[str, str]:
+    """Check one EDF header and return its path plus a rejection reason."""
+    edf_path, required_channel_groups, min_duration_s, excluded_channels = item
+    if required_channel_groups or min_duration_s is not None or excluded_channels:
+        try:
+            metadata = read_edf_meta(edf_path)
+        except Exception:
+            return edf_path, "metadata_error"
+
+        if min_duration_s is not None and float(metadata["duration_s"]) < min_duration_s:
+            return edf_path, "too_short"
+        available_signals = set(metadata["signals"])
+
+        if any( not any(channel in available_signals for channel in alternatives) for alternatives in required_channel_groups ):
+            return edf_path, "missing_required_channel"
+        if any(channel in available_signals for channel in excluded_channels):
+            return edf_path, "excluded_channel"
+
+    return edf_path, "usable"
 
 
-def has_required_channels(
-    edf_path: str | Path,
-    dataset: BaseDataset,
-    *,
-    available_signals: Sequence[str] | None = None,
-) -> bool:
-    """Return whether every logical dataset channel has a physical EDF alternative."""
-    available = set(
-        available_signals
-        if available_signals is not None
-        else read_edf_meta(str(edf_path))["signals"]
-    )
-    return all(
-        any(name in available for name in channel.physical_names)
-        for channel in dataset.channels
-    )
-
-
-def is_pap_file(
-    edf_path: str | Path,
-    *,
-    pap_channel_patterns: Sequence[str] = PAP_CHANNEL_PATTERNS,
-    available_signals: Sequence[str] | None = None,
-) -> bool:
-    """Detect a PAP recording from the known Ruhrland PAP signal inventory."""
-    available = set(
-        available_signals
-        if available_signals is not None
-        else read_edf_meta(str(edf_path))["signals"]
-    )
-    return any(pattern in available for pattern in pap_channel_patterns)
-
-
-def select_edf_files(
-    root: str | Path,
+def filter_edf_files(
+    patients: Sequence[str | Path],
     *,
     dataset: BaseDataset,
-    recursive: bool = True,
     require_channels: bool = True,
-    include_pap: bool = True,
-    annotated_only: bool = False,
-    required_annotation_labels: Sequence[str] | None = None,
-    max_files: int | None = None,
+    min_duration: str | None = None,
+    excluded_channels: Sequence[str] | None = None,
+    num_workers: int = 1,
 ) -> list[str]:
-    """Select EDFs using common channel, PAP, and HSP-annotation criteria."""
-    if annotated_only:
-        files = get_annotated_hsp_edf_files(root, recursive=recursive)
+    """Filter EDF paths using only signal-header metadata.
+
+    By default, every configured logical dataset channel must have at least one
+    physical alternative in the EDF. ``min_duration`` accepts pandas duration
+    strings such as ``"30min"``. ``excluded_channels`` rejects files containing
+    any listed physical signal. Annotation contents are deliberately outside
+    this generic filter.
+    """
+
+    min_duration_s = None if min_duration is None else pd.Timedelta(min_duration).total_seconds()
+
+    patient_list = [str(path) for path in patients]
+    required_channel_groups = ( tuple(tuple(channel.physical_names) for channel in dataset.channels) if require_channels else () )
+    work = [(edf_path, required_channel_groups, None if min_duration_s is None else float(min_duration_s), tuple(excluded_channels or ())) for edf_path in patient_list]
+
+    worker_count = int(num_workers)
+    if worker_count > 1 and work:
+        with multiprocessing.Pool(worker_count) as pool:
+            results = list(pool.imap(edf_filter_result, work))
     else:
-        files = get_edf_files_in_repo(root, recursive=recursive)
+        results = [edf_filter_result(item) for item in work]
 
-    selected: list[str] = []
-    for edf_path in files:
-        available_signals = None
-        if require_channels or not include_pap:
-            available_signals = read_edf_meta(str(edf_path))["signals"]
-        if require_channels and not has_required_channels(
-            edf_path,
-            dataset,
-            available_signals=available_signals,
-        ):
-            continue
-        if not include_pap and is_pap_file(
-            edf_path,
-            available_signals=available_signals,
-        ):
-            continue
-        if required_annotation_labels:
-            annotation_path = get_hsp_annotation_path(edf_path)
-            if annotation_path is None:
-                continue
-            counts = get_hsp_annotation_label_counts(annotation_path)
-            if not any(int(counts.get(label, 0)) > 0 for label in required_annotation_labels):
-                continue
-        selected.append(str(edf_path))
-        if max_files is not None and len(selected) >= int(max_files):
-            break
-    return selected
-
-
-def select_sleep_staging_files(
-    root: str | Path,
-    *,
-    dataset: BaseDataset,
-    training: bool,
-    recursive: bool = True,
-    sleep_labels: Sequence[str] = SLEEP_STAGING_LABELS,
-    sleep_time_filter_quantile: float = 0.05,
-    num_workers: int = 8,
-    max_files: int | None = None,
-) -> list[str]:
-    """Select channel-compatible EDFs and filter training sleep-time outliers."""
-    selected = select_edf_files(
-        root,
-        dataset=dataset,
-        recursive=recursive,
-        require_channels=True,
-        max_files=max_files,
+    reasons = Counter(reason for _, reason in results)
+    selected = [edf_path for edf_path, reason in results if reason == "usable"]
+    excluded = { reason: count for reason, count in sorted(reasons.items()) if reason != "usable" }
+    logger.info(
+        f"Patient filter kept {len(selected)}/{len(patient_list)} EDF files; "
+        f"excluded by reason: {excluded or '{}'}"
     )
-    if training and float(sleep_time_filter_quantile) > 0:
-        selected = filter_patients_by_sleep_time(
-            selected,
-            dataset=dataset,
-            sleep_labels=sleep_labels,
-            quantile=float(sleep_time_filter_quantile),
-            num_workers=int(num_workers),
-            label=dataset.__class__.__name__,
-        )
     return selected
-

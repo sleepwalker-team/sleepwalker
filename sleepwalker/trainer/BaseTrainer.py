@@ -1,36 +1,58 @@
 """Shared trainer lifecycle for Sleepwalker experiments.
 
 This module provides the common mechanics used by concrete trainers: optional
-preprocessor warmup, repeated-window handling, prediction helpers, checkpoint
-creation, and the fit/test loop that higher-level scripts call through
+preprocessor warmup, checkpoint creation, and the fit/test loop that higher-level scripts call through
 ``sleepwalker.trainer.Run``.
 
 Concrete task logic lives in subclasses such as
 ``MulticlassTrainer`` and ``MultiLabelTrainer``.
 """
 
+import inspect
 import shutil
 import tempfile
 import os
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-
-from sleepwalker.datasets.utils import RepeatSampler
+from torch.optim.lr_scheduler import OneCycleLR, CyclicLR
+from sleepwalker.deployment import save_packaged_model
 from sleepwalker.utils import logger
+
+
+def build_lr_scheduler(lr_scheduler_fn, optimizer, epochs: int, steps_per_epoch: int):
+    """Build a scheduler once and supply missing training-length arguments."""
+    if lr_scheduler_fn is None:
+        return None, False
+    if steps_per_epoch < 1:
+        raise ValueError("Cannot build a learning-rate scheduler for an empty training loader.")
+
+    parameters = inspect.signature(lr_scheduler_fn).parameters
+    arguments = {}
+    total_steps = parameters.get("total_steps")
+    if total_steps is not None and total_steps.default in (None, inspect.Parameter.empty):
+        scheduler_epochs = parameters.get("epochs")
+        scheduler_steps = parameters.get("steps_per_epoch")
+        if scheduler_epochs is not None and scheduler_steps is not None:
+            if scheduler_epochs.default in (None, inspect.Parameter.empty):
+                arguments["epochs"] = epochs
+            if scheduler_steps.default in (None, inspect.Parameter.empty):
+                arguments["steps_per_epoch"] = steps_per_epoch
+        else:
+            arguments["total_steps"] = epochs * steps_per_epoch
+
+    scheduler = lr_scheduler_fn(optimizer, **arguments)
+    return scheduler, isinstance(scheduler, (OneCycleLR, CyclicLR))
 
 
 class BaseTrainer(ABC):
     """Abstract base class for model training and inference helpers.
 
-    Subclasses are expected to implement epoch execution and prediction-frame
-    formatting, while this base class handles loader wrapping, optional
-    preprocessor warmup, checkpointing, and convenience prediction methods.
+    Subclasses implement task-specific epoch execution. This base class handles
+    preprocessor warmup, checkpointing, and the train/test lifecycle.
     """
 
     def __init__(
@@ -42,10 +64,11 @@ class BaseTrainer(ABC):
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
+        return_best: bool = True,
         train_transform: Optional[list[Callable]] = None,
-        n_repeat_train: int = 1,
-        n_repeat_test: int = 1,
     ):
+        if not isinstance(return_best, bool):
+            raise TypeError("return_best must be a bool.")
         self.epochs = epochs
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
@@ -53,9 +76,23 @@ class BaseTrainer(ABC):
         self.warmup_device = warmup_device
         self.save_every = save_every
         self.early_stopping_patience = early_stopping
+        self.return_best = return_best
         self.train_transform = train_transform
-        self.n_repeat_train = n_repeat_train
-        self.n_repeat_test = n_repeat_test
+
+    def export_model(self, model: torch.nn.Module, dataset, *, name: str, task: str, config: dict[str, Any], dest: str) -> None:
+        """Export a directly testable model package through the active artifact sinks."""
+        with tempfile.TemporaryDirectory(prefix=f"sleepwalker_{dest}_") as temporary_directory:
+            package_path = os.path.join(temporary_directory, "package")
+            save_packaged_model(
+                package_path,
+                name=name,
+                task=task,
+                model=model,
+                dataset=dataset,
+                classification_contract=self.classification_contract(),
+                config=config,
+            )
+            logger.artifact(path=package_path, dest=dest)
 
     def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
         """Apply per-sample augmentation transforms to a batch tensor.
@@ -79,20 +116,19 @@ class BaseTrainer(ABC):
             out.append(torch.from_numpy(sample_df.to_numpy()).to(x_device, dtype=x.dtype))
         return torch.stack(out, dim=0)
 
-    def warmup_preprocessors(self, model, data_loader, device: str = "cuda"):
-        """Warm up model preprocessors that need streaming statistics.
+    def warmup_preprocessor(self, model, data_loader, device: str = "cuda"):
+        """Warm up model preprocessing steps that need streaming statistics.
 
         Args:
-            model: Model instance that may expose ``preprocessors`` or a custom
-                ``_warmup_preprocessors`` hook.
+            model: Model instance exposing the ``BaseModel`` preprocessor API.
             data_loader: Loader that yields batches with a ``data`` field.
             device: Device used while warming preprocessors.
 
         Returns:
             The warmed model. The object is mutated in place.
         """
-        if hasattr(model, "_warmup_preprocessors"):
-            return model._warmup_preprocessors(data_loader, device)
+        if hasattr(model, "warmup_preprocessor"):
+            return model.warmup_preprocessor(data_loader, device)
 
         model.to(device)
         total_batches = len(data_loader)
@@ -101,13 +137,14 @@ class BaseTrainer(ABC):
         if batch_size is None:
             raise ValueError("batch_size should not be None here.")
 
-        for idx in range(len(model.preprocessors)):
-            logger.progress_start(total_batches * batch_size, desc=f" {idx}/{len(model.preprocessors) - 1}", leave=True)
-            if model.preprocessors[idx].requires_warmup():
+        steps = model.preprocessors
+        for idx, step in enumerate(steps):
+            logger.progress_start(total_batches * batch_size, desc=f" {idx}/{len(steps) - 1}", leave=True)
+            if step.requires_warmup():
                 for batch in data_loader:
                     x = batch["data"].to(device)
                     x = model.apply_preprocessors(x, idx)
-                    model.preprocessors[idx].update(x)
+                    step.update(x)
                     logger.progress_advance(batch_size)
             else:
                 logger.progress_advance(total_batches * batch_size)
@@ -124,128 +161,18 @@ class BaseTrainer(ABC):
         """
         return
 
-    def _wrap_loader_with_repeats(self, loader, n_repeat: int, shuffle_default: bool):
-        sampler = getattr(loader, "sampler", None)
-        if n_repeat <= 1:
-            return loader
-
-        if isinstance(sampler, RepeatSampler):
-            if sampler.n_repeat != n_repeat:
-                logger.warning("Found a different n_repeat value in given sampler. Using supplied n_repeat")
-            return loader
-
-        if sampler is None:
-            sampler = RandomSampler(loader.dataset) if shuffle_default else SequentialSampler(loader.dataset)
-        sampler = RepeatSampler(sampler, n_repeat=n_repeat)
-
-        loader_kwargs = {
-            "dataset": loader.dataset,
-            "batch_size": loader.batch_size * n_repeat,
-            "shuffle": False,
-            "sampler": sampler,
-            "num_workers": loader.num_workers,
-            "collate_fn": loader.collate_fn,
-            "drop_last": loader.drop_last,
-            "pin_memory": loader.pin_memory,
-            "persistent_workers": loader.persistent_workers,
-        }
-        if loader.num_workers > 0 and loader.prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = loader.prefetch_factor
-        return DataLoader(**loader_kwargs)
-
-    def _set_loader_epoch(self, loader, epoch: int):
-        sampler = getattr(loader, "sampler", None)
+    def set_loader_epoch(self, loader, epoch: int):
+        sampler = loader.sampler
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
 
     def test(self, model, test_loader):
-        """Run evaluation on one loader using the trainer's test repeat setup."""
-        test_loader = self._wrap_loader_with_repeats(test_loader, self.n_repeat_test, shuffle_default=False)
+        """Run evaluation on one prepared loader."""
         model.eval()
         with torch.inference_mode():
             return self.run_epoch(test_loader, None, model, "TEST")
 
-    def _average_prediction_outputs(self, outputs):
-        if len(outputs) == 0:
-            raise ValueError("Cannot average an empty list of outputs.")
-        first = outputs[0]
-        if isinstance(first, torch.Tensor):
-            return torch.stack(outputs, dim=0).mean(dim=0)
-        if isinstance(first, dict):
-            return {
-                key: self._average_prediction_outputs([output[key] for output in outputs])
-                for key in first.keys()
-            }
-        raise ValueError(f"Unsupported prediction output type {type(first)}.")
-
-    def _collapse_repeated_batch_field(self, value, base_batch: int, n_repeat: int):
-        if value is None:
-            return None
-        if isinstance(value, torch.Tensor):
-            shape = (base_batch, n_repeat, *value.shape[1:])
-            return value.view(shape)[:, 0]
-        if isinstance(value, list):
-            return [value[idx * n_repeat] for idx in range(base_batch)]
-        if isinstance(value, tuple):
-            return [value[idx * n_repeat] for idx in range(base_batch)]
-        return value
-
-    def _predict_model_outputs(self, model, batch, n_repeat: int = 1):
-        x = batch["data"].to(self.device, non_blocking=True)
-        if n_repeat <= 1:
-            return model(x), batch
-
-        if x.shape[0] % n_repeat != 0:
-            raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
-        base_batch = x.shape[0] // n_repeat
-        x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
-        outputs = [model(x_grouped[:, repeat_idx]) for repeat_idx in range(n_repeat)]
-        collapsed_batch = {}
-        for key, value in batch.items():
-            collapsed_batch[key] = self._collapse_repeated_batch_field(value, base_batch, n_repeat)
-        return self._average_prediction_outputs(outputs), collapsed_batch
-
-    @abstractmethod
-    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
-        pass
-
-    def predict_window(self, model, batch, n_repeat: int = 1) -> pd.DataFrame:
-        """Run inference for one already-collated batch.
-
-        Args:
-            model: Model instance to evaluate.
-            batch: Collated batch dictionary containing at least ``data``.
-            n_repeat: Number of repeated views per logical sample.
-
-        Returns:
-            A prediction DataFrame produced by the subclass-specific
-            ``_prediction_frame`` implementation.
-        """
-        model.eval()
-        with torch.inference_mode():
-            outputs, collapsed_batch = self._predict_model_outputs(model, batch, n_repeat=n_repeat)
-            return self._prediction_frame(collapsed_batch, outputs)
-
-    def predict_loader(self, model, loader) -> pd.DataFrame:
-        """Run inference for all batches in a loader.
-
-        Returns:
-            A concatenated prediction DataFrame. An empty DataFrame is returned
-            when no batch produces predictions.
-        """
-        loader = self._wrap_loader_with_repeats(loader, self.n_repeat_test, shuffle_default=False)
-        frames = []
-        model = model.to(self.device)
-        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
-        for batch in loader:
-            frame = self.predict_window(model, batch, n_repeat=n_repeat)
-            if frame is not None and len(frame) > 0:
-                frames.append(frame)
-        if len(frames) == 0:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
-
-    def fit(self, model, train_loader, val_loader=None):
+    def fit(self, model, train_loader, val_loader=None, *, package_name: Optional[str] = None, package_task: Optional[str] = None, package_config: Optional[dict[str, Any]] = None):
         """Train a model and optionally track validation checkpoints.
 
         Args:
@@ -258,31 +185,25 @@ class BaseTrainer(ABC):
             checkpointing occurs, the dictionary may also contain
             ``checkpoint`` and ``best_model``.
         """
-        train_loader = self._wrap_loader_with_repeats(train_loader, self.n_repeat_train, shuffle_default=True)
-        if val_loader is not None:
-            val_loader = self._wrap_loader_with_repeats(val_loader, self.n_repeat_test, shuffle_default=False)
-
-        self._set_loader_epoch(train_loader, 0)
+        package_name = package_name or model.__class__.__name__
+        package_task = package_task or package_name
+        package_config = dict(package_config or {})
+        self.set_loader_epoch(train_loader, 0)
         logger.context("Warmup trainer")
         self.warmup_trainer(train_loader)
         logger.uncontext()
 
         opt = self.optimizer_fn(model)
 
-        if self.lr_scheduler_fn is not None:
-            lr_scheduler = self.lr_scheduler_fn(opt)
-            if isinstance(lr_scheduler, OneCycleLR):
-                raise ValueError("OneCycleLR is currently not supported")
-        else:
-            lr_scheduler = None
+        lr_scheduler, scheduler_per_batch = build_lr_scheduler(self.lr_scheduler_fn, opt, self.epochs, len(train_loader))
 
         if self.early_stopping_patience and val_loader is None:
             logger.warning("early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
-        self._set_loader_epoch(train_loader, 0)
+        self.set_loader_epoch(train_loader, 0)
         logger.context("Warmup preprocessors")
-        self.warmup_preprocessors(model, train_loader, self.warmup_device)
+        self.warmup_preprocessor(model, train_loader, self.warmup_device)
         logger.uncontext()
 
         model = model.to(self.device)
@@ -294,23 +215,21 @@ class BaseTrainer(ABC):
         self.best_checkpoint = None
         self.steps = {"train": 0, "val": 0, "test": 0}
         self.epoch_step = 0
-        last_folder = None
-
         for epoch in range(self.epochs):
-            self._set_loader_epoch(train_loader, epoch)
+            self.set_loader_epoch(train_loader, epoch)
             model.train()
-            loss, output = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
+            loss, output = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]", lr_scheduler if scheduler_per_batch else None)
             outputs.append({"train": output})
             losses.append({"train": loss})
 
-            if self.save_every > 0 and (epoch % self.save_every == 0):
-                logger.info(f"Logging intermediate model after {epoch} epochs.")
-                last_folder = tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_")
-                last_checkpoint = os.path.join(last_folder, "model.pt")
-                torch.save(model.state_dict(), last_checkpoint)
-                logger.artifact(path=last_checkpoint, dest=f"{epoch}")
+            epoch_number = epoch + 1
+            if self.save_every > 0 and epoch_number % self.save_every == 0:
+                logger.info(f"Logging intermediate model after {epoch_number} epochs.")
+                checkpoint_config = dict(package_config)
+                checkpoint_config["checkpoint_epoch"] = epoch_number
+                self.export_model(model, train_loader.dataset, name=f"{package_name}-epoch-{epoch_number}", task=package_task, config=checkpoint_config, dest=str(epoch_number))
 
-            if lr_scheduler is not None:
+            if lr_scheduler is not None and not scheduler_per_batch:
                 lr_scheduler.step()
 
             if val_loader is not None:
@@ -323,37 +242,35 @@ class BaseTrainer(ABC):
 
                 imin = int(np.argmin(val_losses))
                 if self.best_model_idx is None or imin != self.best_model_idx:
-                    if self.best_checkpoint is not None:
-                        logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
-                        shutil.rmtree(os.path.dirname(self.best_checkpoint))
-
-                    best_folder = tempfile.mkdtemp(prefix="sleepwalker_best_model_")
-                    self.best_checkpoint = os.path.join(best_folder, "model.pt")
-                    torch.save(model.state_dict(), self.best_checkpoint)
                     self.best_model_idx = imin
+                    if self.return_best:
+                        if self.best_checkpoint is not None:
+                            logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
+                            shutil.rmtree(os.path.dirname(self.best_checkpoint))
+
+                        best_folder = tempfile.mkdtemp(prefix="sleepwalker_best_model_")
+                        self.best_checkpoint = os.path.join(best_folder, "model.pt")
+                        torch.save(model.state_dict(), self.best_checkpoint)
 
                 if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
                     logger.info(f"Early stopping after {epoch} epochs - best epoch was {imin}")
-                    return {
+                    result = {
                         "losses": losses,
                         "outputs": outputs,
-                        "best_model": imin,
-                        "checkpoint": self.best_checkpoint,
                     }
+                    if self.return_best:
+                        result["best_model"] = imin
+                        result["checkpoint"] = self.best_checkpoint
+                    return result
 
             self.epoch_step += 1
 
-        if self.best_checkpoint is not None:
-            return {
-                "losses": losses,
-                "outputs": outputs,
-                "best_model": self.best_model_idx,
-                "checkpoint": self.best_checkpoint,
-            }
-        if last_folder is not None:
-            return {"losses": losses, "outputs": outputs, "checkpoint": os.path.join(last_folder, "model.pt")}
-        return {"losses": losses, "outputs": outputs}
+        result = {"losses": losses, "outputs": outputs}
+        if self.return_best and self.best_checkpoint is not None:
+            result["best_model"] = self.best_model_idx
+            result["checkpoint"] = self.best_checkpoint
+        return result
 
     @abstractmethod
-    def run_epoch(self, loader, opt, model, prefix=""):
+    def run_epoch(self, loader, opt, model, prefix="", lr_scheduler=None):
         pass

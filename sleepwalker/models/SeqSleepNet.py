@@ -11,10 +11,9 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 
-from sleepwalker.models.Basemodel import BaseModel
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 from sleepwalker.models.preprocessors.Normalize import Normalize
 from sleepwalker.models.preprocessors.Spectrogram import Spectrogram
-from sleepwalker.utils import logger
 
 
 class Attention(nn.Module):
@@ -29,7 +28,7 @@ class Attention(nn.Module):
         out = torch.sum(x * alpha.unsqueeze(-1), dim=1)  # (N, D)
         return out
 
-class SeqSleepNet(BaseModel):
+class SeqSleepNet(BaseModel, EmbeddingModel, ClassifierModel):
     """
     Paper: SeqSleepNet: End-to-End Hierarchical Recurrent Neural Network for Sequence-to-Sequence Automatic Sleep Staging by Phan et al. in IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING, 2019
     Code: https://github.com/pquochuy/SeqSleepNet
@@ -57,8 +56,8 @@ class SeqSleepNet(BaseModel):
         hop_length=100,
         epoch_len="30s",
         hidden_size = 64,
-        output_strategy = "flatten",
         nfilter=32,
+        sequence_len=1,
         **kwargs
     ):
         """Construct the SeqSleepNet architecture.
@@ -74,8 +73,8 @@ class SeqSleepNet(BaseModel):
             hop_length: Spectrogram hop length.
             epoch_len: Epoch duration used for hierarchical segmentation.
             hidden_size: Hidden size of the recurrent blocks.
-            output_strategy: Temporal reduction mode.
             nfilter: Number of learned triangular filterbank channels.
+            sequence_len: Number of center-aligned epochs to return.
         """
         self.nfilter = nfilter
         self.classes = list(classes) if classes is not None else None
@@ -123,15 +122,15 @@ class SeqSleepNet(BaseModel):
             batch_first=True,
             bidirectional=True
         )
-        self.output_strategy = output_strategy
-        self._feature_dim = 2 * self.hidden_size * self.L if self.output_strategy == "flatten" else 2 * self.hidden_size
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError("sequence_len must be at least 1.")
+        if self.sequence_len > self.L:
+            raise ValueError(f"sequence_len={self.sequence_len} exceeds the model epoch count {self.L}.")
+        self._feature_dim = self.sequence_len * 2 * self.hidden_size
 
         if self.classes is not None:
-            if self.output_strategy == "flatten":
-                L = self.ts_len // self.epoch_len_samples
-                self.classifier_layer = nn.Linear(2 * self.hidden_size * L, len(self.classes))
-            else:
-                self.classifier_layer = nn.Linear(2 * self.hidden_size, len(self.classes))
+            self.classifier_layer = nn.Linear(2 * self.hidden_size, len(self.classes))
         else:
             self.classifier_layer = None
 
@@ -180,7 +179,7 @@ class SeqSleepNet(BaseModel):
     #         # Cannot call super().forward here, because during warmup phase the shapes do not match anymore (i.e. batch size is wrong)
     #         return self._forward(x, **kwargs)
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Compute hierarchical recurrent features from spectrogram inputs."""
         # --- Filterbanks ---
         D = x.shape[-1]
@@ -209,20 +208,8 @@ class SeqSleepNet(BaseModel):
         # --- Epoch-level GRU ---
         epoch_out, _ = self.epoch_gru(epoch_reps)  # (B, L, 2*H)
         
-        if self.output_strategy == "flatten":
-            epoch_out = epoch_out.contiguous()
-            epoch_out = epoch_out.view(B, -1)  # (B, 2*L*H)
-        elif self.output_strategy == "window-right":
-            epoch_out = epoch_out[:, -1, :]  # (B, 2*H)
-        elif self.output_strategy == "window-middle":
-            epoch_out = epoch_out[:, L // 2, :]  # (B, 2*H)
-        elif self.output_strategy == "sequence":
-            epoch_out = epoch_out.reshape(B*L, -1)
-        else:
-            valid_strategies = ["flatten", "window-right", "window-middle", "sequence"]
-            raise ValueError(f"Unknown output strategy: {self.output_strategy}. Valid strategies are: {valid_strategies}")
-
-        return epoch_out
+        sequence_start = (L - self.sequence_len) // 2
+        return epoch_out[:, sequence_start:sequence_start + self.sequence_len].reshape(B, -1)
 
     def feature_dim(self) -> int:
         """Return the dimensionality of the produced feature vector."""
@@ -235,14 +222,14 @@ class SeqSleepNet(BaseModel):
             {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels},
         )
 
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        """Map features to logits for the configured class set."""
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode preprocessed inputs and map them to class logits."""
+        x = self.encode(x)
         if self.classifier_layer is None or self.classes is None:
-            raise ValueError("SeqSleepNet.classifier() requires classes to be set.")
-        logits = self.classifier_layer(x)
-
-        if self.output_strategy == "sequence":
-            B = x.shape[0] // self.L
-            logits = logits.view(B, self.L, len(self.classes))
-
-        return logits
+            raise ValueError("SeqSleepNet classification requires classes to be set.")
+        feature_size = 2 * self.hidden_size
+        expected = self.sequence_len * feature_size
+        if x.ndim != 2 or x.shape[-1] != expected:
+            raise ValueError(f"Expected SeqSleepNet features shaped [B, {expected}], got {tuple(x.shape)}.")
+        x = x.view(x.shape[0], self.sequence_len, feature_size)
+        return self.classifier_layer(x)

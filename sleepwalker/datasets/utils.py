@@ -421,9 +421,14 @@ def estimate_class_cnts(loader: DataLoader):
     logger.progress_start(total_batches * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         y = batch["target"]
-        target = y.argmax(dim=1)
-        idx, cnt = torch.unique(target, return_counts=True)
-        class_cnts[idx] += cnt
+        if "target_mask" in batch:
+            mask = batch["target_mask"].to(dtype=torch.bool)
+            if tuple(mask.shape) != tuple(y.shape[:-1]):
+                raise ValueError(f"Expected target_mask shaped {tuple(y.shape[:-1])}, got {tuple(mask.shape)}.")
+            observed = y[mask]
+        else:
+            observed = y.reshape(-1, y.shape[-1])
+        class_cnts += observed.sum(dim=0).cpu()
         logger.progress_advance(len(y))
     logger.progress_close()
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
+import multiprocessing
+from typing import Sequence
 
 import pandas as pd
 from .Basedataset import BaseDataset, ChannelConfig
@@ -11,7 +13,8 @@ from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNor
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SaturationFilterNormalizer import SaturationFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
-
+from sleepwalker.datasets.utils import get_edf_files_in_repo
+from sleepwalker.utils import logger
 
 HSP_CHANNEL_GROUPS = {
     "eeg": [
@@ -136,7 +139,6 @@ HSP_CHANNEL_GROUPS = {
 
 HSP_CHANNEL_GROUPS["emg"] = HSP_CHANNEL_GROUPS["chin_emg"] + HSP_CHANNEL_GROUPS["leg_emg"]
 
-
 def get_hsp_annotation_path(edf_path: str | Path) -> str | None:
     """Return the same-record HSP annotation sidecar for an EDF, if present."""
     edf_path = Path(edf_path)
@@ -164,7 +166,6 @@ def get_hsp_annotation_path(edf_path: str | Path) -> str | None:
             return str(candidate)
     return None
 
-
 def hsp_record_key(edf_path: str | Path) -> str:
     """Return a path-independent key for one HSP subject/session recording."""
     path = Path(edf_path)
@@ -174,7 +175,6 @@ def hsp_record_key(edf_path: str | Path) -> str:
         raise ValueError(f"Expected HSP path with sub-* and ses-* components, got: {path}")
     return f"{subject}/{session}/{path.name}"
 
-
 def _hsp_path_preference(edf_path: str) -> tuple[int, str]:
     """Prefer the direct subject tree over the optional ``HSP/`` mirror."""
     parts = Path(edf_path).parts
@@ -182,67 +182,122 @@ def _hsp_path_preference(edf_path: str) -> tuple[int, str]:
     mirrored = subject_idx is not None and subject_idx > 0 and parts[subject_idx - 1] == "HSP"
     return (int(mirrored), edf_path)
 
-
 def get_annotated_hsp_edf_files(root: str | Path, recursive: bool = True) -> list[str]:
     """List unique HSP EDF records that have an annotation sidecar."""
-    from sleepwalker.datasets.utils import get_edf_files_in_repo
 
     records: dict[str, str] = {}
-    for edf_path in sorted(
-        get_edf_files_in_repo(str(root), recursive=recursive),
-        key=_hsp_path_preference,
-    ):
+    for edf_path in sorted(get_edf_files_in_repo(str(root), recursive=recursive),key=_hsp_path_preference):
         if get_hsp_annotation_path(edf_path) is None:
             continue
         records.setdefault(hsp_record_key(edf_path), edf_path)
     return sorted(records.values())
 
+def hsp_annotation_filter_result(item: tuple[str, tuple[str, ...]]) -> tuple[str, bool]:
+    """Check whether one HSP annotation sidecar contains a requested label."""
+    edf_path, required_labels = item
+    annotation_path = get_hsp_annotation_path(edf_path)
+    if annotation_path is None:
+        return edf_path, False
+
+    label_df = pd.read_csv(annotation_path, usecols=lambda column: column in {"Label", "event", "Duration", "duration"})
+    label_df = label_df.rename(columns={"event": "Label"})
+    if "Label" not in label_df.columns:
+        raise ValueError(f"Annotation file has no Label/event column: {annotation_path}")
+    label_df["Label"] = label_df["Label"].astype(str).str.lower()
+    label_df = map_hsp_sane_labels(label_df)
+    return edf_path, bool(label_df["Label"].isin(required_labels).any())
+
+
+def filter_hsp_annotation_labels(patients: Sequence[str | Path], required_labels: Sequence[str], num_workers: int = 1) -> list[str]:
+    """Keep HSP EDF paths whose annotation sidecar contains any required label."""
+    patient_list = [str(path) for path in patients]
+    required_label_tuple = tuple(str(label) for label in required_labels)
+    work = [(edf_path, required_label_tuple) for edf_path in patient_list]
+    worker_count = int(num_workers)
+    if worker_count < 1:
+        raise ValueError("num_workers must be at least 1.")
+
+    logger.info(f"Filtering {len(patient_list)} HSP annotation files for labels {list(required_label_tuple)} using {worker_count} workers.")
+    logger.progress_start(len(patient_list), desc="Filtering HSP annotations", leave=True)
+    results = []
+    try:
+        if worker_count > 1 and work:
+            with multiprocessing.Pool(worker_count) as pool:
+                for result in pool.imap(hsp_annotation_filter_result, work):
+                    results.append(result)
+                    logger.progress_advance(1)
+        else:
+            for item in work:
+                results.append(hsp_annotation_filter_result(item))
+                logger.progress_advance(1)
+    finally:
+        logger.progress_close()
+
+    selected = [edf_path for edf_path, keep in results if keep]
+    logger.info(f"HSP annotation filter kept {len(selected)}/{len(patient_list)} EDF files.")
+    return selected
 
 def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
     """Map heterogeneous HSP annotation labels to stable task labels."""
     df = df.copy()
+
     exact_mapping = {
-        'stage - n1': 'n1',
-        'sleep_stage_n1': 'n1',
-        'sleep_stage_1': 'n1',
-        'stage - n2': 'n2',
-        'sleep_stage_n2': 'n2',
-        'sleep_stage_2': 'n2',
-        'stage - n3': 'n3',
-        'sleep_stage_n3': 'n3',
-        'sleep_stage_3': 'n3',
-        'stage - r': 'rem',
-        'sleep_stage_r': 'rem',
-        'sleep_stage_rem': 'rem',
-        'rem': 'rem',
-        'stage - w': 'wake',
-        'sleep_stage_w': 'wake',
-        'apnea / desats': 'apnea',
-        'oxygen_desaturation': 'desaturation'
+        "stage - n1": "n1",
+        "sleep_stage_n1": "n1",
+        "sleep_stage_1": "n1",
+        "stage - n2": "n2",
+        "sleep_stage_n2": "n2",
+        "sleep_stage_2": "n2",
+        "stage - n3": "n3",
+        "sleep_stage_n3": "n3",
+        "sleep_stage_3": "n3",
+        "stage - r": "rem",
+        "sleep_stage_r": "rem",
+        "sleep_stage_rem": "rem",
+        "rem": "rem",
+        "stage - w": "wake",
+        "sleep_stage_w": "wake",
+        "apnea / desats": "apnea",
+        "oxygen_desaturation": "desaturation",
     }
-    df['Label'] = df['Label'].replace(exact_mapping)
+    df["Label"] = df["Label"].replace(exact_mapping)
+
+    orig = df["Label"].astype("string")
+    result = orig.copy()
+
+    # Match only standalone desaturation annotations, including variants such as:
+    #   desaturation - min 89.0 % - drop 5.3 %
+    #   * desaturation - min sao2 88.0 %
+    #
+    # This deliberately does not match:
+    #   respiratory event - hypopnea - desat 85.0 %
+    desaturation_mask = orig.str.match(
+        r"^\s*\*?\s*desaturation(?:\s|[-_]|$)",
+        case=False,
+        na=False,
+    )
+    result = result.mask(desaturation_mask, "desaturation")
 
     substring_matches = {
-        'desaturation': 'desaturation',
-        'obstructive apnea': 'obstructive-apnea',
-        'obstructive_apnea': 'obstructive-apnea',
-        'obstructiveapnea': 'obstructive-apnea',
-        'mixed apnea': 'mixed-apnea',
-        'mixed_apnea': 'mixed-apnea',
-        'mixedapnea': 'mixed-apnea',
-        'central apnea': 'central-apnea',
-        'central_apnea': 'central-apnea',
-        'centralapnea': 'central-apnea',
-        'hypopnea': 'hypopnea',
-        'rera': 'rera',
-        'arousal':'arousal'
+        "obstructive apnea": "obstructive-apnea",
+        "obstructive_apnea": "obstructive-apnea",
+        "obstructiveapnea": "obstructive-apnea",
+        "mixed apnea": "mixed-apnea",
+        "mixed_apnea": "mixed-apnea",
+        "mixedapnea": "mixed-apnea",
+        "central apnea": "central-apnea",
+        "central_apnea": "central-apnea",
+        "centralapnea": "central-apnea",
+        "hypopnea": "hypopnea",
+        "rera": "rera",
+        "arousal": "arousal",
     }
-    orig = df['Label']
-    result = orig.copy()
-    for k, v in substring_matches.items():
-        mask = orig.str.contains(k, case=False, na=False)
-        result = result.mask(mask, v)
-    df['Label'] = result
+
+    for source, target in substring_matches.items():
+        mask = orig.str.contains(source, case=False, regex=False, na=False)
+        result = result.mask(mask, target)
+
+    df["Label"] = result
     return df
 
 

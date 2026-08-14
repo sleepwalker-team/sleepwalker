@@ -8,11 +8,12 @@ files without ground-truth annotations.
 
 from __future__ import annotations
 
+import copy
 from typing import Callable, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig
+from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, prepare_tensor_sample
 
 
 class UnlabelledDataset(BaseDataset):
@@ -24,12 +25,12 @@ class UnlabelledDataset(BaseDataset):
         resample_type: Signal resampling mode.
         total_input: Input window duration.
         stride: Time between consecutive inference windows.
-        prepare_patient: Optional whole-patient callback reused from
-            `BaseDataset`.
         prepare_sample: Optional final sample callback reused from
             `BaseDataset`.
         online_max_tries: Retry budget when `prepare_sample` rejects a window.
         rereference: Optional rereferencing groups applied after loading.
+        z_normalize: Whether to apply full-recording channel-wise z-score
+            normalization as the final built-in signal transform.
     """
     def __init__(
         self,
@@ -40,11 +41,10 @@ class UnlabelledDataset(BaseDataset):
         total_input: str | pd.Timedelta = "30s",
         target_resolution: str | pd.Timedelta,
         stride: str | pd.Timedelta = "30s",
-        prepare_patient: Optional[Callable] = None,
-        prepare_sample: Optional[Callable] = None,
+        prepare_sample: Callable = prepare_tensor_sample,
         online_max_tries: int = 128,
-        online_retry_scope: str = "global",
         rereference=None,
+        z_normalize: bool = False,
         group_sampling_strategy: str = "first",
         assume_units_if_missing: bool = False,
         edf_unit_overrides: Optional[Mapping[str, str]] = None,
@@ -56,11 +56,10 @@ class UnlabelledDataset(BaseDataset):
             "total_input": total_input,
             "target_resolution": target_resolution,
             "stride": stride,
-            "prepare_patient": prepare_patient,
             "prepare_sample": prepare_sample,
             "online_max_tries": online_max_tries,
-            "online_retry_scope": online_retry_scope,
             "rereference": rereference,
+            "z_normalize": z_normalize,
             "group_sampling_strategy": group_sampling_strategy,
             "assume_units_if_missing": assume_units_if_missing,
             "edf_unit_overrides": dict(edf_unit_overrides or {}),
@@ -73,13 +72,12 @@ class UnlabelledDataset(BaseDataset):
             target_resolution=target_resolution,
             stride=stride,
             event_mapping=None,
-            prepare_patient=prepare_patient,
             prepare_target=None,
             prepare_sample=prepare_sample,
             online_max_tries=online_max_tries,
-            online_retry_scope=online_retry_scope,
             force_one_day=False,
             rereference=rereference,
+            z_normalize=z_normalize,
             group_sampling_strategy=group_sampling_strategy,
             assume_units_if_missing=assume_units_if_missing,
             edf_unit_overrides=edf_unit_overrides,
@@ -97,11 +95,10 @@ class UnlabelledDataset(BaseDataset):
             total_input=dataset.total_input,
             target_resolution=dataset.target_resolution,
             stride=dataset.stride,
-            prepare_patient=dataset.prepare_patient_callback,
             prepare_sample=dataset.prepare_sample_callback,
             online_max_tries=dataset.online_max_tries,
-            online_retry_scope=dataset.online_retry_scope,
             rereference=dataset.rereference,
+            z_normalize=dataset.z_normalize,
             group_sampling_strategy="first",
             assume_units_if_missing=dataset.assume_units_if_missing,
             edf_unit_overrides=dataset.edf_unit_overrides,
@@ -121,6 +118,15 @@ class UnlabelledDataset(BaseDataset):
             kwargs["assume_units_if_missing"] = bool(assume_units_if_missing)
         return UnlabelledDataset(**kwargs)
 
+    def dataset_kwargs(self) -> dict:
+        """Return a fresh copy of the executable dataset constructor arguments.
+
+        Existing expert packages already serialize ``_init_kwargs``. Adding
+        this public accessor therefore also exposes those stored arguments on
+        packages created before the method existed.
+        """
+        return copy.deepcopy(self._init_kwargs)
+
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Signal that unlabelled datasets do not provide event annotations."""
         raise ValueError("UnlabelledDataset does not provide labels.")
@@ -137,17 +143,11 @@ class UnlabelledDataset(BaseDataset):
             `time`, or `None` when `prepare_sample` rejects the window.
         """
         end_date = start_date + self.total_input
-        item = {
-            "patient": file.path,
-            "time": start_date + (self.total_input // 2 - self.target_resolution // 2),
-        }
+        target_start = start_date + (self.total_input // 2 - self.target_resolution // 2)
+        item = { "patient": file.path, "time": target_start }
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
-
-        if self.rereference:
-            for refchannels in self.rereference:
-                ref_cols = [r for r in refchannels if r in x_df.columns]
-                if ref_cols:
-                    x_df[ref_cols] = x_df[ref_cols].values - x_df[ref_cols].values.mean(axis=1)[:, None]
+        self.apply_rereference(x_df)
+        file.apply_z_normalization(x_df)
 
         if len(x_df) < self.get_timeseries_len():
             freq = x_df.index.freq or pd.infer_freq(x_df.index)

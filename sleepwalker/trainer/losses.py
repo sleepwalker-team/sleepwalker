@@ -17,19 +17,19 @@ def dice_loss(pred, target, weight = None, epsilon=1e-3):
     """Compute a Dice-style loss for one-hot multiclass targets.
 
     Args:
-        pred: Logits shaped `(B, C)`.
-        target: One-hot or probability-like targets shaped `(B, C)`.
+        pred: Logits shaped `(B, C, S)`.
+        target: One-hot or probability-like targets shaped `(B, C, S)`.
         weight: Optional per-class weights shaped `(C,)`.
         epsilon: Small stabilizer to avoid division by zero.
 
     Returns:
         A scalar loss tensor.
     """
-    pred = torch.softmax(pred, dim=1)  # (B, C)
-    #target_onehot = torch.nn.functional.one_hot(target.long(), num_classes=pred.shape[1]).float()  # (B, C)
+    pred = torch.softmax(pred, dim=1)
 
-    intersection = (pred * target).sum(dim=0)
-    union = pred.sum(dim=0) + target.sum(dim=0)
+    reduce_dims = (0, *range(2, pred.ndim))
+    intersection = (pred * target).sum(dim=reduce_dims)
+    union = pred.sum(dim=reduce_dims) + target.sum(dim=reduce_dims)
 
     dice = (2 * intersection + epsilon) / (union + epsilon)  # (C,)
 
@@ -79,15 +79,17 @@ def class_weights_for_loss(user_weights: dict[str, float], class_distribution: d
 
 def build_multilabel_task_masks(
     y: torch.Tensor,
+    target_mask: torch.Tensor,
     task_config: dict[str, dict],
     condition_task: Optional[str] = None,
     condition_labels: Optional[list[str]] = None,
     conditioned_tasks: Optional[list[str]] = None,
 ):
-    """Build per-task sample masks for conditioned multitask training.
+    """Build per-task step masks for multitask training.
 
     Args:
-        y: Integer multitask target tensor shaped `[B, n_tasks, max_steps]`.
+        y: Probability targets shaped `[B, n_tasks, max_steps, max_classes]`.
+        target_mask: Valid target steps shaped `[B, n_tasks, max_steps]`.
         task_config: Normalized task configuration.
         condition_task: Optional task whose labels gate the conditioned tasks.
         condition_labels: Labels within `condition_task` that activate the
@@ -96,16 +98,21 @@ def build_multilabel_task_masks(
             condition task.
 
     Returns:
-        A mapping from task name to boolean sample mask shaped `[B]`.
+        A mapping from task name to boolean masks shaped `[B, task_steps]`.
 
     Raises:
         ValueError: If task names or labels are invalid, or if the condition
             task contains unresolved targets.
     """
+    if y.ndim != 4:
+        raise ValueError(f"Expected multitask targets [B, T, S, C], got {tuple(y.shape)}.")
+    if tuple(target_mask.shape) != tuple(y.shape[:-1]):
+        raise ValueError(f"Expected target_mask shaped {tuple(y.shape[:-1])}, got {tuple(target_mask.shape)}.")
+
     task_specs = list(task_config.values())
     task_masks = {
-        cfg["task"]: torch.ones(y.shape[0], dtype=torch.bool, device=y.device)
-        for cfg in task_specs
+        cfg["task"]: target_mask[:, task_idx, :cfg["n_steps"]].clone()
+        for task_idx, cfg in enumerate(task_specs)
     }
     if condition_task is None:
         return task_masks
@@ -128,17 +135,12 @@ def build_multilabel_task_masks(
             f"condition_labels contains labels not present in task '{condition_task}': {unknown_labels}"
         )
 
-    y_condition = y[:, condition_idx, :condition_cfg["n_steps"]]
-    if (y_condition < 0).any():
-        raise ValueError(
-            f"Condition task '{condition_task}' contains invalid targets. "
-            "Unclear labels must be filtered in get_target()."
-        )
-
+    y_condition = y[:, condition_idx, :condition_cfg["n_steps"], :len(condition_cfg["labels"])].argmax(dim=-1)
     condition_mask = torch.zeros_like(y_condition, dtype=torch.bool)
     for idx in [condition_cfg["labels"].index(label) for label in condition_labels]:
         condition_mask |= y_condition == idx
-    condition_mask = condition_mask.any(dim=1)
+    condition_mask &= task_masks[condition_task]
+    condition_mask = condition_mask.any(dim=1, keepdim=True)
 
     conditioned = set(conditioned_tasks or [task for task in task_config if task != condition_task])
     for task in conditioned:
@@ -146,7 +148,7 @@ def build_multilabel_task_masks(
             raise ValueError(f"Unknown conditioned task '{task}'.")
         if task == condition_task:
             raise ValueError("condition_task must not also be listed in conditioned_tasks.")
-        task_masks[task] = condition_mask
+        task_masks[task] &= condition_mask
 
     return task_masks
 
@@ -161,7 +163,7 @@ def estimate_multilabel_class_cnts(
     """Estimate per-task class counts from a multitask dataloader.
 
     Args:
-        loader: Dataloader producing integer multitask targets.
+        loader: Dataloader producing probability targets and step masks.
         task_config: Normalized task configuration.
         condition_task: Optional task used to gate conditioned tasks.
         condition_labels: Activating labels for `condition_task`.
@@ -183,22 +185,23 @@ def estimate_multilabel_class_cnts(
     logger.progress_start(len(loader) * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         y = batch["target"]
+        if "target_mask" not in batch:
+            raise ValueError("Multitask batches must contain target_mask.")
+        target_mask = batch["target_mask"].to(dtype=torch.bool)
         task_masks = build_multilabel_task_masks(
             y,
+            target_mask,
             task_config,
             condition_task=condition_task,
             condition_labels=condition_labels,
             conditioned_tasks=conditioned_tasks,
         )
         for task_idx, cfg in enumerate(task_config.values()):
-            y_task = y[:, task_idx, :cfg["n_steps"]]
+            y_task = y[:, task_idx, :cfg["n_steps"], :len(cfg["labels"])]
             y_selected = y_task[task_masks[cfg["task"]]]
             if y_selected.numel() == 0:
                 continue
-            if (y_selected < 0).any():
-                raise ValueError(f"Task '{cfg['task']}' contains invalid targets while estimating class counts.")
-            counts = torch.bincount(y_selected.reshape(-1), minlength=len(cfg["labels"]))
-            class_cnts[cfg["task"]] += counts.to(dtype=torch.float64)
+            class_cnts[cfg["task"]] += y_selected.sum(dim=0).to(dtype=torch.float64)
         logger.progress_advance(y.shape[0])
     logger.progress_close()
 

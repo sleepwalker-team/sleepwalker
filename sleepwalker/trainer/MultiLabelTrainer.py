@@ -3,7 +3,7 @@
 The repository uses this trainer for experiments where one input window
 produces several task-specific categorical predictions, potentially at
 different temporal resolutions. The canonical example in the current tree is
-the standard multilabel configurations together with ``MetaModel``.
+the standard multilabel configurations together with ``CompositeModel``.
 """
 
 from functools import partial
@@ -14,19 +14,17 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 import torch
-from sleepwalker.datasets.utils import RepeatSampler
-from sleepwalker.models.MetaModel import MetaModel
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.losses import build_multilabel_task_masks, class_weights_for_loss, estimate_multilabel_class_cnts
 from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
 from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
-from sleepwalker.trainer.utils.targets import resolve_multiclass_index
+from sleepwalker.trainer.utils.targets import build_multiclass_sequence, build_sequence_mask
 from sleepwalker.utils import logger
 
 
 class MultiLabelTrainer(BaseTrainer):
     """
-    Train a ``MetaModel`` with one categorical head per configured task.
+    Train a ``CompositeModel`` with one categorical head per configured task.
 
     Each task contributes its own label set and target resolution. Smaller
     target resolutions are expanded into multiple steps inside the largest
@@ -35,8 +33,8 @@ class MultiLabelTrainer(BaseTrainer):
     Args:
         epochs: Number of training epochs.
         optimizer: Factory that builds an optimizer for the model.
-        task_config: Normalized task specification mapping task names to label
-            sets, target resolutions, and loss settings.
+        task_config: Task specification mapping task names to label sets,
+            target resolutions, sequence lengths, and loss settings.
         condition_task: Optional task whose labels gate the loss for other
             tasks.
         condition_labels: Labels within ``condition_task`` that activate the
@@ -48,13 +46,10 @@ class MultiLabelTrainer(BaseTrainer):
         save_every: Checkpoint cadence in epochs.
         lr_scheduler: Optional scheduler factory.
         early_stopping: Optional validation patience.
+        return_best: Whether to return the lowest-loss validation checkpoint
+            instead of leaving the model at its last training epoch.
         log_batches: Whether to emit batch-level metric logs.
-        n_repeat_train: Number of repeated views per training sample.
-        n_repeat_test: Number of repeated views per evaluation sample.
 
-    Notes:
-        ``task_config`` must already be normalized before construction. The
-        repository typically does this with :meth:`normalize_task_config`.
     """
 
     def __init__(
@@ -70,9 +65,8 @@ class MultiLabelTrainer(BaseTrainer):
         save_every: int = 1,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
+        return_best: bool = True,
         log_batches: bool = True,
-        n_repeat_train: int = 1,
-        n_repeat_test: int = 1,
     ):
         super().__init__(
             epochs=epochs,
@@ -82,16 +76,16 @@ class MultiLabelTrainer(BaseTrainer):
             save_every=save_every,
             lr_scheduler=lr_scheduler,
             early_stopping=early_stopping,
-            n_repeat_train=n_repeat_train,
-            n_repeat_test=n_repeat_test,
+            return_best=return_best,
         )
         self.log_batches = log_batches
 
-        self.task_config = OrderedDict(task_config)
+        self.task_config = self.normalize_task_config(task_config)
         self.task_specs = list(self.task_config.values())
         self.task_idx = {cfg["task"]: idx for idx, cfg in enumerate(self.task_specs)}
-        self.largest_task_resolution = max(cfg["target_resolution"] for cfg in self.task_specs)
+        self.target_resolution = max(cfg["target_span"] for cfg in self.task_specs)
         self.max_task_steps = max(cfg["n_steps"] for cfg in self.task_specs)
+        self.max_task_classes = max(len(cfg["labels"]) for cfg in self.task_specs)
         self.classes = [label for cfg in self.task_config.values() for label in cfg["labels"]]
         self.num_classes = len(self.classes)
         self.num_tasks = len(self.task_specs)
@@ -124,16 +118,6 @@ class MultiLabelTrainer(BaseTrainer):
             if condition_task in conditioned_tasks:
                 raise ValueError("condition_task must not also be listed in conditioned_tasks.")
 
-            condition_resolution = condition_cfg["target_resolution"]
-            for task in conditioned_tasks:
-                task_resolution = self.task_config[task]["target_resolution"]
-                ratio = condition_resolution / task_resolution
-                if ratio != int(ratio):
-                    raise ValueError(
-                        f"Task '{task}' target_resolution={task_resolution} must divide "
-                        f"condition_task '{condition_task}' target_resolution={condition_resolution}."
-                    )
-
             self.condition_task = condition_task
             self.condition_task_idx = self.task_idx[condition_task]
             self.condition_label_idx = {condition_cfg["labels"].index(label) for label in condition_labels}
@@ -147,6 +131,23 @@ class MultiLabelTrainer(BaseTrainer):
                 raise ValueError(f"Task '{task}' is missing loss_function.")
             self.task_loss_functions[task] = cfg["loss_function"]
             self.task_loss_weights[task] = float(cfg["task_weight"])
+
+    def classification_contract(self) -> dict:
+        return {
+            "type": "multitask",
+            "tasks": {
+                task: {
+                    "classes": list(config["labels"]),
+                    "n_steps": int(config["n_steps"]),
+                    "target_resolution": str(config["target_resolution"]),
+                    "target_offset": str(config["target_offset"]),
+                    "default": config["default"],
+                    "percentage": float(config["percentage"]),
+                    "soft_boundaries": bool(config["soft_boundaries"]),
+                }
+                for task, config in self.task_config.items()
+            },
+        }
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
         """Estimate per-task class counts and configure weighted losses."""
@@ -190,56 +191,23 @@ class MultiLabelTrainer(BaseTrainer):
             else:
                 self.task_loss_functions[task] = loss_function
 
-    def _prediction_frame(self, batch, outputs) -> pd.DataFrame:
-        """Convert multitask logits into the repository's wide prediction table."""
-        rows = []
-        batch_size = len(batch.get("time", []))
-        largest_resolution = pd.to_timedelta(self.largest_task_resolution)
-        for sample_idx in range(batch_size):
-            row = {
-                "patient": batch["patient"][sample_idx],
-                "time": batch["time"][sample_idx],
-            }
-            largest_start = pd.Timestamp(batch["time"][sample_idx]) - largest_resolution / 2
-            for task, cfg in self.task_config.items():
-                task_logits = outputs[task][sample_idx].detach().cpu()
-                task_probs = torch.softmax(task_logits, dim=-1)
-                task_pred_idx = task_probs.argmax(dim=-1)
-                task_resolution = pd.to_timedelta(cfg["target_resolution"])
-                for step_idx in range(cfg["n_steps"]):
-                    suffix = "" if cfg["n_steps"] == 1 else f"__step_{step_idx}"
-                    step_center = largest_start + step_idx * task_resolution + task_resolution / 2
-                    pred_idx = int(task_pred_idx[step_idx].item())
-                    row[f"{task}{suffix}__time"] = step_center
-                    row[f"{task}{suffix}__prediction_idx"] = pred_idx
-                    row[f"{task}{suffix}__prediction"] = cfg["labels"][pred_idx]
-                    for label_idx, label in enumerate(cfg["labels"]):
-                        row[f"{task}{suffix}__prob__{label}"] = float(task_probs[step_idx, label_idx].item())
-            rows.append(row)
-        return pd.DataFrame(rows)
-
     @staticmethod
     def normalize_task_config(task_config: dict[str, dict]):
-        """Validate and normalize a raw multitask configuration.
+        """Validate task steps and derive each centered target span.
 
-        Args:
-            task_config: User-provided task configuration keyed by task name.
-
-        Returns:
-            An ``OrderedDict`` whose values include normalized pandas
-            timedeltas, inferred ``n_steps``, and defaulted loss settings.
-
-        Raises:
-            ValueError: If labels are duplicated across tasks, defaults are
-                invalid, or task resolutions are incompatible.
+        ``target_resolution`` is the duration of one output step and
+        ``sequence_len`` is the number of steps.
         """
-        normalized = OrderedDict()
-        used_classes = set()
+        if len(task_config) == 0:
+            raise ValueError("task_config must not be empty.")
         for task, cfg in task_config.items():
             if "target_resolution" not in cfg:
                 raise ValueError(f"Task '{task}' is missing target_resolution.")
-        largest_task_resolution = max(pd.to_timedelta(cfg["target_resolution"]) for cfg in task_config.values())
+            if "sequence_len" not in cfg:
+                raise ValueError(f"Task '{task}' is missing sequence_len.")
 
+        normalized = OrderedDict()
+        used_classes = set()
         for task, cfg in task_config.items():
             labels = list(cfg["labels"])
             if len(labels) == 0:
@@ -248,31 +216,34 @@ class MultiLabelTrainer(BaseTrainer):
                 raise ValueError(f"Task '{task}' is missing a default entry.")
 
             default = cfg["default"]
-            percentage = cfg.get("percentage", 0.5)
+            percentage = float(cfg.get("percentage", 0.5))
             target_resolution = pd.to_timedelta(cfg["target_resolution"])
+            if target_resolution <= pd.Timedelta(0):
+                raise ValueError(f"Task '{task}' target_resolution must be positive.")
+            sequence_len = int(cfg["sequence_len"])
+            if sequence_len < 1:
+                raise ValueError(f"Task '{task}' sequence_len must be at least 1.")
 
             for label in labels:
                 if label in used_classes:
                     raise ValueError(f"Class '{label}' occurs in multiple tasks.")
                 used_classes.add(label)
-
             if default is not None and default not in labels:
                 raise ValueError(f"Default label '{default}' is not part of task '{task}'.")
-            if percentage <= 0 or percentage > 1:
+            if not 0 < percentage <= 1:
                 raise ValueError(f"Task '{task}' has invalid percentage '{percentage}'.")
-            ratio = largest_task_resolution / target_resolution
-            if ratio != int(ratio):
-                raise ValueError(
-                    f"Task '{task}' target_resolution={target_resolution} must divide largest_task_resolution={largest_task_resolution}."
-                )
 
-            spec = {
+            normalized[task] = {
                 "task": task,
                 "labels": labels,
                 "default": default,
                 "percentage": percentage,
                 "target_resolution": target_resolution,
-                "n_steps": int(ratio),
+                "sequence_len": sequence_len,
+                "n_steps": sequence_len,
+                "target_span": target_resolution * sequence_len,
+                "soft_boundaries": bool(cfg.get("soft_boundaries", False)),
+                "step_mask": dict(cfg["step_mask"]) if cfg.get("step_mask") is not None else None,
                 "embeddings": cfg.get("embeddings", "EEG"),
                 "n_slices": cfg.get("n_slices", 50),
                 "loss_function": cfg.get("loss_function"),
@@ -280,60 +251,57 @@ class MultiLabelTrainer(BaseTrainer):
                 "class_weights": dict(cfg.get("class_weights", {})),
                 "task_weight": float(cfg.get("task_weight", 1.0)),
             }
-            normalized[task] = spec
 
+        common_target_span = max(cfg["target_span"] for cfg in normalized.values())
+        for cfg in normalized.values():
+            cfg["target_offset"] = (common_target_span - cfg["target_span"]) / 2
         return normalized
 
     @staticmethod
     def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], raise_error=True):
-        """Convert label indicator timelines into integer task targets.
-
-        Args:
-            targets: Time-indexed indicator DataFrame for one dataset target
-                window.
-            task_config: Normalized task configuration.
-            raise_error: Whether ambiguous or invalid windows should raise
-                ``ValueError`` instead of returning ``None``.
-
-        Returns:
-            A tensor shaped ``[n_tasks, max_task_steps]`` containing per-step
-            class indices, with ``-1`` reserved for unresolved steps.
-        """
+        """Build padded probability targets and per-step masks for all tasks."""
+        if targets is None:
+            return None
         task_specs = list(task_config.values())
         max_task_steps = max(cfg["n_steps"] for cfg in task_specs)
-        out = torch.full((len(task_config), max_task_steps), -1, dtype=torch.long)
-        freq_seconds = pd.to_timedelta(targets.index.freq).total_seconds()
+        max_task_classes = max(len(cfg["labels"]) for cfg in task_specs)
+        out = torch.zeros((len(task_config), max_task_steps, max_task_classes), dtype=torch.float32)
+        out_mask = torch.zeros((len(task_config), max_task_steps), dtype=torch.bool)
+
+        frequency = targets.index.freq or pd.infer_freq(targets.index)
+        if frequency is None:
+            raise ValueError("Multitask targets require a regular time index.")
+        frequency = pd.to_timedelta(frequency)
+        common_target_span = max(cfg["target_span"] for cfg in task_specs)
+        expected_samples = int(round(common_target_span / frequency))
+        if len(targets) != expected_samples:
+            raise ValueError(f"Expected {expected_samples} target samples for target span {common_target_span}, got {len(targets)}.")
 
         for task_idx, cfg in enumerate(task_specs):
-            step_seconds = cfg["target_resolution"].total_seconds()
-            step_len = int(round(step_seconds / freq_seconds))
-            if step_len <= 0:
-                raise ValueError(f"Task '{cfg['task']}' has invalid step length.")
-            if step_len * cfg["n_steps"] != len(targets):
-                raise ValueError(
-                    f"Task '{cfg['task']}' expects {cfg['n_steps']} steps of {step_len} samples, got {len(targets)} target samples."
+            task_samples = int(round(cfg["target_span"] / frequency))
+            start = (len(targets) - task_samples) // 2
+            task_targets = targets.iloc[start:start + task_samples]
+            target_values = task_targets.drop(columns=[cfg["default"]], errors="ignore") if cfg["default"] is not None else task_targets
+            try:
+                values = build_multiclass_sequence(
+                    target_values,
+                    target_classes=cfg["labels"],
+                    percentage=cfg["percentage"],
+                    sequence_len=cfg["n_steps"],
+                    soft_boundaries=cfg["soft_boundaries"],
                 )
+                if values is None:
+                    raise ValueError("target sequence is ambiguous")
+                mask = build_sequence_mask(task_targets, sequence_len=cfg["n_steps"], step_mask=cfg["step_mask"]) if cfg["step_mask"] is not None else torch.ones(cfg["n_steps"], dtype=torch.bool)
+            except ValueError as exc:
+                if raise_error:
+                    raise ValueError(f"Could not build target for task '{cfg['task']}': {exc}.") from exc
+                return None
 
-            for step_idx in range(cfg["n_steps"]):
-                step_df = targets.iloc[step_idx * step_len:(step_idx + 1) * step_len]
-                totals = {str(k): float(v) * freq_seconds for k, v in step_df.sum().to_dict().items()}
-                try:
-                    labels = cfg["labels"]
-                    default = cfg["default"]
-                    min_event_seconds = step_seconds * cfg.get("percentage", 0.5)
-                    target = torch.tensor([float(totals.get(label, 0.0)) for label in labels], dtype=torch.float)
-                    default_idx = labels.index(default) if default is not None else None
-                    idx = resolve_multiclass_index(target, default_idx, min_event_seconds, raise_error=raise_error)
-                    step_target = -1 if idx is None else idx
-                    if step_target < 0 and not raise_error:
-                        return None
-                    out[task_idx, step_idx] = step_target
-                except ValueError as exc:
-                    if raise_error:
-                        raise ValueError(f"{exc} Task '{cfg['task']}', step {step_idx}.") from exc
-                    return None
+            out[task_idx, :cfg["n_steps"], :len(cfg["labels"])] = values
+            out_mask[task_idx, :cfg["n_steps"]] = mask
 
-        return out
+        return out, out_mask
 
     @staticmethod
     def prepare_target(
@@ -355,7 +323,7 @@ class MultiLabelTrainer(BaseTrainer):
                 compatibility.
             class_cnts: Optional per-task class counts used for rejection-based
                 balancing.
-            task_config: Normalized task configuration.
+            task_config: Task configuration with explicit sequence lengths.
 
         Returns:
             A dictionary containing ``target`` and optionally ``target_extra``,
@@ -363,12 +331,16 @@ class MultiLabelTrainer(BaseTrainer):
         """
         if task_config is None:
             raise ValueError("task_config must not be None.")
+        if any("target_span" not in cfg for cfg in task_config.values()):
+            normalized = MultiLabelTrainer.normalize_task_config(task_config)
+            task_config.clear()
+            task_config.update(normalized)
 
-        target = MultiLabelTrainer.build_multitask_target(target, task_config, raise_error=False)
-        if target is None:
+        built_target = MultiLabelTrainer.build_multitask_target(target, task_config, raise_error=False)
+        if built_target is None:
             return None
-
-        item = {"target": target}
+        target_values, target_mask = built_target
+        item = {"target": target_values, "target_mask": target_mask}
 
         if class_cnts:
             keep_probability = 1.0
@@ -387,9 +359,9 @@ class MultiLabelTrainer(BaseTrainer):
                     for label_idx, label in enumerate(cfg["labels"])
                 }
                 min_proba = min(task_probas.values())
-                for label_idx in target[task_idx].tolist():
-                    if label_idx < 0:
-                        continue
+                cfg_mask = target_mask[task_idx, :cfg["n_steps"]]
+                target_indices = target_values[task_idx, :cfg["n_steps"], :len(cfg["labels"])].argmax(dim=-1)
+                for label_idx in target_indices[cfg_mask].tolist():
                     keep_probability = min(keep_probability, min_proba / task_probas[int(label_idx)])
 
             if random.random() > keep_probability:
@@ -398,7 +370,7 @@ class MultiLabelTrainer(BaseTrainer):
         if target_extra is not None:
             extra = MultiLabelTrainer.build_multitask_target(target_extra, task_config, raise_error=False)
             if extra is not None:
-                item["target_extra"] = extra
+                item["target_extra"], item["target_extra_mask"] = extra
 
         return item
 
@@ -434,11 +406,12 @@ class MultiLabelTrainer(BaseTrainer):
         if len(blocks) > 0:
             logger.info(render_confusion_table_grid(blocks, header=f"{mode.upper()} confusion matrices"))
 
-    def run_epoch(self, loader, opt, model, prefix=""):
+    def run_epoch(self, loader, opt, model, prefix="", lr_scheduler=None):
         """Run one train, validation, or test epoch for a multitask model.
 
         Args:
-            loader: Dataloader producing ``data`` and integer multitask targets.
+            loader: Dataloader producing ``data``, probability targets, and
+                per-task step masks.
             opt: Optimizer for training epochs, or ``None`` during evaluation.
             model: Expected to expose ``task_config`` and return task logits.
             prefix: Progress-label prefix used to infer the logging mode.
@@ -451,15 +424,13 @@ class MultiLabelTrainer(BaseTrainer):
             ValueError: If the model type, dataset resolution, logits, or
                 targets do not match the configured task layout.
         """
-        if not isinstance(model, MetaModel) and not hasattr(model, "task_config"):
-            raise ValueError("MultiLabelTrainer requires a multitask model with task_config.")
         dataset_resolution = getattr(loader.dataset, "target_resolution", None)
         if dataset_resolution is None:
             raise ValueError("MultiLabelTrainer requires loader.dataset.target_resolution.")
         dataset_resolution = pd.to_timedelta(dataset_resolution)
-        if dataset_resolution != self.largest_task_resolution:
+        if dataset_resolution != self.target_resolution:
             raise ValueError(
-                f"Dataset target_resolution={dataset_resolution} does not match largest_task_resolution={self.largest_task_resolution}."
+                f"Dataset target_resolution={dataset_resolution} does not match the largest task target span {self.target_resolution}."
             )
 
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
@@ -476,40 +447,24 @@ class MultiLabelTrainer(BaseTrainer):
         }
         cnt = 0
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
-        n_repeat = loader.sampler.n_repeat if isinstance(getattr(loader, "sampler", None), RepeatSampler) else 1
-
         per_task_losses = [0.0 for _ in range(len(self.task_specs))]
         per_task_loss_batches = [0 for _ in range(len(self.task_specs))]
         per_task_correct = [0 for _ in range(len(self.task_specs))]
         per_task_counts = [0 for _ in range(len(self.task_specs))]
         for batch in loader:
-            x = batch["data"].to(self.device, non_blocking=True)
-            y = batch["target"].to(self.device, non_blocking=True)
-
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 
-            if n_repeat > 1:
-                if x.shape[0] % n_repeat != 0:
-                    raise ValueError(f"Batch size {x.shape[0]} is not divisible by n_repeat={n_repeat}.")
-                base_batch = x.shape[0] // n_repeat
-                y = y.view(base_batch, n_repeat, *y.shape[1:])[:, 0]
-                x_grouped = x.view(base_batch, n_repeat, *x.shape[1:])
-
-                logits_sum = None
-                for repeat_idx in range(n_repeat):
-                    current_logits = model(x_grouped[:, repeat_idx])
-                    if logits_sum is None:
-                        logits_sum = {task: value.clone() for task, value in current_logits.items()}
-                    else:
-                        for task, value in current_logits.items():
-                            logits_sum[task] += value
-                logits = {task: value / n_repeat for task, value in logits_sum.items()}
-            else:
-                logits = model(x)
+            x = batch["data"].to(self.device, non_blocking=True)
+            logits = model(x)
+            y = batch["target"].to(self.device, non_blocking=True)
+            if "target_mask" not in batch:
+                raise ValueError("Multitask batches must contain target_mask.")
+            target_mask = batch["target_mask"].to(self.device, dtype=torch.bool, non_blocking=True)
 
             task_masks = build_multilabel_task_masks(
                 y,
+                target_mask,
                 self.task_config,
                 condition_task=self.condition_task,
                 condition_labels=[
@@ -525,34 +480,32 @@ class MultiLabelTrainer(BaseTrainer):
                 task = cfg["task"]
                 n_classes = len(cfg["labels"])
                 n_steps = cfg["n_steps"]
-                y_task = y[:, task_idx, :n_steps]
+                y_task = y[:, task_idx, :n_steps, :n_classes]
                 logits_task = logits[task]
-                sample_mask = task_masks[task]
+                step_mask = task_masks[task]
 
-                if logits_task.shape[1] != n_steps or logits_task.shape[2] != n_classes:
+                expected_shape = (y.shape[0], n_steps, n_classes)
+                if tuple(logits_task.shape) != expected_shape:
                     raise ValueError(
-                        f"Task '{task}' logits shape {tuple(logits_task.shape)} does not match expected "
-                        f"(B, {n_steps}, {n_classes})."
+                        f"Task '{task}' logits shape {tuple(logits_task.shape)} does not match expected {expected_shape}."
                     )
-                if sample_mask.ndim != 1 or sample_mask.shape[0] != y_task.shape[0]:
-                    raise ValueError(
-                        f"Task '{task}' mask shape {tuple(sample_mask.shape)} does not match expected (B,)."
-                    )
-                if sample_mask.sum() == 0:
+                if tuple(y_task.shape) != expected_shape:
+                    raise ValueError(f"Task '{task}' target shape {tuple(y_task.shape)} does not match expected {expected_shape}.")
+                if tuple(step_mask.shape) != expected_shape[:2]:
+                    raise ValueError(f"Task '{task}' mask shape {tuple(step_mask.shape)} does not match expected {expected_shape[:2]}.")
+                if not step_mask.any():
                     continue
 
-                logits_selected = logits_task[sample_mask]
-                y_selected = y_task[sample_mask]
-                if (y_selected < 0).any():
-                    raise ValueError(f"Task '{task}' contains invalid targets. Unclear labels must be filtered in get_target().")
-                if (y_selected >= n_classes).any():
-                    raise ValueError(f"Task '{task}' contains out-of-range targets.")
+                logits_selected = logits_task[step_mask]
+                y_selected = y_task[step_mask]
+                if not torch.allclose(y_selected.sum(dim=-1), torch.ones(y_selected.shape[0], device=y_selected.device), atol=1e-5):
+                    raise ValueError(f"Task '{task}' valid targets must sum to one.")
 
-                loss_task = self.task_loss_functions[task](logits_selected.transpose(1, 2), y_selected)
+                loss_task = self.task_loss_functions[task](logits_selected, y_selected)
                 loss_task = self.task_loss_weights[task] * loss_task
                 pred_selected = logits_selected.argmax(dim=-1)
                 pred_flat = pred_selected.reshape(-1)
-                y_flat = y_selected.reshape(-1)
+                y_flat = y_selected.argmax(dim=-1).reshape(-1)
 
                 per_task_losses[task_idx] += float(loss_task.item())
                 per_task_loss_batches[task_idx] += 1
@@ -596,6 +549,8 @@ class MultiLabelTrainer(BaseTrainer):
             self.steps[mode] += 1
             logger.progress_status(desc)
             logger.progress_advance(loader.batch_size)
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1)

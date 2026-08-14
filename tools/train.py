@@ -15,10 +15,15 @@ fully qualified ``name`` and put constructor arguments directly beside it::
             fs: 100
       files:
         train:
-          name: sleepwalker.training.files.select_edf_files
+          name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
           root: /raid/sleepwalker/hsp
         validation_fraction: 0.1
         test_fraction: 0.1
+      patient_filter:
+        - name: sleepwalker.training.files.filter_edf_files
+          min_duration: 30min
+        - name: sleepwalker.datasets.HSP.filter_hsp_annotation_labels
+          required_labels: [n1, n2, n3, rem]
 
     model:
       name: sleepwalker.models.UTime.UTime
@@ -38,15 +43,21 @@ fully qualified ``name`` and put constructor arguments directly beside it::
 
 ``data`` may be a list for multi-dataset training.  Composite models are
 ordinary nested named components; for example their entries name
-``sleepwalker.models.MultiModel.MetaModelEntry`` explicitly.
+``sleepwalker.models.CompositeModel.CompositeModelEntry`` explicitly.
 
 ``files`` either names selectors for a newly generated split, as above, or is
-the path to a precomputed YAML split.  A precomputed split has exactly the
-patient paths consumed by the run and needs only this shape::
+the path to a precomputed YAML split.  ``tools/split.py`` creates holdout and
+cross-validation manifests in this shape::
 
-    train: [/data/sub-1.edf]
-    validation: [/data/sub-2.edf]
-    test: [/data/sub-3.edf]
+    folds:
+      holdout:
+        train: [/data/sub-1.edf]
+        validation: [/data/sub-2.edf]
+        test: [/data/sub-3.edf]
+
+An optional ``patient_filter`` narrows each base partition for the current
+experiment before dataset initialization without reassigning any patient. Use
+``--fold fold_0`` to train one fold from a cross-validation manifest.
 
 Callbacks remain ordinary Python functions.  ``prepare_patient``,
 ``prepare_target``, and ``prepare_sample`` are bound with ``functools.partial``;
@@ -72,6 +83,7 @@ import importlib
 import inspect
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -89,24 +101,36 @@ from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.utils import random_split
 from sleepwalker.trainer.Run import RunCfg, RunResult, run, seed_everything
+from sleepwalker.trainer.utils.splits import load_split
+from sleepwalker.utils import logger
 
-
+#TODO: Sometimes delayed output -> review
 DATA_FIELDS = {
-    "files",
+    "files", #TODO: REVIEW THIS PART
     "num_workers",
     "strict",
     "label",
-    "inference",
     "output_classes",
-    "split_overrides",
+    "patient_filter",
 }
-CONTEXT_FIELDS = {"classes", "input_channels", "n_channels", "ts_len", "sampling_frequency"}
+CONTEXT_FIELDS = {"classes", "input_channels", "n_channels", "ts_len", "sampling_frequency", "sequence_len"}
 DRY_RUN_PATIENTS = {"train": 30, "validation": 10, "test": 10}
+
+
+class ScientificNotationLoader(yaml.SafeLoader):
+    """Safe YAML loader that recognizes exponent notation without a decimal point."""
+
+
+ScientificNotationLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(r"^[-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)[eE][-+]?[0-9]+$"),
+    list("-+0123456789."),
+)
 
 
 def read_yaml(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
+        return yaml.load(handle, Loader=ScientificNotationLoader) or {}
 
 
 def import_name(name: str) -> Any:
@@ -154,6 +178,8 @@ def build_component(spec: Mapping[str, Any], context: Mapping[str, Any] | None =
 
     parameters = inspect.signature(symbol).parameters
     for key in CONTEXT_FIELDS:
+        if key in {"classes", "sequence_len"} and "task_config" in arguments:
+            continue
         if key in parameters and key in local_context and key not in arguments:
             arguments[key] = local_context[key]
     return symbol(**arguments)
@@ -173,19 +199,13 @@ def build_callback(spec: str | Mapping[str, Any] | None) -> Any:
     }
     return partial(symbol, **arguments) if arguments else symbol
 
-
 def build_factory(spec: Mapping[str, Any], dependency: str) -> Any:
     """Delay optimizer/scheduler construction until its dependency exists."""
     symbol = import_name(str(spec["name"]))
-    arguments = {
-        key: build_value(value)
-        for key, value in spec.items()
-        if key != "name"
-    }
+    arguments = { key: build_value(value) for key, value in spec.items() if key != "name"}
     if dependency == "model":
         return lambda model: symbol(model.parameters(), **arguments)
-    return lambda optimizer: symbol(optimizer, **arguments)
-
+    return partial(symbol, **arguments)
 
 def build_channel(spec: Mapping[str, Any]) -> ChannelConfig:
     arguments = dict(spec)
@@ -193,11 +213,9 @@ def build_channel(spec: Mapping[str, Any]) -> ChannelConfig:
         arguments["normalizer"] = build_value(arguments["normalizer"])
     return ChannelConfig(**arguments)
 
-
-def build_dataset(entry: Mapping[str, Any], role: str | None = None):
+def build_dataset(entry: Mapping[str, Any]):
     """Build the dataset shown in one ``data`` entry."""
     spec = {key: value for key, value in entry.items() if key not in DATA_FIELDS}
-    spec.update(entry.get("split_overrides", {}).get(role, {}))
     spec["channels"] = [build_channel(channel) for channel in spec.get("channels", [])]
     for callback_name in ("prepare_patient", "prepare_target", "prepare_sample"):
         if callback_name in spec:
@@ -218,14 +236,46 @@ def select_patients(spec: Any, dataset) -> list[str]:
         for key, value in spec.items()
         if key != "name"
     }
-    return [str(path) for path in selector(dataset=dataset, **arguments)]
+    if "dataset" in inspect.signature(selector).parameters:
+        arguments["dataset"] = dataset
+    return [str(path) for path in selector(**arguments)]
 
 
-def load_patient_split(files: str | Mapping[str, Any], dataset, seed: int) -> dict[str, list[str]]:
+def apply_patient_filter(
+    spec: str | Mapping[str, Any] | list,
+    patients: list[str],
+    dataset,
+    num_workers: int = 1,
+) -> list[str]:
+    """Apply configured filters in order to paths already assigned to a split."""
+    filters = spec if isinstance(spec, list) else [spec]
+    filtered = list(patients)
+    for filter_spec in filters:
+        if isinstance(filter_spec, str):
+            patient_filter = import_name(filter_spec)
+            arguments = {}
+        else:
+            patient_filter = import_name(str(filter_spec["name"]))
+            arguments = {key: build_value(value) for key, value in filter_spec.items() if key != "name"}
+        parameters = inspect.signature(patient_filter).parameters
+        if "dataset" in parameters:
+            arguments["dataset"] = dataset
+        if "num_workers" in parameters and "num_workers" not in arguments:
+            arguments["num_workers"] = num_workers
+        current = [str(path) for path in patient_filter(patients=filtered, **arguments)]
+        unexpected = sorted(set(current) - set(filtered))
+        if unexpected:
+            raise ValueError(f"A patient filter may only remove paths from its existing partition; it added {unexpected[:5]}.")
+        if len(current) != len(set(current)):
+            raise ValueError("A patient filter returned duplicate paths.")
+        filtered = current
+    return filtered
+
+
+def load_patient_split(files: str | Mapping[str, Any], dataset, seed: int, fold: str | None = None) -> dict[str, list[str]]:
     """Load an authoritative split or visibly create one from selectors."""
     if isinstance(files, str):
-        split = read_yaml(files)
-        return {role: [str(path) for path in split[role]] for role in DRY_RUN_PATIENTS}
+        return load_split(files, fold=fold)
 
     split_options = dict(files)
     validation_fraction = float(split_options.pop("validation_fraction", 0))
@@ -245,56 +295,71 @@ def load_patient_split(files: str | Mapping[str, Any], dataset, seed: int) -> di
     return patients
 
 
-def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False):
+def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None):
     """Load patient paths and initialize every train/validation/test dataset."""
     entries = config["data"] if isinstance(config["data"], list) else [config["data"]]
     seed = int(config.get("seed", 17))
     train_datasets, validation_datasets, test_datasets = [], [], []
-    inference_dataset = None
 
     for entry in entries:
         template = build_dataset(entry)
-        split = load_patient_split(entry["files"], template, seed)
-        workers = min(int(entry.get("num_workers", 4)), 2) if dry_run else int(entry.get("num_workers", 4))
+        split = load_patient_split(entry["files"], template, seed, fold=fold)
+        workers = (
+            min(int(entry.get("num_workers", 4)), 2)
+            if dry_run
+            else int(entry.get("num_workers", 4))
+        )
         patients_per_entry = {
             role: max(1, limit // len(entries))
             for role, limit in DRY_RUN_PATIENTS.items()
         }
 
         for role, patients in split.items():
+            dataset = build_dataset(entry)
+            if entry.get("patient_filter") is not None:
+                filtered = apply_patient_filter(
+                    entry["patient_filter"],
+                    patients,
+                    dataset,
+                    num_workers=workers,
+                )
+                logger.info(
+                    f"Configured patient filter for {role} kept "
+                    f"{len(filtered)}/{len(patients)} paths."
+                )
+                patients = filtered
             if dry_run:
                 patients = patients[: patients_per_entry[role]]
             if not patients:
                 continue
-            dataset = build_dataset(entry, role)
             dataset.initialize(patients, workers, strict=bool(entry.get("strict", False)))
             if role == "train":
                 train_datasets.append(dataset)
-                if inference_dataset is None or entry.get("inference", False):
-                    inference_dataset = build_dataset(entry, "inference")
             elif role == "validation":
                 validation_datasets.append(dataset)
             elif role == "test":
                 label = str(entry.get("label", dataset.__class__.__name__))
                 test_datasets.append((label, dataset))
 
-    return train_datasets, validation_datasets, test_datasets, inference_dataset
+    return train_datasets, validation_datasets, test_datasets
 
 
-def build_run_config(config: Mapping[str, Any], dry_run: bool = False) -> RunCfg:
+def build_run_config(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None) -> RunCfg:
     """Build datasets, model, trainer, and finally the normal API ``RunCfg``."""
     seed_everything(int(config.get("seed", 17)))
-    train_datasets, validation_datasets, test_datasets, inference_dataset = initialize_datasets(
-        config, dry_run
+    train_datasets, validation_datasets, test_datasets = initialize_datasets(
+        config, dry_run=dry_run, fold=fold
     )
     training_dataset = combine_datasets(train_datasets)
     input_channels = training_dataset.get_input_channels()
+    sequence_len = int(config["trainer"].get("sequence_len", 1))
     context = {
         "classes": training_dataset.get_classes(),
         "input_channels": input_channels,
         "n_channels": len(input_channels),
         "ts_len": training_dataset.get_timeseries_len(),
         "sampling_frequency": training_dataset.sample_frequency,
+        "sequence_len": sequence_len,
     }
 
     model = build_component(config["model"], context)
@@ -311,9 +376,15 @@ def build_run_config(config: Mapping[str, Any], dry_run: bool = False) -> RunCfg
     trainer = build_component(trainer_spec, context)
 
     run_options = copy.deepcopy(config["run"])
+    if fold is not None:
+        run_options["experiment_name"] = f"{run_options['experiment_name']}-{fold}"
+        run_options.setdefault("tags", {})["fold"] = fold
     run_options.setdefault("model_name", str(config["model"]["name"]).split(".")[-1])
     run_options["collate_fn"] = build_callback(run_options.get("collate_fn")) or batch_collate
-    run_options.setdefault("meta_data", copy.deepcopy(dict(config)))
+    metadata = copy.deepcopy(dict(config))
+    if fold is not None:
+        metadata["fold"] = fold
+    run_options.setdefault("meta_data", metadata)
     if dry_run:
         run_options["experiment_name"] = f"{run_options['experiment_name']}-dry-run"
         run_options["batch_size"] = min(int(run_options["batch_size"]), 16)
@@ -331,12 +402,12 @@ def build_run_config(config: Mapping[str, Any], dry_run: bool = False) -> RunCfg
         train_datasets=train_datasets,
         val_datasets=validation_datasets,
         test_datasets=test_datasets,
-        inference_dataset=inference_dataset,
     )
 
 
-def execute(config: Mapping[str, Any], dry_run: bool = False) -> RunResult:
-    return run(build_run_config(config, dry_run))
+def execute(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None) -> RunResult:
+    selected_fold = fold if fold is not None else config.get("fold")
+    return run(build_run_config(config, dry_run, selected_fold))
 
 
 def main() -> None:
@@ -347,8 +418,9 @@ def main() -> None:
         action="store_true",
         help="Train for one epoch on a small patient and sample budget.",
     )
+    parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
     args = parser.parse_args()
-    execute(read_yaml(args.config), dry_run=args.dry_run)
+    execute(read_yaml(args.config), dry_run=args.dry_run, fold=args.fold)
 
 
 if __name__ == "__main__":

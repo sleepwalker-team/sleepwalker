@@ -59,16 +59,17 @@ data:
       - columns: [sleep]
         percentage: 0.5
         mode: min
+  patient_filter:
+    name: sleepwalker.training.files.filter_edf_files
+    excluded_channels: sleepwalker.training.files.PAP_CHANNEL_PATTERNS
   files:
     train:
-      name: sleepwalker.training.files.select_edf_files
+      name: sleepwalker.datasets.utils.get_edf_files_in_repo
       root: /raid/sleepwalker/ruhrlandklinik/raw/train-test-2023
-      include_pap: false
     validation_fraction: 0.1
     test:
-      name: sleepwalker.training.files.select_edf_files
+      name: sleepwalker.datasets.utils.get_edf_files_in_repo
       root: /raid/sleepwalker/ruhrlandklinik/raw/val-2024
-      include_pap: false
   label: Ruhrland2024
   num_workers: 8
 model:

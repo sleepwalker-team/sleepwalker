@@ -48,13 +48,14 @@ data:
         percentage: 0.5
         mode: min
   prepare_sample:
-    name: sleepwalker.training.callbacks.tensor_sample
+    name: sleepwalker.training.callbacks.prepare_tensor_sample
     max_nan_fraction: 0.05
+  patient_filter:
+    name: sleepwalker.training.files.filter_edf_files
   files:
     train:
-      name: sleepwalker.training.files.select_edf_files
+      name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
       root: /raid/sleepwalker/hsp
-      annotated_only: true
     validation_fraction: 0.1
     test_fraction: 0.1
   label: HSP

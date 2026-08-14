@@ -35,26 +35,28 @@ data:
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
     target_classes: [no_arousal, arousal]
+  patient_filter:
+    - name: sleepwalker.training.files.filter_edf_files
+    - name: sleepwalker.datasets.HSP.filter_hsp_annotation_labels
+      required_labels: [arousal]
   files:
     train:
-      name: sleepwalker.training.files.select_edf_files
+      name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
       root: /raid/sleepwalker/hsp
-      annotated_only: true
-      required_annotation_labels: [arousal]
     validation_fraction: 0.1
     test_fraction: 0.1
   label: HSP
   num_workers: 2
 model:
-  name: sleepwalker.models.MultiModel.MultiModel
+  name: sleepwalker.models.CompositeModel.CompositeModel
   models:
-    - name: sleepwalker.models.MultiModel.MetaModelEntry
+    - name: sleepwalker.models.CompositeModel.CompositeModelEntry
       input_channels: [EEG]
       model:
         name: sleepwalker.models.SleepTransformer.SleepTransformer
         classes: null
-        epoch_seq_len: 3
-    - name: sleepwalker.models.MultiModel.MetaModelEntry
+        epoch_seq_len: 2
+    - name: sleepwalker.models.CompositeModel.CompositeModelEntry
       input_channels: [EOG, Chin EMG, EKG]
       model:
         name: sleepwalker.models.UTime.UTime
@@ -88,7 +90,7 @@ trainer:
     arousal: 10
 run:
   experiment_name: arousal_hsp_multimodel
-  model_name: MultiModel
+  model_name: CompositeModel
   batch_size: 128
   n_samples: 250000
   num_workers_dataloader: 8
@@ -98,5 +100,5 @@ run:
   tags:
     task: arousal
     dataset: hsp
-    model: MultiModel
+    model: CompositeModel
   expert_task: arousal

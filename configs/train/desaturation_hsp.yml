@@ -35,27 +35,26 @@ data:
           percentage: 0.5
           mode: min
     prepare_sample:
-      name: sleepwalker.training.callbacks.tensor_sample
+      name: sleepwalker.training.callbacks.prepare_tensor_sample
       max_nan_fraction: 0.05
       valid_ranges:
         SpO2: [-5, 5]
         Saturation: [-5, 5]
         SaO2: [-5, 5]
       max_out_of_range_fraction: 0.05
+    patient_filter:
+      name: sleepwalker.training.files.filter_edf_files
     files:
       train:
-        name: sleepwalker.training.files.select_edf_files
+        name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
         root: /raid/sleepwalker/hsp
-        annotated_only: true
-        require_channels: true
-        include_pap: true
       validation_fraction: 0.1
       test_fraction: 0.1
     label: HSP
     num_workers: 2
 model:
   name: sleepwalker.models.UTime.UTime
-  sampling_frequency: 0.01s
+  sampling_frequency: 100
   channel: [64, 128, 128, 256]
   kernel: [5, 5, 3, 3]
   maxpool: [5, 5, 3, 3]

@@ -16,7 +16,7 @@ data:
       sleep stage 3: n3
       sleep stage 4: n3
       sleep stage r: rem
-    total_input: 500s
+    total_input: 450s
     target_resolution: 30s
     stride: 30s
     assume_units_if_missing: false
@@ -27,19 +27,12 @@ data:
     prepare_target:
       name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
       target_classes: [wake, n1, n2, n3, rem]
-    split_overrides:
-      test:
-        total_input: 450s
-      inference:
-        total_input: 450s
+    patient_filter:
+      name: sleepwalker.training.files.filter_edf_files
     files:
       train:
-        name: sleepwalker.training.files.select_sleep_staging_files
+        name: sleepwalker.datasets.utils.get_edf_files_in_repo
         root: /raid/sleepwalker/sleep-edfx
-        training: true
-        sleep_labels: [n1, n2, n3, rem]
-        sleep_time_filter_quantile: 0.05
-        num_workers: 8
       validation_fraction: 0.1
       test_fraction: 0.3
     label: sleepedfx

@@ -1,0 +1,62 @@
+# Example: train a five-epoch sleep-staging head on a converted SleepFM package.
+# First run: python tools/foundation_models.py download sleepfm /path/to/downloads
+# Then run:  python tools/foundation_models.py convert sleepfm /path/to/downloads/sleepfm /path/to/packages/sleepfm
+
+seed: 17
+data:
+  name: sleepwalker.datasets.HSP.HSP
+  sample_frequency: 256
+  channels:
+    - {logical_name: CHEST, physical_names: [CHEST, Chest, Thorax]}
+    - {logical_name: SaO2, physical_names: [SaO2, SpO2, SPO2]}
+    - {logical_name: ABD, physical_names: [ABD, Abdomen, Abdominal]}
+    - {logical_name: C3-M2, physical_names: [C3-M2]}
+    - {logical_name: C4-M1, physical_names: [C4-M1]}
+    - {logical_name: O1-M2, physical_names: [O1-M2]}
+    - {logical_name: O2-M1, physical_names: [O2-M1]}
+    - {logical_name: E1-M2, physical_names: [E1-M2]}
+    - {logical_name: ECG, physical_names: [ECG, ECG-LA, ECG-RA]}
+  event_mapping:
+    wake: wake
+    n1: n1
+    n2: n2
+    n3: n3
+    rem: rem
+  total_input: 150s
+  target_resolution: 150s
+  stride: 30s
+  assume_units_if_missing: true
+  output_classes: &classes [wake, n1, n2, n3, rem]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: *classes
+    sequence_len: 5
+  files: iclr2026/splits/hsp.yml
+  label: HSP
+  num_workers: 16
+
+model:
+  name: sleepwalker.models.PackagedClassifierModel.PackagedClassifierModel
+  package: /path/to/packages/sleepfm
+  head: linear
+  freeze_encoder: true
+
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  epochs: 30
+  sequence_len: 5
+  optimizer:
+    name: torch.optim.AdamW
+    lr: 1e-3
+    weight_decay: 1e-4
+  loss_function: torch.nn.functional.cross_entropy
+  early_stopping: 10
+
+run:
+  experiment_name: sleepfm-hsp-head
+  batch_size: 32
+  n_samples: null
+  num_workers_dataloader: 8
+  use_mlflow: false
+  log_path: results/foundation/sleepfm
+  expert_task: sleep

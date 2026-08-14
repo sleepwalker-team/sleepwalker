@@ -67,39 +67,41 @@ data:
     name: sleepwalker.training.callbacks.trim_patient_to_events
   prepare_target:
     name: sleepwalker.trainer.MultiLabelTrainer.MultiLabelTrainer.prepare_target
-    task_config:
-      name: sleepwalker.trainer.MultiLabelTrainer.MultiLabelTrainer.normalize_task_config
-      task_config:
-        breathing:
-          labels: [obstruction, regular]
-          default: regular
-          percentage: 0.5
-          target_resolution: 10s
-          loss_function: torch.nn.functional.cross_entropy
-          loss_mode: inverse
-        arousal:
-          labels: [arousal, no arousal]
-          default: no arousal
-          percentage: 0.5
-          target_resolution: 1s
-          loss_function: torch.nn.functional.cross_entropy
-          loss_mode: inverse
-        desat:
-          labels: [desaturation, no desaturation]
-          default: no desaturation
-          percentage: 0.5
-          target_resolution: 10s
-          loss_function: torch.nn.functional.cross_entropy
-          loss_mode: inverse
-        sleep:
-          labels: [n1, n2, n3, rem, wake]
-          default: null
-          percentage: 0.5
-          target_resolution: 30s
-          loss_function: torch.nn.functional.cross_entropy
-          loss_mode: inverse
+    task_config: &task_config
+      breathing:
+        labels: [obstruction, regular]
+        default: regular
+        percentage: 0.5
+        target_resolution: 10s
+        sequence_len: 3
+        loss_function: torch.nn.functional.cross_entropy
+        loss_mode: inverse
+      arousal:
+        labels: [arousal, no arousal]
+        default: no arousal
+        percentage: 0.5
+        target_resolution: 1s
+        sequence_len: 30
+        loss_function: torch.nn.functional.cross_entropy
+        loss_mode: inverse
+      desat:
+        labels: [desaturation, no desaturation]
+        default: no desaturation
+        percentage: 0.5
+        target_resolution: 10s
+        sequence_len: 3
+        loss_function: torch.nn.functional.cross_entropy
+        loss_mode: inverse
+      sleep:
+        labels: [n1, n2, n3, rem, wake]
+        default: null
+        percentage: 0.5
+        target_resolution: 30s
+        sequence_len: 1
+        loss_function: torch.nn.functional.cross_entropy
+        loss_mode: inverse
   prepare_sample:
-    name: sleepwalker.training.callbacks.tensor_sample
+    name: sleepwalker.training.callbacks.prepare_tensor_sample
     max_nan_fraction: 0.05
     quality_max_mean:
       EEG: 20000
@@ -127,40 +129,10 @@ data:
   label: Ruhrland2024
   num_workers: 8
 model:
-  name: sleepwalker.models.MetaModel.MetaModel
-  task_config:
-    name: sleepwalker.trainer.MultiLabelTrainer.MultiLabelTrainer.normalize_task_config
-    task_config:
-      breathing:
-        labels: [obstruction, regular]
-        default: regular
-        percentage: 0.5
-        target_resolution: 10s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      arousal:
-        labels: [arousal, no arousal]
-        default: no arousal
-        percentage: 0.5
-        target_resolution: 1s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      desat:
-        labels: [desaturation, no desaturation]
-        default: no desaturation
-        percentage: 0.5
-        target_resolution: 10s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      sleep:
-        labels: [n1, n2, n3, rem, wake]
-        default: null
-        percentage: 0.5
-        target_resolution: 30s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
+  name: sleepwalker.models.CompositeModel.CompositeModel
+  task_config: *task_config
   models:
-    - name: sleepwalker.models.MultiModel.MetaModelEntry
+    - name: sleepwalker.models.CompositeModel.CompositeModelEntry
       input_channels: [Chest, Abdomen, Saturation, Pulse Waveform]
       model:
         name: sleepwalker.models.UTime.UTime
@@ -171,7 +143,7 @@ model:
         kernel: [5, 5, 5, 5]
         norm: channel
         mlp_size: 64
-    - name: sleepwalker.models.MultiModel.MetaModelEntry
+    - name: sleepwalker.models.CompositeModel.CompositeModelEntry
       input_channels: [EEG]
       model:
         name: sleepwalker.models.SleepTransformer.SleepTransformer
@@ -188,37 +160,7 @@ trainer:
     start_factor: 1
     end_factor: 0.01
     total_iters: 50
-  task_config:
-    name: sleepwalker.trainer.MultiLabelTrainer.MultiLabelTrainer.normalize_task_config
-    task_config:
-      breathing:
-        labels: [obstruction, regular]
-        default: regular
-        percentage: 0.5
-        target_resolution: 10s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      arousal:
-        labels: [arousal, no arousal]
-        default: no arousal
-        percentage: 0.5
-        target_resolution: 1s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      desat:
-        labels: [desaturation, no desaturation]
-        default: no desaturation
-        percentage: 0.5
-        target_resolution: 10s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
-      sleep:
-        labels: [n1, n2, n3, rem, wake]
-        default: null
-        percentage: 0.5
-        target_resolution: 30s
-        loss_function: torch.nn.functional.cross_entropy
-        loss_mode: inverse
+  task_config: *task_config
   condition_task: sleep
   condition_labels: [n1, n2, n3, rem]
   conditioned_tasks: [breathing, arousal, desat]

@@ -29,14 +29,12 @@ data:
     prepare_target:
       name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
       target_classes: [wake, n1, n2, n3, rem]
+    patient_filter:
+      name: sleepwalker.training.files.filter_edf_files
     files:
       train:
-        name: sleepwalker.training.files.select_sleep_staging_files
+        name: sleepwalker.datasets.utils.get_edf_files_in_repo
         root: /raid/sleepwalker/sleep-edfx
-        training: true
-        sleep_labels: [n1, n2, n3, rem]
-        sleep_time_filter_quantile: 0.05
-        num_workers: 8
       validation_fraction: 0.1
       test_fraction: 0.3
     label: sleepedfx
@@ -65,14 +63,12 @@ data:
     prepare_target:
       name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
       target_classes: [wake, n1, n2, n3, rem]
+    patient_filter:
+      name: sleepwalker.training.files.filter_edf_files
     files:
       train:
-        name: sleepwalker.training.files.select_sleep_staging_files
+        name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
         root: /raid/sleepwalker/hsp
-        training: true
-        sleep_labels: [n1, n2, n3, rem]
-        sleep_time_filter_quantile: 0.05
-        num_workers: 8
       validation_fraction: 0.1
       test_fraction: 0.3
     label: hsp

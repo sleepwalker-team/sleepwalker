@@ -1,26 +1,22 @@
 import os 
 import torch
-import tqdm
 import hashlib
 
 from dotenv import load_dotenv
-from os.path import join, exists
+from os.path import join
 from functools import partial
 
 from sleepwalker.models.MaskedAutoencoder import MaskedAutoencoder
-from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split, export_dataloader_to_numpy_dir
+from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.datasets.HSP import HSP
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.MultiDataset import MultiDataset
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
-from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
-from sleepwalker.utils import logger, MlflowSink, count_parameters
-from os import makedirs
+from sleepwalker.utils import logger, WandbSink, count_parameters
 
 os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
@@ -38,6 +34,7 @@ N_VAL_SAMPLES=int(os.environ.get('N_VAL_SAMPLES', 15_000))
 N_TEST_SAMPLES=int(os.environ.get('N_TEST_SAMPLES', 25_000))
 N_WORKERS_DATASET=int(os.environ.get('N_WORKERS_DATASET', 24))
 N_WORKERS_DATALOADER=int(os.environ.get('N_WORKERS_DATALOADER', 24))
+N_PATIENTS = 300
 SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
@@ -50,10 +47,13 @@ CHANNELS = [
     ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
     ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
     ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='ABD', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='CHEST', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='SaO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='SPO2'), 
-    ChannelConfig(name='SpO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='SPO2'), 
+    ChannelConfig(name='ABD', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'),
+    ChannelConfig(name='CHEST', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'),
+    ChannelConfig(name='SaO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
+    ChannelConfig(name='SpO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
+    #ChannelConfig(name='IC', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=40.0, band_order=4, notch_freq=None), group='RESP'), 
+    #ChannelConfig(name='PTAF', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
+    ChannelConfig(name='AIRFLOW', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
     ChannelConfig(name='LAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
     ChannelConfig(name='RAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
     ChannelConfig(name='EKG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
@@ -81,7 +81,7 @@ task_config = {
         'default': 'regular',
         'percentage': 0.5,
         'target_resolution': '10s',
-        'embeddings': ['RIP', 'SPO2'],
+        'embeddings': ['RESP'],
         'n_slices': 50,
         'class_weights': {0: 4, 1: 4, 2: 1},
         'loss_function': torch.nn.functional.cross_entropy,
@@ -146,9 +146,16 @@ def subsample_patient_windows(label_df, label_extra_df):
 
     return label_df, label_extra_df
 
-def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
+def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, patient, **_kwargs):
 
-    trimmed = trim_event(data_df, label_df, label_extra_df, keep_events=['wake'])
+    edf_duration_seconds = len(data_df) / SAMPLE_FREQUENCY
+    label_duration_seconds = (label_df['Endtime'].iloc[-1] - label_df['Starttime'].iloc[0]).seconds
+    duration_hours = min(edf_duration_seconds, label_duration_seconds) / 3600
+    if duration_hours <= 4.0:
+        print(f'Skip patient {patient} for a too short reading: {duration_hours:.2f}h')
+        return None
+
+    trimmed = trim_event(data_df, label_df, label_extra_df, keep_events=['n1', 'n2', 'n3', 'rem'])
     if trimmed is None:
         return None
     label_df, label_extra_df = trimmed
@@ -199,7 +206,7 @@ def prepare_multiclass_sample(data, target, task_config, **item):
 
 def get_datasets():
     dataset_path = join(os.environ['DATASET_DIR'], 'hsp')
-    all_patients = get_edf_files_in_repo(dataset_path, recursive=True)
+    all_patients = get_edf_files_in_repo(dataset_path, recursive=True)[:N_PATIENTS]
     train_patients, rest = random_split(all_patients, test_frac=0.3, seed=1912817)
     val_patients, test_patients = random_split(rest, test_frac=0.5, seed=918171)
 
@@ -312,6 +319,22 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
+def setup_wandb_metrics(sink):
+    sink.wandb.define_metric('batch_train_step')
+    sink.wandb.define_metric('batch_val_step')
+    sink.wandb.define_metric('batch/loss/train', step_metric='batch_train_step')
+    sink.wandb.define_metric('batch/loss/val', step_metric='batch_val_step')
+
+    sink.wandb.define_metric('epoch_step')
+    sink.wandb.define_metric('epoch/train/*', step_metric='epoch_step')
+    sink.wandb.define_metric('epoch/val/*', step_metric='epoch_step')
+
+    for task_name in task_config:
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_micro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_macro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/accuracy', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/coehns_kappa', step_metric='epoch_step')
+
 def main():
 
     train_ds, val_ds, test_ds = get_datasets()
@@ -319,18 +342,17 @@ def main():
 
     model = MaskedAutoencoder(
         groups=train_ds.channel_groups,
-        enc_dim=384,
-        enc_heads=12,
-        enc_depth=12,
     )
     print('Number of parameters:', count_parameters(model))
     model_hp = model.get_hyperparameters()
 
-    print('Tracking to MLFLOW instance', os.environ['MLFLOW_URL'])
-    logger.add_sink(MlflowSink(tracking_uri=os.environ['MLFLOW_URL'], experiment='hsp', artifact_uri=None))
-    logger.start_run(run_name='testrun-allpatients', params=model_hp)
+    print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
+    sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-hsp', artifact_uri=None)
+    logger.add_sink(sink)
+    logger.start_run(run_name='full-patients-fewer', params=model_hp)
+    setup_wandb_metrics(sink)
 
-    EPOCHS=31
+    EPOCHS=10
     steps_per_epoch = N_TRAIN_SAMPLES // BATCH_SIZE 
     num_training_steps = steps_per_epoch * EPOCHS
     num_warmup_steps = int(0.05 * num_training_steps) 

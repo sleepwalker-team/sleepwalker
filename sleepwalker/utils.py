@@ -151,6 +151,7 @@ class Sink(Protocol):
     def end(self, status: str = "FINISHED") -> None: ...
     def event(self, level: str, message: str, context: str) -> None: ...
     def metric(self, name: str, value: float, step:int, context: str) -> None: ...
+    def metrics(self, values: dict, step: int, context: str): pass
     def hparams(self, values: Dict[str, Any], context: str) -> None: ...
     def figure(self, name: str, figure: Any, context: str) -> None: ...
     def artifact(self, path: str, dest: Optional[str], context: str) -> None: ...
@@ -225,6 +226,7 @@ class StdLogSink:
         self._logger.handle(lr)
 
     def metric(self, name: str, value: float, step:int, context: str): pass
+    def metrics(self, values: dict, step: int, context: str): pass
     def hparams(self, values: Dict[str, Any], context: str): pass
     def figure(self, name: str, figure: Any, context: str): pass
     def artifact(self, path: str, dest: Optional[str], context: str): pass
@@ -248,6 +250,7 @@ class TqdmSink:
     def hparams(self, values: Dict[str, Any], context: str): pass
     def figure(self, name, figure, context: str): pass
     def artifact(self, path, dest, context: str): pass
+    def metrics(self, values: dict, step: int, context: str): pass
 
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress:
         return TqdmProgress(total, desc, leave if leave is not None else self._default_leave, self._formatter)
@@ -318,6 +321,9 @@ class MlflowSink:
     def metric(self, name: str, value: float, step:int, context: str):
         # Context is ignored → metric name must be explicit
         self.mlflow.log_metric(name, float(value), step=step, synchronous=False)
+
+    def metrics(self, values: dict, step: int, context: str):
+        pass
 
     def hparams(self, values: Dict[str, Any], context: str):
         flat_params: dict[str, str | float | int] = {}
@@ -395,10 +401,6 @@ class WandbSink:
                 self._run.config.update(params, allow_val_change=True)
         self._run_active = True
 
-        # Setup epoch / batch x axis
-        self._run.define_metric('epoch/*', step_metric='epoch')
-        self._run.define_metric('batch/*', step_metric='batch')
-
 
     def end(self, status: str = "FINISHED"):
         if self._run_active:
@@ -413,6 +415,13 @@ class WandbSink:
     def metric(self, name: str, value: float, step: int, context: str):
         # Context is ignored → metric name must be explicit
         self._run.log({name: float(value)})
+
+    def metrics(self, values: dict, step: int, context: str):
+        to_log = [(k, v) for k, v in values.items()]
+        for k, v in to_log[:-1]:
+            self._run.log({k: v}, commit=False)
+        k, v = to_log[-1]
+        self._run.log({k: v}, commit=True)
 
     def hparams(self, values: Dict[str, Any], context: str):
         flat_params: dict[str, str | float | int] = {}
@@ -487,6 +496,9 @@ class LocalArtifactSink:
         pass
 
     def metric(self, name, value, step, context: str):
+        pass
+
+    def metrics(self, values: dict, step: int, context: str): 
         pass
 
     def hparams(self, values: Dict[str, Any], context: str):
@@ -616,6 +628,12 @@ class UnifiedLogger:
         ctx = self._ctx_str()
         for s in self._sinks:
             try: s.metric(name, float(value), step=step, context=ctx)
+            except Exception: pass
+
+    def metrics(self, values: dict, step: int, context: str): 
+        ctx = self._ctx_str()
+        for s in self._sinks:
+            try: s.metrics(values, step=step, context=ctx)
             except Exception: pass
 
     def hparams(self, values: Dict[str, Any]):

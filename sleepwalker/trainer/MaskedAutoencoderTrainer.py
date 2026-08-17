@@ -70,7 +70,7 @@ class MaskedAutoencoderTrainer(ABC):
 
         self.groups = groups
 
-    def _log_from_cm(self, cm: np.ndarray, mode: str, scope: str = "batch", step:int = 0):
+    def _metrics_from_cm(self, cm: np.ndarray, mode: str, scope: str = "batch"):
         """Centralized metric logging from confusion matrix."""  
         total = cm.sum()  
         if total == 0:  
@@ -80,12 +80,14 @@ class MaskedAutoencoderTrainer(ABC):
         f1_micro = f1_score_from_confusion_matrix(cm, macro=False)  
         f1_macro = f1_score_from_confusion_matrix(cm, macro=True)  
         kappa = cohen_kappa_from_confusion_matrix(cm)  
-        logger.metric(f"{scope}/{mode}/accuracy", acc, step=step)  
-        logger.metric(f"{scope}/{mode}/f1_micro", f1_micro, step=step)  
-        logger.metric(f"{scope}/{mode}/f1_macro", f1_macro, step=step)  
-        logger.metric(f"{scope}/{mode}/coehns_kappa", kappa, step=step)  
-        if scope == 'epoch':
-            print(f'{step} | {mode} kappa {kappa:.3f}   f1_macro {f1_macro:.3f}')
+
+        metrics = {}
+        metrics[f"{scope}/{mode}/accuracy"] = acc  
+        metrics[f"{scope}/{mode}/f1_micro"] = f1_micro  
+        metrics[f"{scope}/{mode}/f1_macro"] = f1_macro  
+        metrics[f"{scope}/{mode}/coehns_kappa"] = kappa  
+        
+        return metrics 
 
     def _log_loss(self, loss, mode, scope='batch', step=0):
         logger.metric(f"{scope}/{mode}/loss", loss, step=step) 
@@ -152,7 +154,7 @@ class MaskedAutoencoderTrainer(ABC):
             loss_sum += curr_loss
 
             step = self.steps[mode]
-            self._log_loss(curr_loss, mode=mode, scope='batch', step=step)
+            logger.metrics({f'batch_{mode}_step': step, f'batch/loss/{mode}': curr_loss}, 0, '')
             
             desc = f"{prefix:<12} {loss_sum/cnt:2.4f}"
             
@@ -162,12 +164,12 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_close()
         epoch_loss = loss_sum / max(cnt, 1) 
-        self._log_loss(epoch_loss, mode=mode, scope='epoch', step=self.epoch_step)
 
-        return epoch_loss
+        return {f'epoch/loss/{mode}': epoch_loss}
 
     @torch.inference_mode
     def run_downstream_tasks(self, val_loader, test_loader, model):
+        downstream_metrics = {}
         model.eval()
         logger.progress_start(total=len(val_loader) * val_loader.batch_size, desc='Embed VAL', leave=True)
 
@@ -235,7 +237,10 @@ class MaskedAutoencoderTrainer(ABC):
 
             X_train_embeddings = np.concatenate([X_train[emb_key][:, _from:_to].mean(1).cpu().numpy() for emb_key in self.downstream_tasks[k]['embeddings']], -1)
             X_test_embeddings = np.concatenate([X_test[emb_key][:, _from:_to].mean(1).cpu().numpy() for emb_key in self.downstream_tasks[k]['embeddings']], -1)
-            self.run_classification(X_train_embeddings, X_test_embeddings, y_train[k], y_test[k], cfg, label=k)
+            clf_metrics = self.run_classification(X_train_embeddings, X_test_embeddings, y_train[k], y_test[k], cfg, label=k)
+            downstream_metrics.update(clf_metrics)
+        
+        return downstream_metrics
 
     @torch.inference_mode
     def run_classification(self, X_train, X_test, y_train, y_test, cfg, label='sleep'):
@@ -246,7 +251,8 @@ class MaskedAutoencoderTrainer(ABC):
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
         cm = confusion_matrix(y_test, y_pred)
-        self._log_from_cm(cm, mode=label, scope='epoch', step=self.epoch_step)
+        metrics = self._metrics_from_cm(cm, mode=label, scope='epoch')
+        return metrics
     
     def fit(self, model: BaseModel, train_loader, val_loader=None, test_loader=None, warmup_loader=None):
         opt = self.optimizer_fn(model)
@@ -270,7 +276,6 @@ class MaskedAutoencoderTrainer(ABC):
 
         model = model.to(self.device)
         val_losses: list[float] = []
-        losses = []
 
         self.best_model_idx = None
         self.best_checkpoint = None
@@ -279,11 +284,12 @@ class MaskedAutoencoderTrainer(ABC):
         self.last_folder = None
 
         for epoch in range(self.epochs):
+            epoch_metrics = {'epoch_step': epoch}
             model.train()
-            loss = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
-            losses.append({"train":loss})
+            train_metrics = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]")
+            epoch_metrics.update(train_metrics)
 
-            if self.save_every > 0 and (epoch % self.save_every == 0):
+            if self.save_every > 0 and (epoch % self.save_every == 0) and epoch > 0:
                 logger.info(f"Logging intermediate model after {epoch} epochs.")
                 
                 self.last_folder = store_checkpoint(model, opt, lr_scheduler, tempfile.mkdtemp(prefix=f"checkpoint_epoch_{epoch}_"))
@@ -298,12 +304,14 @@ class MaskedAutoencoderTrainer(ABC):
             if val_loader is not None:
                 model.eval()
                 with torch.inference_mode():
-                    val_loss = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]") 
-                losses[-1]["val"] =  val_loss
-                val_losses.append(val_loss)
+                    val_metrics = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]") 
+                val_losses.append(val_metrics['epoch/loss/val'])
+
+                epoch_metrics.update(val_metrics)
 
                 if test_loader is not None:
-                    self.run_downstream_tasks(val_loader, test_loader, model)
+                    downstream_metrics = self.run_downstream_tasks(val_loader, test_loader, model)
+                    epoch_metrics.update(downstream_metrics)
             
                 imin = np.argmin(val_losses)
                 if self.best_model_idx is None or imin != self.best_model_idx:
@@ -316,15 +324,7 @@ class MaskedAutoencoderTrainer(ABC):
 
                 if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
                     logger.info(f"Early stopping after {epoch} epochs - best epoch was {imin}") 
-                    return {
-                        "losses":losses,
-                        "best_model":imin,
-                        "checkpoint":self.best_checkpoint
-                    }
+                    return
             
+            logger.metrics(epoch_metrics, 0, '')
             self.epoch_step += 1
-
-        if self.last_folder is not None:
-            return { "losses":losses, "checkpoint":self.last_folder}
-        else:
-            return { "losses":losses}

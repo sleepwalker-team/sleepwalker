@@ -34,7 +34,7 @@ N_VAL_SAMPLES=int(os.environ.get('N_VAL_SAMPLES', 15_000))
 N_TEST_SAMPLES=int(os.environ.get('N_TEST_SAMPLES', 25_000))
 N_WORKERS_DATASET=int(os.environ.get('N_WORKERS_DATASET', 24))
 N_WORKERS_DATALOADER=int(os.environ.get('N_WORKERS_DATALOADER', 24))
-N_PATIENTS = 300
+N_PATIENTS = 1000
 SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
@@ -54,9 +54,9 @@ CHANNELS = [
     ChannelConfig(name='IC', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=40.0, band_order=4, notch_freq=None), group='RESP'), 
     ChannelConfig(name='PTAF', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
     ChannelConfig(name='AIRFLOW', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='LAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='RAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='EKG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
+    # ChannelConfig(name='LAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
+    # ChannelConfig(name='RAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
+    # ChannelConfig(name='EKG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
 ]
 
 EVENT_MAPPING = {
@@ -349,10 +349,10 @@ def main():
     print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
     sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-hsp', artifact_uri=None)
     logger.add_sink(sink)
-    logger.start_run(run_name='full-patients-fewer', params=model_hp)
+    logger.start_run(run_name='1k', params=model_hp)
     setup_wandb_metrics(sink)
 
-    EPOCHS=10
+    EPOCHS=20
     steps_per_epoch = N_TRAIN_SAMPLES // BATCH_SIZE 
     num_training_steps = steps_per_epoch * EPOCHS
     num_warmup_steps = int(0.05 * num_training_steps) 

@@ -9,9 +9,10 @@ Concrete task logic lives in subclasses such as
 """
 
 import inspect
-import shutil
-import tempfile
 import os
+from pathlib import Path
+import random
+import tempfile
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional
 
@@ -19,8 +20,36 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.optim.lr_scheduler import OneCycleLR, CyclicLR
-from sleepwalker.deployment import save_packaged_model
+
+from sleepwalker.deployment.package import CloudpickleAdapter
 from sleepwalker.utils import logger
+
+def capture_rng_state() -> dict[str, Any]:
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "state": torch.from_numpy(numpy_state[1].copy()),
+            "position": numpy_state[2],
+            "has_gauss": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        },
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    }
+
+def restore_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state((numpy_state["bit_generator"], numpy_state["state"].cpu().numpy(), numpy_state["position"], numpy_state["has_gauss"], numpy_state["cached_gaussian"]))
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"]:
+        if not torch.cuda.is_available():
+            raise RuntimeError("The checkpoint contains CUDA RNG state, but CUDA is not available.")
+        if len(state["cuda"]) != torch.cuda.device_count():
+            raise RuntimeError(f"The checkpoint contains RNG state for {len(state['cuda'])} CUDA devices, but {torch.cuda.device_count()} are available.")
+        torch.cuda.set_rng_state_all(state["cuda"])
 
 
 def build_lr_scheduler(lr_scheduler_fn, optimizer, epochs: int, steps_per_epoch: int):
@@ -61,7 +90,8 @@ class BaseTrainer(ABC):
         optimizer: Callable[[torch.nn.Module], torch.optim.Optimizer],
         device: str = "cuda:0",
         warmup_device: str = "cpu",
-        save_every: int = 1,
+        save_every: int = 10,
+        eval_every: int = 10,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
         return_best: bool = True,
@@ -75,24 +105,69 @@ class BaseTrainer(ABC):
         self.device = device
         self.warmup_device = warmup_device
         self.save_every = save_every
+        self.eval_every = eval_every
         self.early_stopping_patience = early_stopping
         self.return_best = return_best
         self.train_transform = train_transform
+        self.optimizer = None
+        self.lr_scheduler = None
+        self.scheduler_per_batch = None
+        self.completed_epochs = 0
+        self.steps_per_epoch = None
+        self.losses = []
+        self.outputs = []
+        self.val_losses = []
+        self.best_model_idx = None
+        self.best_model_state = None
+        self.steps = {"train": 0, "val": 0, "test": 0}
+        self.epoch_step = 0
+        self.rng_state = None
 
-    def export_model(self, model: torch.nn.Module, dataset, *, name: str, task: str, config: dict[str, Any], dest: str) -> None:
-        """Export a directly testable model package through the active artifact sinks."""
-        with tempfile.TemporaryDirectory(prefix=f"sleepwalker_{dest}_") as temporary_directory:
-            package_path = os.path.join(temporary_directory, "package")
-            save_packaged_model(
-                package_path,
-                name=name,
-                task=task,
-                model=model,
-                dataset=dataset,
-                classification_contract=self.classification_contract(),
-                config=config,
-            )
-            logger.artifact(path=package_path, dest=dest)
+    def validate_training_state(self, model: torch.nn.Module) -> None:
+        """Fail if the serialized model, optimizer, and scheduler graph is inconsistent."""
+        if not isinstance(model, torch.nn.Module):
+            raise TypeError(f"Expected a torch.nn.Module, got {type(model).__name__}.")
+        if self.optimizer is None:
+            if self.lr_scheduler is not None or self.scheduler_per_batch is not None or self.completed_epochs != 0 or self.steps_per_epoch is not None:
+                raise RuntimeError("Trainer has partial training state without an optimizer.")
+            return
+        if self.steps_per_epoch is None or self.scheduler_per_batch is None:
+            raise RuntimeError("Trainer has incomplete optimizer or scheduler state.")
+        if self.lr_scheduler_fn is not None and self.lr_scheduler is None:
+            raise RuntimeError("Trainer is configured with a scheduler but has no scheduler state.")
+        if self.lr_scheduler_fn is None and self.lr_scheduler is not None:
+            raise RuntimeError("Trainer has scheduler state but is not configured with a scheduler.")
+        model_parameters = {id(parameter) for parameter in model.parameters()}
+        optimizer_parameters = [parameter for group in self.optimizer.param_groups for parameter in group["params"]]
+        if any(id(parameter) not in model_parameters for parameter in optimizer_parameters):
+            raise RuntimeError("Optimizer parameters do not belong to the supplied model.")
+        if self.lr_scheduler is not None and self.lr_scheduler.optimizer is not self.optimizer:
+            raise RuntimeError("Scheduler is not attached to trainer.optimizer.")
+        if self.completed_epochs < 0 or self.completed_epochs > self.epochs:
+            raise RuntimeError(f"Trainer completed_epochs={self.completed_epochs} is invalid for epochs={self.epochs}.")
+
+    def save_checkpoint(self, path: str | os.PathLike, model: torch.nn.Module) -> Path:
+        """Serialize this trainer and its complete training state."""
+        self.validate_training_state(model)
+        if self.optimizer is None:
+            raise RuntimeError("Cannot save a checkpoint before training has been initialized.")
+        self.rng_state = capture_rng_state()
+        checkpoint_path = Path(path)
+        torch.save({"trainer": self, "model": model}, checkpoint_path, pickle_module=CloudpickleAdapter)
+        return checkpoint_path
+
+    @classmethod
+    def load_checkpoint(cls, path: str | os.PathLike, map_location=None):
+        """Load and validate a serialized trainer and model."""
+        checkpoint = torch.load(path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
+        if not isinstance(checkpoint, dict) or set(checkpoint) != {"trainer", "model"}:
+            raise TypeError("Expected a checkpoint containing exactly 'trainer' and 'model'.")
+        trainer = checkpoint["trainer"]
+        model = checkpoint["model"]
+        if not isinstance(trainer, cls):
+            raise TypeError(f"Expected a {cls.__name__} checkpoint, got {type(trainer).__name__}.")
+        trainer.validate_training_state(model)
+        return trainer, model
 
     def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
         """Apply per-sample augmentation transforms to a batch tensor.
@@ -172,103 +247,87 @@ class BaseTrainer(ABC):
         with torch.inference_mode():
             return self.run_epoch(test_loader, None, model, "TEST")
 
-    def fit(self, model, train_loader, val_loader=None, *, package_name: Optional[str] = None, package_task: Optional[str] = None, package_config: Optional[dict[str, Any]] = None):
-        """Train a model and optionally track validation checkpoints.
+    def fit(self, model, train_loader, val_loader=None):
+        """Initialize or continue this trainer's model and optimization state."""
+        if len(train_loader) < 1:
+            raise ValueError("Cannot train with an empty training loader.")
 
-        Args:
-            model: Model instance to optimize.
-            train_loader: Training dataloader.
-            val_loader: Optional validation dataloader.
+        self.validate_training_state(model)
+        if self.optimizer is None:
+            self.set_loader_epoch(train_loader, 0)
+            logger.context("Warmup trainer")
+            self.warmup_trainer(train_loader)
+            logger.uncontext()
 
-        Returns:
-            A dictionary containing at least ``losses`` and ``outputs``. When
-            checkpointing occurs, the dictionary may also contain
-            ``checkpoint`` and ``best_model``.
-        """
-        package_name = package_name or model.__class__.__name__
-        package_task = package_task or package_name
-        package_config = dict(package_config or {})
-        self.set_loader_epoch(train_loader, 0)
-        logger.context("Warmup trainer")
-        self.warmup_trainer(train_loader)
-        logger.uncontext()
+            logger.context("Warmup preprocessors")
+            self.warmup_preprocessor(model, train_loader, self.warmup_device)
+            logger.uncontext()
 
-        opt = self.optimizer_fn(model)
-
-        lr_scheduler, scheduler_per_batch = build_lr_scheduler(self.lr_scheduler_fn, opt, self.epochs, len(train_loader))
+            model.to(self.device)
+            self.optimizer = self.optimizer_fn(model)
+            self.steps_per_epoch = len(train_loader)
+            self.lr_scheduler, self.scheduler_per_batch = build_lr_scheduler(self.lr_scheduler_fn, self.optimizer, self.epochs, self.steps_per_epoch)
+            self.validate_training_state(model)
+        else:
+            if len(train_loader) != self.steps_per_epoch:
+                raise ValueError(f"The checkpoint used {self.steps_per_epoch} training steps per epoch, but the new loader has {len(train_loader)}.")
+            if self.completed_epochs >= self.epochs:
+                raise RuntimeError(f"Training is already complete after {self.completed_epochs} epochs.")
+            model.to(self.device)
+            if self.rng_state is not None:
+                restore_rng_state(self.rng_state)
+            logger.info(f"Continuing training after {self.completed_epochs} completed epochs.")
 
         if self.early_stopping_patience and val_loader is None:
             logger.warning("early_stopping was set to true, but no validation dataset was given. Disabling early stopping")
             self.early_stopping_patience = None
 
-        self.set_loader_epoch(train_loader, 0)
-        logger.context("Warmup preprocessors")
-        self.warmup_preprocessor(model, train_loader, self.warmup_device)
-        logger.uncontext()
-
-        model = model.to(self.device)
-        val_losses: list[float] = []
-        losses = []
-        outputs = []
-
-        self.best_model_idx = None
-        self.best_checkpoint = None
-        self.steps = {"train": 0, "val": 0, "test": 0}
-        self.epoch_step = 0
-        for epoch in range(self.epochs):
+        stopped_early = False
+        for epoch in range(self.completed_epochs, self.epochs):
             self.set_loader_epoch(train_loader, epoch)
             model.train()
-            loss, output = self.run_epoch(train_loader, opt, model, f"TRAIN [{epoch+1}/{self.epochs}]", lr_scheduler if scheduler_per_batch else None)
-            outputs.append({"train": output})
-            losses.append({"train": loss})
+            loss, output = self.run_epoch(train_loader, self.optimizer, model, f"TRAIN [{epoch+1}/{self.epochs}]", self.lr_scheduler if self.scheduler_per_batch else None)
+            self.outputs.append({"train": output})
+            self.losses.append({"train": loss})
 
             epoch_number = epoch + 1
-            if self.save_every > 0 and epoch_number % self.save_every == 0:
-                logger.info(f"Logging intermediate model after {epoch_number} epochs.")
-                checkpoint_config = dict(package_config)
-                checkpoint_config["checkpoint_epoch"] = epoch_number
-                self.export_model(model, train_loader.dataset, name=f"{package_name}-epoch-{epoch_number}", task=package_task, config=checkpoint_config, dest=str(epoch_number))
+            if self.lr_scheduler is not None and not self.scheduler_per_batch:
+                self.lr_scheduler.step()
 
-            if lr_scheduler is not None and not scheduler_per_batch:
-                lr_scheduler.step()
-
-            if val_loader is not None:
+            if val_loader is not None and self.eval_every > 0 and epoch_number % self.eval_every == 0:
                 model.eval()
                 with torch.inference_mode():
                     val_loss, val_output = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]")
-                outputs[-1]["val"] = val_output
-                losses[-1]["val"] = val_loss
-                val_losses.append(val_loss)
+                self.outputs[-1]["val"] = val_output
+                self.losses[-1]["val"] = val_loss
+                self.val_losses.append(val_loss)
 
-                imin = int(np.argmin(val_losses))
-                if self.best_model_idx is None or imin != self.best_model_idx:
-                    self.best_model_idx = imin
+                best_validation_idx = int(np.argmin(self.val_losses))
+                if self.best_model_idx is None or best_validation_idx == len(self.val_losses) - 1:
+                    self.best_model_idx = epoch
                     if self.return_best:
-                        if self.best_checkpoint is not None:
-                            logger.info(f"Found old best model in {self.best_checkpoint}. Deleting it")
-                            shutil.rmtree(os.path.dirname(self.best_checkpoint))
+                        self.best_model_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
-                        best_folder = tempfile.mkdtemp(prefix="sleepwalker_best_model_")
-                        self.best_checkpoint = os.path.join(best_folder, "model.pt")
-                        torch.save(model.state_dict(), self.best_checkpoint)
-
-                if self.early_stopping_patience and (epoch - imin >= self.early_stopping_patience):
-                    logger.info(f"Early stopping after {epoch} epochs - best epoch was {imin}")
-                    result = {
-                        "losses": losses,
-                        "outputs": outputs,
-                    }
-                    if self.return_best:
-                        result["best_model"] = imin
-                        result["checkpoint"] = self.best_checkpoint
-                    return result
+                if self.early_stopping_patience and epoch - self.best_model_idx >= self.early_stopping_patience:
+                    logger.info(f"Early stopping after {epoch} epochs - best epoch was {self.best_model_idx}")
+                    stopped_early = True
 
             self.epoch_step += 1
+            self.completed_epochs = epoch_number
 
-        result = {"losses": losses, "outputs": outputs}
-        if self.return_best and self.best_checkpoint is not None:
+            if self.save_every > 0 and epoch_number % self.save_every == 0:
+                logger.info(f"Logging training checkpoint after {epoch_number} epochs.")
+                with tempfile.TemporaryDirectory(prefix="sleepwalker_training_checkpoint_") as temporary_directory:
+                    checkpoint_path = self.save_checkpoint(Path(temporary_directory) / "checkpoint.pt", model)
+                    logger.artifact(path=checkpoint_path, dest=str(epoch_number))
+
+            if stopped_early:
+                break
+
+        result = {"losses": self.losses, "outputs": self.outputs}
+        if self.return_best and self.best_model_state is not None:
             result["best_model"] = self.best_model_idx
-            result["checkpoint"] = self.best_checkpoint
+            result["best_model_state"] = self.best_model_state
         return result
 
     @abstractmethod

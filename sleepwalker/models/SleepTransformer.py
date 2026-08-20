@@ -264,13 +264,11 @@ class SleepTransformer(BaseModel, EmbeddingModel, ClassifierModel):
         )
 
     def compute(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode preprocessed inputs and map them to class logits."""
-        x = self.encode(x)
+        features = self.encode(x)
         if self.fc is None or self.classes is None:
             raise ValueError("SleepTransformer classification requires classes to be set.")
         expected = self.sequence_len * self.frm_input_dim
-        if x.ndim != 2 or x.shape[-1] != expected:
-            raise ValueError(f"Expected SleepTransformer features shaped [B, {expected}], got {tuple(x.shape)}.")
-        x = x.view(x.shape[0], self.sequence_len, self.frm_input_dim)
-        return self.fc(x)
+        if features.ndim != 2 or features.shape[-1] != expected:
+            raise ValueError(f"Expected SleepTransformer embeddings shaped [B, {expected}], got {tuple(features.shape)}.")
+        return self.fc(features.view(features.shape[0], self.sequence_len, self.frm_input_dim))
         

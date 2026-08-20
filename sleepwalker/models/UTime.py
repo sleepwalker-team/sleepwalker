@@ -356,28 +356,18 @@ class UTime(BaseModel, EmbeddingModel, ClassifierModel):
         )
 
     def compute(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode preprocessed inputs and project them into class logits.
-
-        Args:
-            x: Preprocessed model input.
-
-        Returns:
-            Class logits shaped ``[batch, sequence_len, classes]``.
-
-        Raises:
-            ValueError: If the model was created without classes or if flattened
-                sequence features do not align with the class dimension.
-        """
-        x = self.encode(x)
+        features = self.encode(x)
         if self.classes is None:
             raise ValueError("UTime classification requires classes to be set.")
         if self.samples_per_epoch is not None:
             expected = self.sequence_len * self.mlp_size
-            if x.shape[-1] != expected:
-                raise ValueError(f"Expected {expected} flattened UTime features, got {x.shape[-1]}.")
+            if features.ndim != 2 or features.shape[-1] != expected:
+                raise ValueError(f"Expected UTime embeddings shaped [B, {expected}], got {tuple(features.shape)}.")
             if self.fc is None:
                 raise ValueError("UTime classification requires classes to be set.")
-            return self.fc(x.view(x.shape[0], self.sequence_len, self.mlp_size))
+            return self.fc(features.view(features.shape[0], self.sequence_len, self.mlp_size))
         if self.fc is None:
             raise ValueError("UTime classification requires classes to be set.")
-        return self.fc(x).view(x.shape[0], self.sequence_len, len(self.classes))
+        if features.ndim != 2 or features.shape[-1] != self.mlp_size:
+            raise ValueError(f"Expected UTime embeddings shaped [B, {self.mlp_size}], got {tuple(features.shape)}.")
+        return self.fc(features).view(features.shape[0], self.sequence_len, len(self.classes))

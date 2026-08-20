@@ -9,13 +9,13 @@ import os
 from pathlib import Path
 import pickle
 import subprocess
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import cloudpickle
 import pandas as pd
 import torch
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.predictions import format_prediction_batch
@@ -97,6 +97,17 @@ class PackagedModel:
         if self.classification_contract is not None and self.classification_contract.get("type") == "single-head-multiclass" and self.task is None:
             raise ValueError("A single-head classifier package requires task.")
 
+        shape, meta = self.model.input_spec()
+        expected_shape = (1, self.dataset.get_timeseries_len(), len(self.dataset.get_input_channels()))
+        if tuple(shape) != expected_shape:
+            raise ValueError(f"Model input {tuple(shape)} does not match packaged dataset input {expected_shape}.")
+        if meta.get("layout") != "BTC":
+            raise ValueError(f"Packaged models must use BTC inputs, got {meta.get('layout')!r}.")
+        if "input_channels" in meta and list(meta["input_channels"]) != list(self.dataset.get_input_channels()):
+            raise ValueError(f"Model expects input channels {list(meta['input_channels'])}, but the packaged dataset provides {list(self.dataset.get_input_channels())}.")
+        if "sampling_frequency" in meta and float(meta["sampling_frequency"]) != float(self.dataset.sample_frequency):
+            raise ValueError(f"Model expects sampling_frequency={meta['sampling_frequency']}, but the packaged dataset provides {self.dataset.sample_frequency}.")
+
     @property
     def capabilities(self) -> list[str]:
         capabilities = []
@@ -105,24 +116,6 @@ class PackagedModel:
         if isinstance(self.model, ClassifierModel):
             capabilities.append("classification")
         return capabilities
-
-    def freeze(self) -> None:
-        for parameter in self.model.parameters():
-            parameter.requires_grad = False
-
-    def unfreeze(self) -> None:
-        for parameter in self.model.parameters():
-            parameter.requires_grad = True
-
-    def features(self, tensor: torch.Tensor) -> torch.Tensor:
-        if not isinstance(self.model, EmbeddingModel):
-            raise TypeError(f"Package '{self.name}' does not expose embeddings.")
-        return self.model.features(tensor)
-
-    def forward(self, tensor: torch.Tensor):
-        if not isinstance(self.model, ClassifierModel):
-            raise TypeError(f"Package '{self.name}' does not expose classification logits.")
-        return self.model(tensor)
 
     def assert_compatible(self, dataset: Any, *, allow_preprocessing_override: bool = False) -> None:
         expected_inputs = list(self.dataset.get_input_channels())
@@ -146,31 +139,11 @@ class PackagedModel:
             if not actual["normalizers"].issubset(expected["normalizers"]):
                 raise ValueError(f"Normalizer configuration for '{group}' does not match the package's stored preprocessing.")
 
-    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", collate_fn=None):
-        if self.classification_contract is None:
-            raise TypeError(f"Package '{self.name}' has no classification contract.")
-        self.assert_compatible(dataset)
-        loader = build_loader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            n_samples=None,
-            collate_fn=batch_collate if collate_fn is None else collate_fn,
-            shuffle=False,
-            seed=0,
-            n_repeat=n_repeat,
-        )
-        execution_model = RepeatedViewModel(self.model) if n_repeat > 1 else self.model
-        frames = [format_prediction_batch(self.classification_contract, batch, outputs, dataset.target_resolution) for outputs, batch in execute_batches(execution_model, loader, device)]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
+        return predict_dataset(self, dataset, batch_size=batch_size, num_workers=num_workers, n_repeat=n_repeat, device=device)
 
-    def predict_edf(self, edf_path: str | os.PathLike, *, channels: Optional[Sequence[ChannelConfig]] = None, assume_units_if_missing: Optional[bool] = None, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", collate_fn=None):
-        dataset = self.dataset.clone(channels=channels, assume_units_if_missing=assume_units_if_missing)
-        self.assert_compatible(dataset)
-        dataset.initialize([str(edf_path)], num_workers=num_workers_dataset, strict=True)
-        if dataset.get_n_patients() != 1:
-            raise ValueError(f"Could not prepare EDF file {edf_path}.")
-        return self.predict_dataset(dataset, batch_size=batch_size, num_workers=num_workers_loader, n_repeat=n_repeat, device=device, collate_fn=collate_fn)
+    def predict_edf(self, edf_path: str | os.PathLike, *, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
+        return predict_edf(self, edf_path, batch_size=batch_size, num_workers_dataset=num_workers_dataset, num_workers_loader=num_workers_loader, n_repeat=n_repeat, device=device)
 
     def save(self, path: str | os.PathLike) -> Path:
         root = Path(path)
@@ -234,3 +207,33 @@ def save_packaged_model(path: str | os.PathLike, *, name: str, model: torch.nn.M
 
 def load_packaged_model(path: str | os.PathLike, *, map_location: str | torch.device = "cpu") -> PackagedModel:
     return PackagedModel.load(path, map_location=map_location)
+
+
+def predict_dataset(package: PackagedModel, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
+    """Run a packaged classifier on an initialized compatible dataset."""
+
+    if package.classification_contract is None:
+        raise TypeError(f"Package '{package.name}' has no classification contract.")
+    package.assert_compatible(dataset)
+    loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, shuffle=False, seed=0, n_repeat=n_repeat)
+    execution_model = RepeatedViewModel(package.model) if n_repeat > 1 else package.model
+    frames = [format_prediction_batch(package.classification_contract, batch, outputs, dataset.target_resolution) for outputs, batch in execute_batches(execution_model, loader, device)]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def build_edf_dataset(package: PackagedModel, edf_path: str | os.PathLike, *, num_workers: int = 0):
+    """Build the package's exact stored dataset contract for one EDF file."""
+
+    dataset = package.dataset.clone()
+    package.assert_compatible(dataset)
+    dataset.initialize([str(edf_path)], num_workers=num_workers, strict=True)
+    if dataset.get_n_patients() != 1:
+        raise ValueError(f"Could not prepare EDF file {edf_path}.")
+    return dataset
+
+
+def predict_edf(package: PackagedModel, edf_path: str | os.PathLike, *, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
+    """Run a packaged classifier on one complete EDF file."""
+
+    dataset = build_edf_dataset(package, edf_path, num_workers=num_workers_dataset)
+    return predict_dataset(package, dataset, batch_size=batch_size, num_workers=num_workers_loader, n_repeat=n_repeat, device=device)

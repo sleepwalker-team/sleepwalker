@@ -8,6 +8,7 @@ logging of test results.
 
 import os
 import random
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 from torchinfo import summary
 
+from sleepwalker.deployment import save_packaged_model
 from sleepwalker.trainer.utils.disk import append_to_jsonl
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
@@ -58,6 +60,7 @@ class RunCfg:
     collate_fn: Any = None
     meta_data: dict[str, Any] = field(default_factory=dict)
     expert_task: str | None = None
+    export_package: bool = True
 
 
 @dataclass
@@ -87,6 +90,29 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def export_final_model(cfg: RunCfg, train_dataset) -> None:
+    """Export the final inference package without making it trainer state."""
+    with tempfile.TemporaryDirectory(prefix="sleepwalker_final_") as temporary_directory:
+        package_path = os.path.join(temporary_directory, "package")
+        save_packaged_model(
+            package_path,
+            name=cfg.experiment_name,
+            task=cfg.expert_task or cfg.model_name,
+            model=cfg.model,
+            dataset=train_dataset,
+            classification_contract=cfg.trainer.classification_contract(),
+            config=cfg.meta_data,
+        )
+        logger.artifact(path=package_path, dest="final")
+
+
+def export_final_checkpoint(cfg: RunCfg) -> None:
+    """Store the selected final model together with resumable trainer state."""
+    with tempfile.TemporaryDirectory(prefix="sleepwalker_final_checkpoint_") as temporary_directory:
+        checkpoint_path = cfg.trainer.save_checkpoint(os.path.join(temporary_directory, "checkpoint.pt"), cfg.model)
+        logger.artifact(path=checkpoint_path, dest="final")
 
 
 def run(cfg: RunCfg) -> RunResult:
@@ -153,16 +179,11 @@ def run(cfg: RunCfg) -> RunResult:
             seed=loader_seed + 1,
         )
 
-    train_result = cfg.trainer.fit(
-        cfg.model,
-        train_loader,
-        val_loader,
-        package_name=cfg.experiment_name,
-        package_task=cfg.expert_task or cfg.model_name,
-        package_config=cfg.meta_data,
-    )
-    if "checkpoint" in train_result:
-        cfg.model.load_state_dict(torch.load(train_result["checkpoint"], map_location="cpu", weights_only=True))
+    train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
+    if "best_model_state" in train_result:
+        cfg.model.load_state_dict(train_result["best_model_state"])
+
+    export_final_checkpoint(cfg)
 
     test_records: list[dict[str, Any]] = []
     for dataset_name, test_dataset in cfg.test_datasets:
@@ -200,7 +221,8 @@ def run(cfg: RunCfg) -> RunResult:
             test_records.append(record)
             logger.uncontext()
 
-    cfg.trainer.export_model(cfg.model, train_dataset, name=cfg.experiment_name, task=cfg.expert_task or cfg.model_name, config=cfg.meta_data, dest="final")
+    if cfg.export_package:
+        export_final_model(cfg, train_dataset)
 
     logger.end_run()
     return RunResult(

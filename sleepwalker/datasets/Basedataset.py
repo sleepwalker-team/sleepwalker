@@ -714,21 +714,24 @@ class BaseDataset(Dataset, ABC):
         self.lower_bounds: list[int] = []
         self.upper_bounds: list[int] = []
         self.channel_configs_by_logical_name: Dict[str, ChannelConfig] = {}
-        physical_owners: dict[str, str] = {}
+        physical_channels: dict[str, list[ChannelConfig]] = defaultdict(list)
         for cfg in self.channels:
             if cfg.logical_name in self.channel_configs_by_logical_name:
                 raise ValueError(
                     f"Duplicate logical channel name '{cfg.logical_name}'."
                 )
             for physical_name in cfg.physical_names:
-                previous = physical_owners.get(physical_name)
-                if previous is not None:
-                    raise ValueError(
-                        f"Physical channel '{physical_name}' belongs to both "
-                        f"'{previous}' and '{cfg.logical_name}'."
-                    )
-                physical_owners[physical_name] = cfg.logical_name
+                physical_channels[physical_name].append(cfg)
             self.channel_configs_by_logical_name[cfg.logical_name] = cfg
+        self.shared_physical_channels = {name for name, configs in physical_channels.items() if len(configs) > 1}
+        for physical_name in self.shared_physical_channels:
+            units = {None if cfg.unit is None else _normalize_unit(cfg.unit) for cfg in physical_channels[physical_name]}
+            if len(units) > 1:
+                raise ValueError(f"Shared physical channel '{physical_name}' has incompatible target units: {sorted(map(str, units))}.")
+        if self.shared_physical_channels and self.rereference:
+            raise ValueError("Shared physical channels cannot be combined with rereferencing.")
+        if self.shared_physical_channels and self.z_normalize:
+            raise ValueError("Shared physical channels cannot be combined with recording z-normalization.")
         self.group_sampling_strategy = group_sampling_strategy
 
         # Events/classes
@@ -906,6 +909,7 @@ class BaseDataset(Dataset, ABC):
             physical_name: copy.deepcopy(normalizer)
             for cfg in self.channels
             for physical_name in cfg.physical_names
+            if physical_name not in self.shared_physical_channels
             if (normalizer := cfg.normalizer_for(physical_name)) is not None
         }
 
@@ -1259,7 +1263,7 @@ class BaseDataset(Dataset, ABC):
         if len(self.channels) > 0:
             available_columns = list(x_df.columns)
             available_set = set(available_columns)
-            selected_columns = []
+            selected_channels = []
             renamed_columns = []
             selected_quality = {}
 
@@ -1276,7 +1280,7 @@ class BaseDataset(Dataset, ABC):
                         if self.group_sampling_strategy == 'random'
                         else available[0]
                     )
-                    selected_columns.append(selected_name)
+                    selected_channels.append((cfg, selected_name))
                     renamed_columns.append(cfg.logical_name)
                     quality_name = cfg.quality_name_for(selected_name)
                     if quality_name is not None:
@@ -1288,12 +1292,19 @@ class BaseDataset(Dataset, ABC):
                         selected_quality[cfg.logical_name] = x_df[quality_name].copy()
                 elif self.group_sampling_strategy == 'none':
                     # TODO: Quality not supported right now
-                    selected_columns.extend(available)
+                    selected_channels.extend((cfg, name) for name in available)
                     renamed_columns.extend([cfg.logical_name] * len(available))
                 else:
                     raise NotImplementedError('Cannot sample for group_sampling_strategy', self.group_sampling_strategy)
 
-            x_selected = x_df.loc[:, selected_columns].copy()
+            selected_values = []
+            for cfg, selected_name in selected_channels:
+                values = x_df[selected_name].copy()
+                normalizer = cfg.normalizer_for(selected_name) if selected_name in self.shared_physical_channels else None
+                if normalizer is not None:
+                    values[:] = normalizer.transform(values.to_numpy(dtype=float).reshape(-1, 1)).ravel()
+                selected_values.append(values)
+            x_selected = pd.concat(selected_values, axis=1)
             x_selected.columns = renamed_columns
             x_df = x_selected
             if len(selected_quality) > 0:

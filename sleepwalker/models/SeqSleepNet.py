@@ -223,13 +223,11 @@ class SeqSleepNet(BaseModel, EmbeddingModel, ClassifierModel):
         )
 
     def compute(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode preprocessed inputs and map them to class logits."""
-        x = self.encode(x)
+        features = self.encode(x)
         if self.classifier_layer is None or self.classes is None:
             raise ValueError("SeqSleepNet classification requires classes to be set.")
         feature_size = 2 * self.hidden_size
         expected = self.sequence_len * feature_size
-        if x.ndim != 2 or x.shape[-1] != expected:
-            raise ValueError(f"Expected SeqSleepNet features shaped [B, {expected}], got {tuple(x.shape)}.")
-        x = x.view(x.shape[0], self.sequence_len, feature_size)
-        return self.classifier_layer(x)
+        if features.ndim != 2 or features.shape[-1] != expected:
+            raise ValueError(f"Expected SeqSleepNet embeddings shaped [B, {expected}], got {tuple(features.shape)}.")
+        return self.classifier_layer(features.view(features.shape[0], self.sequence_len, feature_size))

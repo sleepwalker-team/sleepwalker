@@ -31,7 +31,7 @@ from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
 from sleepwalker.trainer.utils.splits import fold_names, load_files
-from sleepwalker.trainer.utils.targets import prepare_multiclass_target
+from sleepwalker.trainer.utils.targets import annotation_coverage, prepare_multiclass_target, prepare_single_target
 from sleepwalker.training.execution import RepeatedViewModel, execute_batches
 from sleepwalker.training.loader import build_loader
 from sleepwalker.utils import logger
@@ -305,21 +305,6 @@ def build_evaluation_target(package, entry: Mapping[str, Any], annotation_labels
         task_config[task_name].update(task_options)
     task_config = MultiLabelTrainer.normalize_task_config(task_config)
     return partial(prepare_multitask_target, task_config=task_config, annotation_labels=annotation_labels)
-
-
-def annotation_coverage(target: pd.DataFrame, sequence_len: int, labels: Sequence[str]) -> torch.Tensor:
-    if len(target) % sequence_len != 0:
-        raise ValueError(f"Annotation length {len(target)} is not divisible by sequence_len={sequence_len}.")
-    step_len = len(target) // sequence_len
-    return torch.tensor([[float(target.iloc[index * step_len:(index + 1) * step_len].reindex(columns=labels, fill_value=0)[label].mean()) for label in labels] for index in range(sequence_len)], dtype=torch.float32)
-
-
-def prepare_single_target(target, target_extra=None, patient=None, time=None, *, target_classes: Sequence[str], sequence_len: int, annotation_labels: Sequence[str], percentage: float = 0.5, soft_boundaries: bool = False, filters=None, step_mask=None):
-    prepared = prepare_multiclass_target(target, target_extra=target_extra, patient=patient, time=time, target_classes=target_classes, sequence_len=sequence_len, percentage=percentage, soft_boundaries=soft_boundaries, filters=filters, step_mask=step_mask)
-    if prepared is None:
-        return None
-    prepared["annotation"] = annotation_coverage(target, sequence_len, annotation_labels)
-    return prepared
 
 
 def task_target_slice(target: pd.DataFrame, task: Mapping[str, Any]) -> pd.DataFrame:

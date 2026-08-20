@@ -41,9 +41,8 @@ fully qualified ``name`` and put constructor arguments directly beside it::
       n_samples: 250000
       num_workers_dataloader: 8
 
-``data`` may be a list for multi-dataset training.  Composite models are
-ordinary nested named components; for example their entries name
-``sleepwalker.models.CompositeModel.CompositeModelEntry`` explicitly.
+``data`` may be a list for multi-dataset training. Nested components such as
+``ModelGraphClassifier`` nodes use the same fully qualified ``name`` syntax.
 
 ``files`` either names selectors for a newly generated split, as above, or is
 the path to a precomputed YAML split.  ``tools/split.py`` creates holdout and
@@ -69,9 +68,12 @@ MultiLabelTrainer configurations.  Not supported: custom control flow,
 multi-stage experiments, result aggregation, or defining Python expressions in
 YAML.  Use a normal training script for those cases.
 
-``--dry-run`` is the main validation path.  It performs a real one-epoch run
+The ``dry`` command is the main validation path.  It performs a real one-epoch run
 using at most 30 training patients and 10 validation/test patients (shared
 across data entries), with small sample budgets and no MLflow logging.
+
+Use ``train CONFIG`` for a new run and ``resume CHECKPOINT`` to reconstruct a
+run from the checkpoint and the ``hparams.yml`` stored at the run root.
 """
 
 from __future__ import annotations
@@ -100,7 +102,8 @@ if str(REPO_ROOT) not in sys.path:
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.utils import random_split
-from sleepwalker.trainer.Run import RunCfg, RunResult, run, seed_everything
+from sleepwalker.trainer.BaseTrainer import BaseTrainer
+from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.utils import logger
 
@@ -153,7 +156,7 @@ def build_value(value: Any, context: Mapping[str, Any] | None = None) -> Any:
     if isinstance(value, list):
         return [build_value(item, context) for item in value]
     if isinstance(value, dict):
-        if "name" in value:
+        if isinstance(value.get("name"), str) and "." in value["name"]:
             return build_component(value, context)
         return {key: build_value(item, context) for key, item in value.items()}
     if isinstance(value, str) and value.startswith(("sleepwalker.", "torch.")):
@@ -216,7 +219,8 @@ def build_channel(spec: Mapping[str, Any]) -> ChannelConfig:
 def build_dataset(entry: Mapping[str, Any]):
     """Build the dataset shown in one ``data`` entry."""
     spec = {key: value for key, value in entry.items() if key not in DATA_FIELDS}
-    spec["channels"] = [build_channel(channel) for channel in spec.get("channels", [])]
+    if "channels" in spec:
+        spec["channels"] = [build_channel(channel) for channel in spec["channels"]]
     for callback_name in ("prepare_patient", "prepare_target", "prepare_sample"):
         if callback_name in spec:
             spec[callback_name] = build_callback(spec[callback_name])
@@ -344,12 +348,34 @@ def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: 
     return train_datasets, validation_datasets, test_datasets
 
 
-def build_run_config(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None) -> RunCfg:
-    """Build datasets, model, trainer, and finally the normal API ``RunCfg``."""
+def run_options_from_dict(config: Mapping[str, Any], dry_run: bool, fold: str | None) -> dict[str, Any]:
+    run_options = copy.deepcopy(config["run"])
+    if fold is not None:
+        run_options["experiment_name"] = f"{run_options['experiment_name']}-{fold}"
+        run_options.setdefault("tags", {})["fold"] = fold
+    run_options.setdefault("model_name", str(config["model"]["name"]).split(".")[-1])
+    run_options["collate_fn"] = build_callback(run_options.get("collate_fn")) or batch_collate
+    metadata = copy.deepcopy(dict(config))
+    if fold is not None:
+        metadata["fold"] = fold
+    run_options["meta_data"] = metadata
+    if dry_run:
+        run_options["experiment_name"] = f"{run_options['experiment_name']}-dry-run"
+        run_options["batch_size"] = min(int(run_options["batch_size"]), 16)
+        run_options["n_samples"] = min(int(run_options.get("n_samples") or 512), 512)
+        run_options["n_samples_test"] = min(int(run_options.get("n_samples_test") or 256), 256)
+        run_options["num_workers_dataloader"] = 0
+        run_options["test_repeats"] = [1]
+        run_options["use_mlflow"] = False
+        run_options["log_path"] = tempfile.mkdtemp(prefix="sleepwalker-dry-run-")
+    return run_options
+
+
+def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None) -> RunCfg:
+    """Build a new model, trainer, datasets, and ``RunCfg`` from configuration."""
+    selected_fold = fold if fold is not None else config.get("fold")
     seed_everything(int(config.get("seed", 17)))
-    train_datasets, validation_datasets, test_datasets = initialize_datasets(
-        config, dry_run=dry_run, fold=fold
-    )
+    train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold)
     training_dataset = combine_datasets(train_datasets)
     input_channels = training_dataset.get_input_channels()
     sequence_len = int(config["trainer"].get("sequence_len", 1))
@@ -363,6 +389,7 @@ def build_run_config(config: Mapping[str, Any], dry_run: bool = False, fold: str
     }
 
     model = build_component(config["model"], context)
+    validate_model_input(model, training_dataset)
     trainer_spec = copy.deepcopy(config["trainer"])
     trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
     if trainer_spec.get("lr_scheduler") is not None:
@@ -371,29 +398,11 @@ def build_run_config(config: Mapping[str, Any], dry_run: bool = False, fold: str
         trainer_spec["loss_function"] = build_value(trainer_spec["loss_function"])
     if dry_run:
         trainer_spec["epochs"] = 1
+        trainer_spec["eval_every"] = 1
         trainer_spec["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
         trainer_spec["warmup_device"] = "cpu"
     trainer = build_component(trainer_spec, context)
-
-    run_options = copy.deepcopy(config["run"])
-    if fold is not None:
-        run_options["experiment_name"] = f"{run_options['experiment_name']}-{fold}"
-        run_options.setdefault("tags", {})["fold"] = fold
-    run_options.setdefault("model_name", str(config["model"]["name"]).split(".")[-1])
-    run_options["collate_fn"] = build_callback(run_options.get("collate_fn")) or batch_collate
-    metadata = copy.deepcopy(dict(config))
-    if fold is not None:
-        metadata["fold"] = fold
-    run_options.setdefault("meta_data", metadata)
-    if dry_run:
-        run_options["experiment_name"] = f"{run_options['experiment_name']}-dry-run"
-        run_options["batch_size"] = min(int(run_options["batch_size"]), 16)
-        run_options["n_samples"] = min(int(run_options.get("n_samples") or 512), 512)
-        run_options["n_samples_test"] = min(int(run_options.get("n_samples_test") or 256), 256)
-        run_options["num_workers_dataloader"] = 0
-        run_options["test_repeats"] = [1]
-        run_options["use_mlflow"] = False
-        run_options["log_path"] = tempfile.mkdtemp(prefix="sleepwalker-dry-run-")
+    run_options = run_options_from_dict(config, dry_run, selected_fold)
 
     return RunCfg(
         **run_options,
@@ -405,22 +414,70 @@ def build_run_config(config: Mapping[str, Any], dry_run: bool = False, fold: str
     )
 
 
-def execute(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None) -> RunResult:
-    selected_fold = fold if fold is not None else config.get("fold")
-    return run(build_run_config(config, dry_run, selected_fold))
+def validate_model_input(model, dataset) -> None:
+    """Validate model input metadata against the dataset that supplies it."""
+
+    shape, meta = model.input_spec()
+    expected_shape = (1, dataset.get_timeseries_len(), len(dataset.get_input_channels()))
+    if tuple(shape) != expected_shape:
+        raise ValueError(f"Model input {tuple(shape)} does not match training dataset input {expected_shape}.")
+    if meta.get("layout") != "BTC":
+        raise ValueError(f"Training models must use BTC inputs, got {meta.get('layout')!r}.")
+    if "input_channels" in meta and list(meta["input_channels"]) != list(dataset.get_input_channels()):
+        raise ValueError(f"Model expects input channels {list(meta['input_channels'])}, got {list(dataset.get_input_channels())}.")
+    if "sampling_frequency" in meta and float(meta["sampling_frequency"]) != float(dataset.sample_frequency):
+        raise ValueError(f"Model expects sampling_frequency={meta['sampling_frequency']}, got {dataset.sample_frequency}.")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", help="Training YAML under configs/.")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Train for one epoch on a small patient and sample budget.",
+def runcfg_from_checkpoint(path: str | Path) -> RunCfg:
+    """Restore trainer state and rebuild datasets from the run's serialized configuration."""
+    checkpoint_path = Path(path)
+    trainer, model = BaseTrainer.load_checkpoint(checkpoint_path)
+    config_path = checkpoint_path.parent.parent / "hparams.yml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Expected the run configuration at {config_path}.")
+    config = read_yaml(config_path)
+    missing = [key for key in ("data", "model", "trainer", "run") if key not in config]
+    if missing:
+        raise ValueError(f"The checkpoint configuration is missing: {', '.join(missing)}.")
+
+    fold = config.get("fold")
+    seed_everything(int(config.get("seed", 17)))
+    train_datasets, validation_datasets, test_datasets = initialize_datasets(config, fold=fold)
+    run_options = run_options_from_dict(config, False, fold)
+    return RunCfg(
+        **run_options,
+        model=model,
+        trainer=trainer,
+        train_datasets=train_datasets,
+        val_datasets=validation_datasets,
+        test_datasets=test_datasets,
     )
-    parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
-    args = parser.parse_args()
-    execute(read_yaml(args.config), dry_run=args.dry_run, fold=args.fold)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    train_parser = commands.add_parser("train", help="Start a new training run from YAML.")
+    train_parser.add_argument("config", help="Training YAML under configs/.")
+    train_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
+
+    resume_parser = commands.add_parser("resume", help="Resume the run embedded in a training checkpoint.")
+    resume_parser.add_argument("checkpoint", help="Training checkpoint file.")
+
+    dry_parser = commands.add_parser("dry", help="Run one epoch with small patient and sample budgets.")
+    dry_parser.add_argument("config", help="Training YAML under configs/.")
+    dry_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    if args.command == "resume":
+        run(runcfg_from_checkpoint(args.checkpoint))
+        return
+    run(runcfg_from_dict(read_yaml(args.config), dry_run=args.command == "dry", fold=args.fold))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingMo
 class PackagedClassifierModel(BaseModel, EmbeddingModel, ClassifierModel):
     """Stack native-window embeddings and train a linear or MLP head."""
 
-    def __init__(self, *, package: str | Path | PackagedModel, classes: list[str], ts_len: int, sampling_frequency: float, input_channels: list[str], sequence_len: int = 1, embedding_stride: str | None = None, freeze_encoder: bool = True, head: str = "linear", hidden_dim: int = 256, dropout: float = 0.0):
+    def __init__(self, *, package: str | Path | PackagedModel, classes: list[str], ts_len: int, sequence_len: int = 1, embedding_stride: str | None = None, freeze_encoder: bool = True, head: str = "linear", hidden_dim: int = 256, dropout: float = 0.0):
         super().__init__()
         package = load_packaged_model(package) if isinstance(package, (str, Path)) else package
         if not isinstance(package, PackagedModel):
@@ -21,22 +21,18 @@ class PackagedClassifierModel(BaseModel, EmbeddingModel, ClassifierModel):
         if not isinstance(package.model, EmbeddingModel):
             raise TypeError(f"Package '{package.name}' does not expose embeddings.")
 
-        expected_channels = list(package.dataset.get_input_channels())
-        if list(input_channels) != expected_channels:
-            raise ValueError(f"Package '{package.name}' expects channels {expected_channels}, got {list(input_channels)}.")
-        if float(sampling_frequency) != float(package.dataset.sample_frequency):
-            raise ValueError(f"Package '{package.name}' expects sample_frequency={package.dataset.sample_frequency}, got {sampling_frequency}.")
-
         self.encoder = package.model
         self.encoder_name = package.name
         self.freeze_encoder = bool(freeze_encoder)
         self.classes = list(classes)
         self.sequence_len = int(sequence_len)
         self.ts_len = int(ts_len)
-        self.n_channels = len(input_channels)
+        self.input_channels = list(package.dataset.get_input_channels())
+        self.sampling_frequency = float(package.dataset.sample_frequency)
+        self.n_channels = len(self.input_channels)
         self.native_window_samples = int(package.dataset.get_timeseries_len())
         stride = package.dataset.stride if embedding_stride is None else embedding_stride
-        self.embedding_stride_samples = int(round(pd.to_timedelta(stride).total_seconds() * float(sampling_frequency)))
+        self.embedding_stride_samples = int(round(pd.to_timedelta(stride).total_seconds() * self.sampling_frequency))
         if self.native_window_samples < 1 or self.embedding_stride_samples < 1:
             raise ValueError("Native embedding window and stride must be positive.")
         if self.ts_len < self.native_window_samples:
@@ -69,19 +65,17 @@ class PackagedClassifierModel(BaseModel, EmbeddingModel, ClassifierModel):
             self.encoder.eval()
 
     def train(self, mode: bool = True):
+        """Keep a frozen encoder deterministic while training its task head."""
         super().train(mode)
         if self.freeze_encoder:
             self.encoder.eval()
         return self
 
-    def native_windows(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         if tuple(x.shape[1:]) != (self.ts_len, self.n_channels):
             raise ValueError(f"Expected input shaped [B, {self.ts_len}, {self.n_channels}], got {tuple(x.shape)}.")
         windows = x.unfold(1, self.native_window_samples, self.embedding_stride_samples)
-        return windows.permute(0, 1, 3, 2).contiguous()
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        windows = self.native_windows(x)
+        windows = windows.permute(0, 1, 3, 2).contiguous()
         batch_size, n_windows = windows.shape[:2]
         encoder_input = windows.reshape(batch_size * n_windows, self.native_window_samples, self.n_channels)
         if self.freeze_encoder:
@@ -101,4 +95,10 @@ class PackagedClassifierModel(BaseModel, EmbeddingModel, ClassifierModel):
         return self.head(features).view(features.shape[0], self.sequence_len, len(self.classes))
 
     def input_spec(self) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return (1, self.ts_len, self.n_channels), {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels}
+        return (1, self.ts_len, self.n_channels), {
+            "layout": "BTC",
+            "ts_len": self.ts_len,
+            "n_channels": self.n_channels,
+            "input_channels": list(self.input_channels),
+            "sampling_frequency": self.sampling_frequency,
+        }

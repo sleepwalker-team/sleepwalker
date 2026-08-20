@@ -9,6 +9,7 @@ from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 
 
 class PackagedEmbeddingModel(BaseModel, EmbeddingModel):
+    """Adapt a converted external encoder to Sleepwalker's embedding API."""
     def __init__(self, *, encoder: torch.nn.Module, embedding_dim: int, ts_len: int, n_channels: int, channel_first: bool = True, preprocessors: list[torch.nn.Module] | None = None):
         super().__init__(preprocessors=preprocessors)
         self.encoder = encoder

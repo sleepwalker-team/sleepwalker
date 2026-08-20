@@ -2,8 +2,7 @@
 
 The repository uses this trainer for experiments where one input window
 produces several task-specific categorical predictions, potentially at
-different temporal resolutions. The canonical example in the current tree is
-the standard multilabel configurations together with ``CompositeModel``.
+different temporal resolutions.
 """
 
 from functools import partial
@@ -24,7 +23,7 @@ from sleepwalker.utils import logger
 
 class MultiLabelTrainer(BaseTrainer):
     """
-    Train a ``CompositeModel`` with one categorical head per configured task.
+    Train a classifier with one categorical head per configured task.
 
     Each task contributes its own label set and target resolution. Smaller
     target resolutions are expanded into multiple steps inside the largest
@@ -44,6 +43,7 @@ class MultiLabelTrainer(BaseTrainer):
         device: Torch device used for training and inference.
         warmup_device: Device used during preprocessor warmup.
         save_every: Checkpoint cadence in epochs.
+        eval_every: Validation cadence in epochs.
         lr_scheduler: Optional scheduler factory.
         early_stopping: Optional validation patience.
         return_best: Whether to return the lowest-loss validation checkpoint
@@ -62,7 +62,8 @@ class MultiLabelTrainer(BaseTrainer):
         conditioned_tasks: Optional[list[str]] = None,
         device: str = "cuda:0",
         warmup_device: str = "cpu",
-        save_every: int = 1,
+        save_every: int = 10,
+        eval_every: int = 10,
         lr_scheduler: Optional[Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = None,
         early_stopping: Optional[int] = None,
         return_best: bool = True,
@@ -74,6 +75,7 @@ class MultiLabelTrainer(BaseTrainer):
             device=device,
             warmup_device=warmup_device,
             save_every=save_every,
+            eval_every=eval_every,
             lr_scheduler=lr_scheduler,
             early_stopping=early_stopping,
             return_best=return_best,

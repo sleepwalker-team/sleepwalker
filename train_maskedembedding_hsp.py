@@ -13,6 +13,7 @@ from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterNormalizer
+from sleepwalker.datasets.normalizer import RespirationFilterNormalizer, SaturationFilterNormalizer
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
@@ -34,7 +35,7 @@ N_VAL_SAMPLES=int(os.environ.get('N_VAL_SAMPLES', 15_000))
 N_TEST_SAMPLES=int(os.environ.get('N_TEST_SAMPLES', 25_000))
 N_WORKERS_DATASET=int(os.environ.get('N_WORKERS_DATASET', 24))
 N_WORKERS_DATALOADER=int(os.environ.get('N_WORKERS_DATALOADER', 24))
-N_PATIENTS = 1000
+N_PATIENTS = 300
 SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
@@ -47,13 +48,22 @@ CHANNELS = [
     ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
     ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
     ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='ABD', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'),
-    ChannelConfig(name='CHEST', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'),
-    ChannelConfig(name='SaO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='SpO2', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='IC', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=40.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='PTAF', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='AIRFLOW', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=15.0, band_order=4, notch_freq=None), group='RESP'), 
+
+    ChannelConfig(name='ABD', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+    ChannelConfig(name='ABDOMEN', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+    ChannelConfig(name='Abdomen', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+    ChannelConfig(name='CHEST', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+    ChannelConfig(name='THORAX', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+    ChannelConfig(name='Chest', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='RIP'),
+
+    ChannelConfig(name='SaO2', normalizer=SaturationFilterNormalizer(fs=SAMPLE_FREQUENCY, clip_range=(50, 100)), group='SpO2'),
+    ChannelConfig(name='SpO2', normalizer=SaturationFilterNormalizer(fs=SAMPLE_FREQUENCY, clip_range=(50, 100)), group='SpO2'),
+    ChannelConfig(name='SPO2', normalizer=SaturationFilterNormalizer(fs=SAMPLE_FREQUENCY, clip_range=(50, 100)), group='SpO2'),
+
+    ChannelConfig(name='IC', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='FLOW'), 
+    ChannelConfig(name='PTAF', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='FLOW'), 
+    ChannelConfig(name='AIRFLOW', normalizer=RespirationFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=3, lowcut=0.05, notch_freq=None, notch_q=30.0), group='FLOW'), 
+
     # ChannelConfig(name='LAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
     # ChannelConfig(name='RAT', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
     # ChannelConfig(name='EKG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
@@ -81,7 +91,7 @@ task_config = {
         'default': 'regular',
         'percentage': 0.5,
         'target_resolution': '10s',
-        'embeddings': ['RESP'],
+        'embeddings': ['RIP', 'FLOW', 'SpO2'],
         'n_slices': 50,
         'class_weights': {0: 4, 1: 4, 2: 1},
         'loss_function': torch.nn.functional.cross_entropy,
@@ -349,10 +359,10 @@ def main():
     print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
     sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-hsp', artifact_uri=None)
     logger.add_sink(sink)
-    logger.start_run(run_name='1k', params=model_hp)
+    logger.start_run(run_name='final-test', params=model_hp)
     setup_wandb_metrics(sink)
 
-    EPOCHS=20
+    EPOCHS=1
     steps_per_epoch = N_TRAIN_SAMPLES // BATCH_SIZE 
     num_training_steps = steps_per_epoch * EPOCHS
     num_warmup_steps = int(0.05 * num_training_steps) 

@@ -45,6 +45,8 @@ class MulticlassTrainer(BaseTrainer):
         loss_mode: Loss reweighting mode understood by
             ``class_weights_for_loss``.
         class_weights: Optional manual per-class weights.
+        class_counts: Optional fixed raw counts used instead of traversing the
+            training loader during warmup.
         balance_batches: Whether to reject overrepresented targets in
             ``prepare_target`` during training.
         balance_gamma: Exponent applied to the inverse-frequency acceptance
@@ -70,6 +72,7 @@ class MulticlassTrainer(BaseTrainer):
         train_transform: Optional[list[Callable]] = None,
         loss_mode: str = "regular",
         class_weights: Optional[dict[str, float]] = None,
+        class_counts: Optional[dict[str, float]] = None,
         balance_batches: bool = False,
         balance_gamma: float = 1.0,
         sequence_len: int = 1,
@@ -93,6 +96,12 @@ class MulticlassTrainer(BaseTrainer):
         self.base_loss_function = loss_function
         self.loss_mode = loss_mode
         self.class_weights = dict(class_weights or {})
+        self.class_counts = None if class_counts is None else {label: float(count) for label, count in class_counts.items()}
+        if self.class_counts is not None:
+            if set(self.class_counts) != set(self.classes):
+                raise ValueError(f"class_counts must contain exactly {self.classes}, got {sorted(self.class_counts)}.")
+            if any(count <= 0 for count in self.class_counts.values()):
+                raise ValueError("class_counts values must be positive.")
         self.balance_batches = balance_batches
         self.balance_gamma = float(balance_gamma)
         self.sequence_len = int(sequence_len)
@@ -155,10 +164,12 @@ class MulticlassTrainer(BaseTrainer):
         dataset = data_loader.dataset
         self.target_resolution = pd.to_timedelta(dataset.target_resolution)
 
-        class_cnts = None
-        if self.balance_batches or self.loss_mode != "regular":
+        class_cnts = self.class_counts
+        if (self.balance_batches or self.loss_mode != "regular") and class_cnts is None:
             class_cnts = estimate_class_cnts(data_loader)
             logger.info(f"Class counts are {class_cnts}")
+        elif class_cnts is not None:
+            logger.info(f"Using configured class counts: {class_cnts}")
             
         if self.balance_batches and class_cnts is not None:
             current_datasets = dataset.datasets if hasattr(dataset, "datasets") else [dataset]
@@ -249,11 +260,12 @@ class MulticlassTrainer(BaseTrainer):
         nc = self.num_classes
         
         loss_sum = 0
+        loss_weight_sum = 0
         cm_sum = np.zeros((nc, nc), dtype=np.int64)
-        cnt = 0
-
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
         for batch in loader:
+            if batch is None:
+                continue
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 
@@ -290,8 +302,9 @@ class MulticlassTrainer(BaseTrainer):
 
             cm = confusion_matrix(target_np, pred_np, labels=range(len(self.classes)))
             cm_sum += cm
-            cnt += 1
-            loss_sum += float(loss.item())
+            loss_weight = int(target_mask.sum().item())
+            loss_sum += float(loss.item()) * loss_weight
+            loss_weight_sum += loss_weight
 
             step = self.steps[mode]
             self._log_from_cm(cm, float(loss.item()), mode=mode, scope="batch", step=step, show_cm = False) 
@@ -301,7 +314,7 @@ class MulticlassTrainer(BaseTrainer):
             f1_macro = f1_score_from_confusion_matrix(cm_sum, macro=True)
             coehns_kappa = cohen_kappa_from_confusion_matrix(cm_sum)
 
-            desc = f"{prefix:<12} {loss_sum/cnt:2.4f} acc {accs:2.3f} " \
+            desc = f"{prefix:<12} {loss_sum/loss_weight_sum:2.4f} acc {accs:2.3f} " \
                    f"f1 (mi/ma) {f1_micro:1.4f}/{f1_macro:1.4f} κ {coehns_kappa:2.3f}"
             
             self.steps[mode] += 1
@@ -311,7 +324,7 @@ class MulticlassTrainer(BaseTrainer):
                 lr_scheduler.step()
 
         logger.progress_close()
-        epoch_loss = loss_sum / max(cnt, 1) 
+        epoch_loss = loss_sum / max(loss_weight_sum, 1)
         self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm = True)  
         
 

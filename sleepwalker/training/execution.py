@@ -1,10 +1,7 @@
-"""Shared model execution used by training, testing, and packaged inference."""
-
-from collections.abc import Iterator
+"""Repeated-view model execution."""
 
 import torch
 from torch import nn
-
 
 def average_repeated_outputs(outputs, batch_size: int, n_repeat: int):
     if isinstance(outputs, torch.Tensor):
@@ -21,17 +18,13 @@ class RepeatedViewModel(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor):
-        if x.ndim < 3:
-            raise ValueError(f"RepeatedViewModel expects [B, R, ...], got {tuple(x.shape)}.")
-        batch_size, n_repeat = x.shape[:2]
-        outputs = self.model(x.reshape(batch_size * n_repeat, *x.shape[2:]))
+    def forward(self, x):
+        values = list(x.values()) if isinstance(x, dict) else [x]
+        if not values or any(not isinstance(value, torch.Tensor) or value.ndim < 3 for value in values):
+            raise ValueError("RepeatedViewModel expects tensor inputs shaped [B, R, ...].")
+        batch_size, n_repeat = values[0].shape[:2]
+        if any(value.shape[:2] != (batch_size, n_repeat) for value in values[1:]):
+            raise ValueError("Repeated mapping inputs disagree on batch size or view count.")
+        flattened = {key: value.reshape(batch_size * n_repeat, *value.shape[2:]) for key, value in x.items()} if isinstance(x, dict) else x.reshape(batch_size * n_repeat, *x.shape[2:])
+        outputs = self.model(flattened)
         return average_repeated_outputs(outputs, batch_size, n_repeat)
-
-
-def execute_batches(model: nn.Module, loader, device: str | torch.device) -> Iterator[tuple[object, dict]]:
-    model = model.to(device)
-    model.eval()
-    with torch.inference_mode():
-        for batch in loader:
-            yield model(batch["data"].to(device, non_blocking=True)), batch

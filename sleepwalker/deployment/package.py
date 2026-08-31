@@ -21,7 +21,7 @@ from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.predictions import format_prediction_batch
 from sleepwalker.models.BaseModel import ClassifierModel, EmbeddingModel
 from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
-from sleepwalker.training.execution import RepeatedViewModel, execute_batches
+from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 
 
@@ -75,13 +75,36 @@ def group_contract(dataset: Any) -> dict[str, dict[str, Any]]:
     return groups
 
 
+def assert_single_dataset_compatible(expected_dataset: Any, actual_dataset: Any, *, allow_preprocessing_override: bool) -> None:
+    expected_inputs = list(expected_dataset.get_input_channels())
+    actual_inputs = list(actual_dataset.get_input_channels())
+    if actual_inputs != expected_inputs:
+        raise ValueError(f"Expected logical input channels {expected_inputs}, got {actual_inputs}.")
+    for attribute in ["sample_frequency", "resample_type", "total_input", "target_resolution", "stride", "z_normalize"]:
+        expected = str(getattr(expected_dataset, attribute))
+        actual = str(getattr(actual_dataset, attribute))
+        if actual != expected:
+            raise ValueError(f"Expected dataset {attribute}={expected}, got {actual}.")
+    if allow_preprocessing_override:
+        return
+    expected_groups = group_contract(expected_dataset)
+    actual_groups = group_contract(actual_dataset)
+    for group in expected_inputs:
+        expected = expected_groups[group]
+        actual = actual_groups[group]
+        if not actual["units"].issubset(expected["units"]):
+            raise ValueError(f"Expected units {expected['units']} for '{group}', got {actual['units']}.")
+        if not actual["normalizers"].issubset(expected["normalizers"]):
+            raise ValueError(f"Normalizer configuration for '{group}' does not match the package's stored preprocessing.")
+
+
 @dataclass
 class PackagedModel:
     """A model together with its executable input and output contracts."""
 
     name: str
     model: torch.nn.Module
-    dataset: UnlabelledDataset
+    dataset: Any
     classification_contract: dict[str, Any] | None = None
     task: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
@@ -98,15 +121,24 @@ class PackagedModel:
             raise ValueError("A single-head classifier package requires task.")
 
         shape, meta = self.model.input_spec()
-        expected_shape = (1, self.dataset.get_timeseries_len(), len(self.dataset.get_input_channels()))
-        if tuple(shape) != expected_shape:
-            raise ValueError(f"Model input {tuple(shape)} does not match packaged dataset input {expected_shape}.")
-        if meta.get("layout") != "BTC":
-            raise ValueError(f"Packaged models must use BTC inputs, got {meta.get('layout')!r}.")
-        if "input_channels" in meta and list(meta["input_channels"]) != list(self.dataset.get_input_channels()):
-            raise ValueError(f"Model expects input channels {list(meta['input_channels'])}, but the packaged dataset provides {list(self.dataset.get_input_channels())}.")
-        if "sampling_frequency" in meta and float(meta["sampling_frequency"]) != float(self.dataset.sample_frequency):
-            raise ValueError(f"Model expects sampling_frequency={meta['sampling_frequency']}, but the packaged dataset provides {self.dataset.sample_frequency}.")
+        if isinstance(shape, dict):
+            if not hasattr(self.dataset, "input_spec"):
+                raise TypeError("A mapping-input model requires a paired dataset.")
+            expected_shape = self.dataset.input_spec()
+            if shape != expected_shape:
+                raise ValueError(f"Model inputs {shape} do not match packaged dataset inputs {expected_shape}.")
+            if meta.get("layout") != "mapping":
+                raise ValueError(f"Mapping-input models must declare layout='mapping', got {meta.get('layout')!r}.")
+        else:
+            expected_shape = (1, self.dataset.get_timeseries_len(), len(self.dataset.get_input_channels()))
+            if tuple(shape) != expected_shape:
+                raise ValueError(f"Model input {tuple(shape)} does not match packaged dataset input {expected_shape}.")
+            if meta.get("layout") != "BTC":
+                raise ValueError(f"Packaged models must use BTC inputs, got {meta.get('layout')!r}.")
+            if "input_channels" in meta and list(meta["input_channels"]) != list(self.dataset.get_input_channels()):
+                raise ValueError(f"Model expects input channels {list(meta['input_channels'])}, but the packaged dataset provides {list(self.dataset.get_input_channels())}.")
+            if "sampling_frequency" in meta and float(meta["sampling_frequency"]) != float(self.dataset.sample_frequency):
+                raise ValueError(f"Model expects sampling_frequency={meta['sampling_frequency']}, but the packaged dataset provides {self.dataset.sample_frequency}.")
 
     @property
     def capabilities(self) -> list[str]:
@@ -118,26 +150,17 @@ class PackagedModel:
         return capabilities
 
     def assert_compatible(self, dataset: Any, *, allow_preprocessing_override: bool = False) -> None:
-        expected_inputs = list(self.dataset.get_input_channels())
-        actual_inputs = list(dataset.get_input_channels())
-        if actual_inputs != expected_inputs:
-            raise ValueError(f"Expected logical input channels {expected_inputs}, got {actual_inputs}.")
-        for attribute in ["sample_frequency", "resample_type", "total_input", "target_resolution", "stride", "z_normalize"]:
-            expected = str(getattr(self.dataset, attribute))
-            actual = str(getattr(dataset, attribute))
-            if actual != expected:
-                raise ValueError(f"Expected dataset {attribute}={expected}, got {actual}.")
-        if allow_preprocessing_override:
+        expected_inputs = self.dataset.get_input_channels()
+        actual_inputs = dataset.get_input_channels()
+        if isinstance(expected_inputs, dict):
+            if not isinstance(actual_inputs, dict) or set(actual_inputs) != set(expected_inputs):
+                raise ValueError(f"Expected paired dataset inputs {sorted(expected_inputs)}, got {actual_inputs}.")
+            if self.dataset.target_resolution != dataset.target_resolution or self.dataset.stride != dataset.stride:
+                raise ValueError("Paired datasets must use the same target_resolution and stride.")
+            for name in expected_inputs:
+                assert_single_dataset_compatible(self.dataset.datasets[name], dataset.datasets[name], allow_preprocessing_override=allow_preprocessing_override)
             return
-        expected_groups = group_contract(self.dataset)
-        actual_groups = group_contract(dataset)
-        for group in expected_inputs:
-            expected = expected_groups[group]
-            actual = actual_groups[group]
-            if not actual["units"].issubset(expected["units"]):
-                raise ValueError(f"Expected units {expected['units']} for '{group}', got {actual['units']}.")
-            if not actual["normalizers"].issubset(expected["normalizers"]):
-                raise ValueError(f"Normalizer configuration for '{group}' does not match the package's stored preprocessing.")
+        assert_single_dataset_compatible(self.dataset, dataset, allow_preprocessing_override=allow_preprocessing_override)
 
     def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
         return predict_dataset(self, dataset, batch_size=batch_size, num_workers=num_workers, n_repeat=n_repeat, device=device)
@@ -161,7 +184,7 @@ class PackagedModel:
             "model_class": class_name(self.model),
             "dataset_class": class_name(self.dataset),
             "capabilities": self.capabilities,
-            "input_channels": list(self.dataset.get_input_channels()),
+            "input_channels": self.dataset.get_input_channels(),
             "classification": self.classification_contract,
             "config": self.config,
             "git_commit": self.git_commit,
@@ -191,7 +214,10 @@ class PackagedModel:
 
 def save_packaged_model(path: str | os.PathLike, *, name: str, model: torch.nn.Module, dataset: Any, classification_contract: dict[str, Any] | None = None, task: str | None = None, config: dict[str, Any] | None = None, git_commit: Optional[str] = None) -> PackagedModel:
     deployment_source = dataset.datasets[0] if isinstance(dataset, MultiDataset) else dataset
-    deployment_dataset = deployment_source if isinstance(deployment_source, UnlabelledDataset) else UnlabelledDataset.from_dataset(deployment_source)
+    if hasattr(deployment_source, "to_unlabelled"):
+        deployment_dataset = deployment_source.to_unlabelled()
+    else:
+        deployment_dataset = deployment_source if isinstance(deployment_source, UnlabelledDataset) else UnlabelledDataset.from_dataset(deployment_source)
     package = PackagedModel(
         name=name,
         task=task,
@@ -215,9 +241,17 @@ def predict_dataset(package: PackagedModel, dataset: Any, *, batch_size: int = 6
     if package.classification_contract is None:
         raise TypeError(f"Package '{package.name}' has no classification contract.")
     package.assert_compatible(dataset)
-    loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, shuffle=False, seed=0, n_repeat=n_repeat)
-    execution_model = RepeatedViewModel(package.model) if n_repeat > 1 else package.model
-    frames = [format_prediction_batch(package.classification_contract, batch, outputs, dataset.target_resolution) for outputs, batch in execute_batches(execution_model, loader, device)]
+    loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=0, rejection_strategy="none", n_views=n_repeat)
+    execution_model = (RepeatedViewModel(package.model) if n_repeat > 1 else package.model).to(device)
+    execution_model.eval()
+    frames = []
+    with torch.inference_mode():
+        for batch in loader:
+            if batch is None:
+                continue
+            data = {key: value.to(device, non_blocking=True) for key, value in batch["data"].items()} if isinstance(batch["data"], dict) else batch["data"].to(device, non_blocking=True)
+            outputs = execution_model(data)
+            frames.append(format_prediction_batch(package.classification_contract, batch, outputs, dataset.target_resolution))
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 

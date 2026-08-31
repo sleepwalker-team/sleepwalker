@@ -11,6 +11,8 @@ def iterate_dataset(dataset, num_batches, batch_size = 128, preprocessors = None
 
     logger.progress_start(total=min(num_batches, len(loader)), desc="Testing batches")
     for batch in loader:
+        if batch is None:
+            continue
         assert "data" in batch
 
         if preprocessors:

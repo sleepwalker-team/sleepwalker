@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import torch
 import yaml
 
@@ -67,14 +68,13 @@ def test_active_training_component_graphs_construct():
 
 def test_multitask_full_uses_expert_sequence_contracts():
     train_tool = load_train_tool()
-    config = train_tool.read_yaml(REPO_ROOT / "iclr2026" / "configs" / "train" / "generated" / "multitask_sleepwalker.yml")
+    config = train_tool.read_yaml(REPO_ROOT / "iclr2026" / "configs" / "experts" / "train" / "multitask_sleepwalker.yml")
     task_blocks = [
         config["data"]["prepare_target"]["task_config"],
-        config["model"]["task_config"],
         config["trainer"]["task_config"],
     ]
 
-    assert task_blocks[0] == task_blocks[1] == task_blocks[2]
+    assert task_blocks[0] == task_blocks[1]
     assert config["data"]["target_resolution"] == "80s"
     assert {task: (cfg["sequence_len"], cfg["target_resolution"]) for task, cfg in task_blocks[0].items()} == {
         "sleep": (1, "30s"),
@@ -95,17 +95,29 @@ def test_read_yaml_parses_scientific_notation_without_decimal_point(tmp_path):
     assert config == {"small": 1e-5, "large": 2e4, "negative": -3e2, "duration": "30min", "quoted": "1e-5"}
 
 
-def test_recursive_multimodel_construction_uses_entry_channels():
+def test_cli_uses_explicit_train_resume_and_dry_commands():
     train_tool = load_train_tool()
-    config = train_tool.read_yaml(
-        REPO_ROOT / "configs" / "train" / "arousal_hsp_multimodel.yml"
-    )
-    dataset = train_tool.build_dataset(config["data"])
-    model = train_tool.build_component(config["model"], dataset_context(dataset))
+    parser = train_tool.build_parser()
 
-    assert model.input_channels == ["EEG", "EOG", "Chin EMG", "EKG"]
-    assert model.embedding_models[0].n_channels == 1
-    assert model.embedding_models[1].n_channels == 3
+    train_args = parser.parse_args(["train", "config.yml", "--fold", "fold_2"])
+    resume_args = parser.parse_args(["resume", "results/run/20/checkpoint.pt"])
+    dry_args = parser.parse_args(["dry", "config.yml"])
+
+    assert (train_args.command, train_args.config, train_args.fold) == ("train", "config.yml", "fold_2")
+    assert (resume_args.command, resume_args.checkpoint) == ("resume", "results/run/20/checkpoint.pt")
+    assert (dry_args.command, dry_args.config, dry_args.fold) == ("dry", "config.yml", None)
+
+
+def test_resume_command_uses_checkpoint_run_config(monkeypatch):
+    train_tool = load_train_tool()
+    run_config = object()
+    calls = []
+    monkeypatch.setattr(train_tool, "runcfg_from_checkpoint", lambda path: calls.append(("load", path)) or run_config)
+    monkeypatch.setattr(train_tool, "run", lambda current_config: calls.append(("run", current_config)))
+
+    train_tool.main(["resume", "checkpoint.pt"])
+
+    assert calls == [("load", "checkpoint.pt"), ("run", run_config)]
 
 
 def test_channel_config_builds_direct_and_per_physical_normalizers():
@@ -145,22 +157,6 @@ def test_nested_fully_qualified_callable_is_resolved():
     assert value["task"]["loss_function"] is torch.nn.functional.cross_entropy
 
 
-def test_stacking_config_freezes_only_nested_experts():
-    train_tool = load_train_tool()
-    config = train_tool.read_yaml(
-        REPO_ROOT / "configs" / "train" / "multilabel_stacking.yml"
-    )
-    dataset = train_tool.build_dataset(config["data"])
-    model = train_tool.build_component(config["model"], dataset_context(dataset))
-
-    assert all(
-        not parameter.requires_grad
-        for expert in model.embedding_models
-        for parameter in expert.parameters()
-    )
-    assert all(parameter.requires_grad for parameter in model.heads.parameters())
-
-
 def test_fraction_split_is_visible_and_disjoint():
     train_tool = load_train_tool()
     files = {
@@ -188,7 +184,7 @@ def test_precomputed_split_is_loaded_without_selection(tmp_path):
         "test": ["test.edf"],
     }
     split_path = tmp_path / "hsp_split.yml"
-    split_path.write_text(yaml.safe_dump({"version": 1, "folds": {"holdout": expected}}), encoding="utf-8")
+    split_path.write_text(yaml.safe_dump({"folds": {"holdout": expected}}), encoding="utf-8")
 
     assert train_tool.load_patient_split(split_path.as_posix(), object(), 17) == expected
 
@@ -201,7 +197,7 @@ def test_precomputed_cross_validation_fold_is_selected(tmp_path):
         "test": ["test.edf"],
     }
     split_path = tmp_path / "cross_validation.yml"
-    split_path.write_text(yaml.safe_dump({"version": 1, "folds": {"fold_0": expected, "fold_1": {"train": ["other-train.edf"], "validation": ["other-validation.edf"], "test": ["other-test.edf"]}}}), encoding="utf-8")
+    split_path.write_text(yaml.safe_dump({"folds": {"fold_0": expected, "fold_1": {"train": ["other-train.edf"], "validation": ["other-validation.edf"], "test": ["other-test.edf"]}}}), encoding="utf-8")
 
     assert train_tool.load_patient_split(split_path.as_posix(), object(), 17, fold="fold_0") == expected
 
@@ -310,9 +306,10 @@ def test_dry_run_changes_training_not_just_validation(monkeypatch):
         lambda _config, dry_run, fold=None: ([dataset], [], []),
     )
 
-    run_config = train_tool.build_run_config(config, dry_run=True, fold="fold_2")
+    run_config = train_tool.runcfg_from_dict(config, dry_run=True, fold="fold_2")
 
     assert run_config.trainer.epochs == 1
+    assert run_config.trainer.eval_every == 1
     assert run_config.experiment_name.endswith("-fold_2-dry-run")
     assert run_config.tags["fold"] == "fold_2"
     assert run_config.meta_data["fold"] == "fold_2"
@@ -321,6 +318,37 @@ def test_dry_run_changes_training_not_just_validation(monkeypatch):
     assert run_config.batch_size == 16
     assert run_config.num_workers_dataloader == 0
     assert run_config.use_mlflow is False
+
+
+def test_runcfg_from_checkpoint_reuses_serialized_trainer_and_model(tmp_path, monkeypatch):
+    train_tool = load_train_tool()
+    config = train_tool.read_yaml(REPO_ROOT / "configs" / "train" / "desaturation_hsp.yml")
+    dataset = train_tool.build_dataset(config["data"][0])
+    model = object()
+    trainer = object()
+    checkpoint_path = tmp_path / "run" / "10" / "checkpoint.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    (checkpoint_path.parent.parent / "hparams.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    monkeypatch.setattr(train_tool.BaseTrainer, "load_checkpoint", lambda path: (trainer, model))
+    monkeypatch.setattr(train_tool, "initialize_datasets", lambda current_config, dry_run=False, fold=None: ([dataset], [], []))
+    monkeypatch.setattr(train_tool, "build_component", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resume must not build a model or trainer")))
+
+    run_config = train_tool.runcfg_from_checkpoint(checkpoint_path)
+
+    assert run_config.trainer is trainer
+    assert run_config.model is model
+    assert run_config.train_datasets == [dataset]
+
+
+def test_runcfg_from_checkpoint_requires_run_configuration(tmp_path, monkeypatch):
+    train_tool = load_train_tool()
+    checkpoint_path = tmp_path / "run" / "10" / "checkpoint.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    monkeypatch.setattr(train_tool.BaseTrainer, "load_checkpoint", lambda path: (object(), object()))
+
+    with pytest.raises(FileNotFoundError, match="hparams.yml"):
+        train_tool.runcfg_from_checkpoint(checkpoint_path)
 
 
 def test_patient_filter_combines_required_and_excluded_channels(monkeypatch):

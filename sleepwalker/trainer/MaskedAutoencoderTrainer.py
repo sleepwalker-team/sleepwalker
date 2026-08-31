@@ -99,6 +99,8 @@ class MaskedAutoencoderTrainer(ABC):
 
         logger.progress_start(total_batches*batch_size, leave=True)
         for batch in data_loader:
+            if batch is None:
+                continue
             for modality in self.groups:
                 for idx in range(len(model.preprocessors[modality])):
                     if model.preprocessors[modality][idx].requires_warmup():
@@ -114,11 +116,14 @@ class MaskedAutoencoderTrainer(ABC):
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
         
         loss_sum = 0
+        loss_weight_sum = 0
         cnt = 0
 
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
 
         for batch in loader:
+            if batch is None:
+                continue
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 
@@ -148,12 +153,14 @@ class MaskedAutoencoderTrainer(ABC):
 
             cnt += 1
             curr_loss = float(loss.item())
-            loss_sum += curr_loss
+            batch_loss_weight = int(y_true.shape[0])
+            loss_sum += curr_loss * batch_loss_weight
+            loss_weight_sum += batch_loss_weight
 
             step = self.steps[mode]
             self._log_loss(curr_loss, mode=mode, scope='batch', step=step)
             
-            desc = f"{prefix:<12} {loss_sum/cnt:2.4f}"
+            desc = f"{prefix:<12} {loss_sum/loss_weight_sum:2.4f}"
             
             self.steps[mode] += 1
             logger.progress_status(desc)
@@ -162,7 +169,9 @@ class MaskedAutoencoderTrainer(ABC):
                 lr_scheduler.step()
 
         logger.progress_close()
-        epoch_loss = loss_sum / max(cnt, 1) 
+        if opt is not None and cnt == 0:
+            raise ValueError("Training epoch produced no valid batches.")
+        epoch_loss = loss_sum / max(loss_weight_sum, 1)
         self._log_loss(epoch_loss, mode=mode, scope='epoch', step=self.epoch_step)
 
         return epoch_loss
@@ -177,6 +186,8 @@ class MaskedAutoencoderTrainer(ABC):
         y_train = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in val_loader:
+            if batch is None:
+                continue
             pids = batch['patient']
             embeddings = {}
             for modality in self.groups:
@@ -205,6 +216,8 @@ class MaskedAutoencoderTrainer(ABC):
         y_test = {k: [] for k in self.downstream_tasks.keys()}
         patient_ids = []
         for batch in test_loader:
+            if batch is None:
+                continue
             pids = batch['patient']
             embeddings = {}
             for modality in self.groups:

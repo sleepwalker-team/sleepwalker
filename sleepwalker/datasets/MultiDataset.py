@@ -77,6 +77,7 @@ class MultiDataset(Dataset):
         if any(len(channels) != len(input_channels[0]) for channels in input_channels[1:]):
             raise ValueError("All datasets must expose the same number of input channels")
         self.input_channels = input_channels[0]
+        self.n_views = 1
 
     def get_n_datasets(self):
         """Return the number of component datasets."""
@@ -104,6 +105,15 @@ class MultiDataset(Dataset):
         """Return the total number of patients across all component datasets."""
         return sum([d.get_n_patients() for d in self.datasets])
 
+    def set_rejection_strategy(self, strategy: str) -> None:
+        for dataset in self.datasets:
+            dataset.set_rejection_strategy(strategy)
+
+    def set_n_views(self, n_views: int) -> None:
+        for dataset in self.datasets:
+            dataset.set_n_views(n_views)
+        self.n_views = int(n_views)
+
     def get_patient_ranges(self) -> list[tuple[int, int]]:
         """Return component patient ranges shifted into the combined index."""
         ranges = []
@@ -114,12 +124,15 @@ class MultiDataset(Dataset):
     def __len__(self):
         return self.len
     
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
         """Return one item plus its originating dataset index."""
         d_idx = bisect.bisect_right(self.upper_bound, idx)
         new_idx = idx - self.lower_bound[d_idx]
+        item = self.datasets[d_idx][new_idx]
+        if item is None:
+            return None
 
-        return {"dataset":d_idx, **self.datasets[d_idx].__getitem__(new_idx)}
+        return {"dataset": d_idx, **item}
 
 
 def combine_datasets(parts: Sequence[object]):

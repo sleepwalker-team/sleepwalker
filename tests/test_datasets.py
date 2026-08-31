@@ -29,9 +29,9 @@ from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
-from sleepwalker.datasets.utils import RepeatSampler, export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
+from sleepwalker.datasets.utils import export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
+from sleepwalker.trainer.utils.targets import normalize_multitask_config, prepare_multitask_target
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 from dotenv import load_dotenv
@@ -86,6 +86,10 @@ def build_export_loader(dataset, batch_size=128):
     )
 
 
+def collate_patient_names(samples):
+    return [sample["patient"] for sample in samples]
+
+
 def create_dummy_file() -> EDFFile:
     start = pd.Timestamp("2024-01-01T00:00:00")
     events = pd.DataFrame(
@@ -105,7 +109,7 @@ def create_dummy_file() -> EDFFile:
 
 
 def test_get_item_rejects_before_loading_signal():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "task": {
             "labels": ["n1", "wake"],
             "default": None,
@@ -120,7 +124,7 @@ def test_get_item_rejects_before_loading_signal():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
             target_extra=target_extra,
             patient=patient,
@@ -144,7 +148,7 @@ def test_get_item_rejects_before_loading_signal():
 
 
 def test_get_item_loads_signal_after_label_precheck():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "task": {
             "labels": ["wake"],
             "default": None,
@@ -159,7 +163,7 @@ def test_get_item_loads_signal_after_label_precheck():
         total_input="30s",
         target_resolution="30s",
         event_mapping={"wake": "wake"},
-        prepare_target=lambda target, target_extra=None, patient=None, time=None: MultiLabelTrainer.prepare_target(
+        prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
             target_extra=target_extra,
             patient=patient,
@@ -229,6 +233,74 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
     assert selected.shape[1] == 1
 
 
+def test_get_item_reads_only_selected_physical_aliases_and_quality_channels():
+    dataset = DummyDataset(
+        channels=[
+            ChannelConfig("sleep_eeg", ["C3-M2", "C4-M1"], quality_name={"C3-M2": "C3 quality"}),
+            ChannelConfig("arousal_eeg", ["C3-M2", "C4-M1"]),
+            ChannelConfig("eog", ["E1-M2", "E2-M1"]),
+        ],
+        sample_frequency=1,
+        total_input="3s",
+        target_resolution="1s",
+        event_mapping=None,
+        group_sampling_strategy="first",
+    )
+    start = pd.Timestamp("2024-01-01")
+    signal = pd.DataFrame(
+        {
+            "C3-M2": [1.0, 2.0, 3.0],
+            "C4-M1": [4.0, 5.0, 6.0],
+            "C3 quality": [0.0, 0.0, 0.0],
+            "E1-M2": [7.0, 8.0, 9.0],
+            "E2-M1": [10.0, 11.0, 12.0],
+        },
+        index=pd.date_range(start, periods=3, freq="1s"),
+    )
+    file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=start, length=1)
+    reads = []
+
+    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None):
+        reads.append(list(channels))
+        return signal.loc[:, channels].copy()
+
+    file.get_x = get_x
+    item = dataset.get_item(file, start)
+
+    assert reads == [["C3-M2", "E1-M2", "C3 quality"]]
+    assert item["data"].tolist() == [[1.0, 1.0, 7.0], [2.0, 2.0, 8.0], [3.0, 3.0, 9.0]]
+
+
+def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
+    dataset = DummyDataset(
+        channels=[
+            ChannelConfig("sleep_eeg", ["C3-M2"], normalizer=OffsetNormalizer(1)),
+            ChannelConfig("arousal_eeg", ["C3-M2"], normalizer=OffsetNormalizer(10)),
+        ],
+        sample_frequency=1,
+        total_input="3s",
+        target_resolution="3s",
+        event_mapping=None,
+    )
+    signal = pd.DataFrame({"C3-M2": [0.0, 1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1s"))
+
+    built = dataset.build_sample_from_window_df({"patient": "p", "time": signal.index[0]}, signal)
+
+    assert built["data"].tolist() == [[1.0, 10.0], [2.0, 11.0], [3.0, 12.0]]
+
+
+def test_shared_physical_channel_requires_one_unit_and_simple_preprocessing():
+    channels = [ChannelConfig("a", ["signal"], unit="uV"), ChannelConfig("b", ["signal"], unit="mV")]
+    with pytest.raises(ValueError, match="incompatible target units"):
+        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None)
+
+    channels = [ChannelConfig("a", ["signal"]), ChannelConfig("b", ["signal"])]
+    with pytest.raises(ValueError, match="rereferencing"):
+        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None, rereference=[["signal", "reference"]])
+    with pytest.raises(ValueError, match="z-normalization"):
+        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None, z_normalize=True)
+
+
 def test_channel_config_resolves_per_physical_normalizers_and_quality_channels():
     normalizer = object()
     config = ChannelConfig(
@@ -248,27 +320,14 @@ def test_channel_config_resolves_per_physical_normalizers_and_quality_channels()
         ChannelConfig("eeg", ["C3-A2"], normalizer={"C4-A1": normalizer})
 
 
-def test_repeat_sampler_repeats_indices():
-    class FixedSampler:
-        def __init__(self):
-            self.seen_epoch = None
+def test_batch_collate_filters_rejected_samples_and_returns_none_for_empty_batch():
+    sample = {"data": torch.ones(2, 1), "patient": "patient", "time": pd.Timestamp("2024-01-01")}
 
-        def __iter__(self):
-            return iter([0, 2, 4])
+    batch = batch_collate([None, sample])
 
-        def __len__(self):
-            return 3
-
-        def set_epoch(self, epoch):
-            self.seen_epoch = epoch
-
-    fixed = FixedSampler()
-    sampler = RepeatSampler(fixed, n_repeat=3)
-    sampler.set_epoch(7)
-
-    assert fixed.seen_epoch == 7
-
-    assert list(iter(sampler)) == [0, 0, 0, 2, 2, 2, 4, 4, 4]
+    assert batch["data"].shape == (1, 2, 1)
+    assert batch["patient"] == ["patient"]
+    assert batch_collate([None, None]) is None
 
 
 def test_dataset_initialization_does_not_load_complete_signals(monkeypatch):
@@ -398,11 +457,10 @@ def test_basedataset_retries_patient_before_switching_global(monkeypatch):
 
     assert item["patient"] == "p2.edf"
     assert dataset.calls == ["p1.edf", "p1.edf", "p2.edf"]
-    assert len(warnings) == 1
-    assert "switching to global attempts" in warnings[0]
+    assert warnings == []
 
 
-def test_basedataset_chains_the_last_exception(monkeypatch):
+def test_basedataset_propagates_item_exceptions():
     class FailingDataset(DummyDataset):
         def __init__(self):
             super().__init__(
@@ -427,15 +485,96 @@ def test_basedataset_chains_the_last_exception(monkeypatch):
     dataset.upper_bounds = [1, 2]
     dataset.initialized = True
 
-    monkeypatch.setattr(np.random, "randint", lambda lower, upper: 0)
-    monkeypatch.setattr(np.random, "choice", lambda values: 1)
-    monkeypatch.setattr("sleepwalker.datasets.Basedataset.logger.warning", lambda message: None)
-
-    with pytest.raises(ValueError, match="1 patient-local attempts and 1 global attempts") as exc_info:
+    with pytest.raises(RuntimeError, match="Cannot load p1.edf"):
         dataset[0]
 
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert "Cannot load p2.edf" in str(exc_info.value.__cause__)
+
+def test_basedataset_returns_none_without_resampling():
+    class RejectingDataset(DummyDataset):
+        def get_item(self, file, start_date):
+            return None
+
+    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, rejection_strategy="none")
+    dataset.edf_files = [EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1)]
+    dataset.lower_bounds = [0]
+    dataset.upper_bounds = [1]
+    dataset.initialized = True
+
+    assert dataset[0] is None
+
+
+def test_basedataset_repeats_views_atomically_before_fallback(monkeypatch):
+    class RepeatedDataset(DummyDataset):
+        def __init__(self):
+            super().__init__(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, online_max_tries=1, n_views=2)
+            self.calls = []
+
+        def get_item(self, file, start_date):
+            self.calls.append(file.path)
+            if file.path == "p1.edf" and self.calls.count(file.path) == 2:
+                return None
+            return {"data": torch.full((2, 1), float(len(self.calls))), "target": torch.tensor([1.0]), "patient": file.path, "time": start_date}
+
+    dataset = RepeatedDataset()
+    dataset.edf_files = [
+        EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+        EDFFile(channels=["EEG"], path="p2.edf", start_date=pd.Timestamp("2024-01-01"), length=1),
+    ]
+    dataset.lower_bounds = [0, 1]
+    dataset.upper_bounds = [1, 2]
+    dataset.initialized = True
+    monkeypatch.setattr(np.random, "choice", lambda values: 1)
+
+    item = dataset[0]
+
+    assert dataset.calls == ["p1.edf", "p1.edf", "p2.edf", "p2.edf"]
+    assert item["patient"] == "p2.edf"
+    assert item["data"].shape == (2, 2, 1)
+
+
+def test_loader_filters_rejections_with_multiple_workers():
+    class RejectingDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 6
+
+        def __getitem__(self, index):
+            if index % 2 == 0:
+                return None
+            return {"patient": str(index)}
+
+    loader = build_loader(RejectingDataset(), batch_size=3, num_workers=2, n_samples=None, collate_fn=collate_patient_names, sampling="sequential", seed=17)
+    batches = [batch for batch in loader if batch is not None]
+
+    assert [patient for batch in batches for patient in batch] == ["1", "3", "5"]
+
+
+def test_loader_drop_last_discards_batches_with_rejected_samples():
+    class RejectingDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 6
+
+        def __getitem__(self, index):
+            if index == 4:
+                return None
+            return {"patient": str(index)}
+
+    loader = build_loader(RejectingDataset(), batch_size=3, num_workers=0, n_samples=None, collate_fn=collate_patient_names, sampling="sequential", seed=17, drop_last=True)
+
+    assert [batch for batch in loader if batch is not None] == [["0", "1", "2"]]
+
+
+def test_multidataset_propagates_rejected_samples():
+    class RejectingDataset(DummyDataset):
+        def get_item(self, file, start_date):
+            return None
+
+    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, rejection_strategy="none")
+    dataset.edf_files = [EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1)]
+    dataset.lower_bounds = [0]
+    dataset.upper_bounds = [1]
+    dataset.initialized = True
+
+    assert MultiDataset([dataset])[0] is None
 
 
 def test_grouped_multiclass_trainer_averages_repeats():
@@ -474,6 +613,28 @@ def test_grouped_multiclass_trainer_averages_repeats():
     assert loss >= 0
     assert cm.sum() == 2
     assert cm.trace() == 2
+
+
+def test_multiclass_training_allows_an_exhausted_loader():
+    class Loader(list):
+        batch_size = 2
+        dataset = type("Dataset", (), {"target_resolution": pd.Timedelta(seconds=30)})()
+
+    model = torch.nn.Linear(1, 1)
+    trainer = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda current_model: torch.optim.SGD(current_model.parameters(), lr=0.1),
+        classes=["wake", "rem"],
+        loss_function=torch.nn.functional.cross_entropy,
+        device="cpu",
+    )
+    trainer.steps = {"train": 0, "val": 0, "test": 0}
+    trainer.epoch_step = 0
+
+    loss, cm = trainer.run_epoch(Loader([None]), torch.optim.SGD(model.parameters(), lr=0.1), model, prefix="TRAIN")
+
+    assert loss == 0
+    assert cm.tolist() == [[0, 0], [0, 0]]
 
 
 def test_forward_batch_repeated_view_average_keeps_training_gradients():
@@ -554,11 +715,19 @@ def test_repeat_loader_and_model_wrapper_feed_regular_trainer():
     class FixedDataset(torch.utils.data.Dataset):
         target_resolution = pd.Timedelta(seconds=30)
 
+        def __init__(self):
+            self.n_views = 1
+
+        def set_n_views(self, n_views):
+            self.n_views = n_views
+
         def __len__(self):
             return 2
 
         def __getitem__(self, idx):
             data = torch.tensor([4.0, 0.0]) if idx == 0 else torch.tensor([0.0, 4.0])
+            if self.n_views > 1:
+                data = data.unsqueeze(0).expand(self.n_views, -1).clone()
             target = torch.tensor([[1.0, 0.0]]) if idx == 0 else torch.tensor([[0.0, 1.0]])
             return {"data": data, "target": target, "patient": str(idx), "time": pd.Timestamp("2024-01-01")}
 
@@ -568,9 +737,9 @@ def test_repeat_loader_and_model_wrapper_feed_regular_trainer():
         num_workers=0,
         n_samples=None,
         seed=17,
-        shuffle=False,
+        sampling="sequential",
         collate_fn=lambda x: batch_collate(x, ignore_list=["time", "patient"]),
-        n_repeat=2,
+        n_views=2,
     )
     trainer = MulticlassTrainer(
         epochs=1,
@@ -615,6 +784,25 @@ def test_multiclass_trainer_balance_gamma_changes_acceptance_strength(monkeypatc
     monkeypatch.setattr(random, "random", lambda: 0.05)
     assert trainer_default._keep_balanced_target(target, class_cnts) is True
     assert trainer_stronger._keep_balanced_target(target, class_cnts) is False
+
+
+def test_multiclass_trainer_uses_configured_class_counts_without_loading_data(monkeypatch):
+    trainer = MulticlassTrainer(
+        epochs=1,
+        optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
+        classes=["majority", "minority"],
+        loss_function=torch.nn.functional.cross_entropy,
+        loss_mode="inverse",
+        class_counts={"majority": 9.0, "minority": 1.0},
+        device="cpu",
+    )
+    dataset = type("Dataset", (), {"target_resolution": "30s", "get_classes": lambda self: ["majority", "minority"]})()
+    loader = type("Loader", (), {"dataset": dataset})()
+    monkeypatch.setattr("sleepwalker.trainer.MulticlassTrainer.estimate_class_cnts", lambda current_loader: pytest.fail("configured counts must skip online estimation"))
+
+    trainer.warmup_trainer(loader)
+
+    assert trainer.loss_function.keywords["weight"][1] > trainer.loss_function.keywords["weight"][0]
 
 def test_synthetic_dataset():
     NUM_BATCHES = int(os.environ.get("NUM_BATCHES", 5))

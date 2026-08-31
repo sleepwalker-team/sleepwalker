@@ -217,6 +217,8 @@ class BaseTrainer(ABC):
             logger.progress_start(total_batches * batch_size, desc=f" {idx}/{len(steps) - 1}", leave=True)
             if step.requires_warmup():
                 for batch in data_loader:
+                    if batch is None:
+                        continue
                     x = batch["data"].to(device)
                     x = model.apply_preprocessors(x, idx)
                     step.update(x)

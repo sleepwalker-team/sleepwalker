@@ -17,6 +17,7 @@ import torch
 from torchinfo import summary
 
 from sleepwalker.deployment import save_packaged_model
+from sleepwalker.models.ModelGraphClassifier import ModelGraphClassifier
 from sleepwalker.trainer.utils.disk import append_to_jsonl
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
@@ -61,6 +62,7 @@ class RunCfg:
     meta_data: dict[str, Any] = field(default_factory=dict)
     expert_task: str | None = None
     export_package: bool = True
+    package_path: str | None = None
 
 
 @dataclass
@@ -96,7 +98,7 @@ def export_final_model(cfg: RunCfg, train_dataset) -> None:
     """Export the final inference package without making it trainer state."""
     with tempfile.TemporaryDirectory(prefix="sleepwalker_final_") as temporary_directory:
         package_path = os.path.join(temporary_directory, "package")
-        save_packaged_model(
+        package = save_packaged_model(
             package_path,
             name=cfg.experiment_name,
             task=cfg.expert_task or cfg.model_name,
@@ -106,6 +108,9 @@ def export_final_model(cfg: RunCfg, train_dataset) -> None:
             config=cfg.meta_data,
         )
         logger.artifact(path=package_path, dest="final")
+        if cfg.package_path is not None:
+            package.save(cfg.package_path)
+            logger.info(f"Exported model package to {cfg.package_path}")
 
 
 def export_final_checkpoint(cfg: RunCfg) -> None:
@@ -113,6 +118,17 @@ def export_final_checkpoint(cfg: RunCfg) -> None:
     with tempfile.TemporaryDirectory(prefix="sleepwalker_final_checkpoint_") as temporary_directory:
         checkpoint_path = cfg.trainer.save_checkpoint(os.path.join(temporary_directory, "checkpoint.pt"), cfg.model)
         logger.artifact(path=checkpoint_path, dest="final")
+
+
+def model_statistics(model: torch.nn.Module) -> dict[str, int]:
+    """Return structured parameter and graph communication counts."""
+    statistics = {
+        "total_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "trainable_parameters": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
+    }
+    if isinstance(model, ModelGraphClassifier):
+        statistics["communication_scalars_per_window"] = model.communication_scalars()
+    return statistics
 
 
 def run(cfg: RunCfg) -> RunResult:
@@ -142,9 +158,13 @@ def run(cfg: RunCfg) -> RunResult:
     if cfg.use_mlflow:
         logger.add_sink(MlflowSink(tracking_uri=f"sqlite:///{os.path.join(cfg.log_path, 'mlflow.sqlite')}", experiment=cfg.experiment_name, artifact_uri=None))
     logger.start_run(run_name=cfg.experiment_name, tags=cfg.tags)
-    
-    if cfg.meta_data:
-        logger.hparams(cfg.meta_data)
+
+    statistics = model_statistics(cfg.model)
+    cfg.meta_data["model_statistics"] = statistics
+    logger.hparams(cfg.meta_data)
+    logger.info(f"Model parameters: {statistics['trainable_parameters']:,} trainable / {statistics['total_parameters']:,} total")
+    if "communication_scalars_per_window" in statistics:
+        logger.info(f"Graph communication: {statistics['communication_scalars_per_window']:,} scalars per window")
 
     # TODO: Remove testing from this ??
     logger.info(f"Loaded {train_dataset.get_n_patients()} for training")
@@ -152,7 +172,10 @@ def run(cfg: RunCfg) -> RunResult:
         logger.info(f"Loaded {val_dataset.get_n_patients()} for validation")
     logger.info(f"Prepared {len(cfg.test_datasets)} test dataset(s)")
     summary_input, _ =  cfg.model.input_spec() 
-    if summary_input is not None:
+    if isinstance(summary_input, dict):
+        for input_name, input_shape in summary_input.items():
+            logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
+    elif summary_input is not None:
         logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
         summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
 
@@ -162,10 +185,11 @@ def run(cfg: RunCfg) -> RunResult:
         num_workers=cfg.num_workers_dataloader,
         n_samples=cfg.n_samples,
         collate_fn=cfg.collate_fn,
-        shuffle=True,
+        sampling="patient_balanced" if cfg.patients_per_epoch is not None else "random",
         seed=loader_seed,
         patients_per_epoch=cfg.patients_per_epoch,
         patient_group_size=cfg.patient_group_size,
+        drop_last=True,
     )
     val_loader = None
     if val_dataset is not None:
@@ -175,8 +199,9 @@ def run(cfg: RunCfg) -> RunResult:
             num_workers=cfg.num_workers_dataloader,
             n_samples=cfg.n_samples,
             collate_fn=cfg.collate_fn,
-            shuffle=False,
+            sampling="sequential",
             seed=loader_seed + 1,
+            rejection_strategy="none",
         )
 
     train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
@@ -184,6 +209,8 @@ def run(cfg: RunCfg) -> RunResult:
         cfg.model.load_state_dict(train_result["best_model_state"])
 
     export_final_checkpoint(cfg)
+    if cfg.export_package:
+        export_final_model(cfg, train_dataset)
 
     test_records: list[dict[str, Any]] = []
     for dataset_name, test_dataset in cfg.test_datasets:
@@ -196,9 +223,10 @@ def run(cfg: RunCfg) -> RunResult:
                 num_workers=cfg.num_workers_dataloader,
                 n_samples=cfg.n_samples_test,
                 collate_fn=cfg.collate_fn,
-                shuffle=False,
+                sampling="sequential",
                 seed=loader_seed + 2,
-                n_repeat=repeat,
+                rejection_strategy="none",
+                n_views=repeat,
             )
             execution_model = RepeatedViewModel(cfg.model) if repeat > 1 else cfg.model
             test_loss, test_cm = cfg.trainer.test(execution_model, test_loader)
@@ -220,9 +248,6 @@ def run(cfg: RunCfg) -> RunResult:
             append_to_jsonl(os.path.join(cfg.log_path, "results"), record)
             test_records.append(record)
             logger.uncontext()
-
-    if cfg.export_package:
-        export_final_model(cfg, train_dataset)
 
     logger.end_run()
     return RunResult(

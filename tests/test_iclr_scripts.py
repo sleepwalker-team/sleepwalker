@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -18,21 +19,35 @@ def load_run_script():
     return module
 
 
-def test_shell_expansions_cover_all_generated_configs():
-    train_configs = sorted((REPO_ROOT / "iclr2026" / "configs" / "train" / "generated").glob("*.yml"))
-    test_configs = sorted((REPO_ROOT / "iclr2026" / "configs" / "test" / "generated").glob("*.yml"))
+def test_shell_expansions_cover_all_expert_configs():
+    train_configs = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "train").glob("*.yml"))
+    test_configs = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml"))
 
-    assert len(train_configs) == 17
-    assert len(test_configs) == 35
+    assert len(train_configs) == 13
+    assert len(test_configs) == 13
+
+
+def test_run_all_covers_configs_once_and_orders_model_families():
+    script = (REPO_ROOT / "iclr2026" / "scripts" / "run_all.sh").read_text(encoding="utf-8")
+    references = re.findall(r"^  (iclr2026/configs/(?:experts/(?:train|test)|main)/[^ ]+\.yml)$", script, re.MULTILINE)
+    expected = {
+        *(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "iclr2026" / "configs" / "experts" / "train").glob("*.yml")),
+        *(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml")),
+        *(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "iclr2026" / "configs" / "main").glob("*.yml") if path.name != "test.yml"),
+    }
+
+    assert len(references) == len(set(references))
+    assert set(references) == expected
+    assert script.index("run_family sleepwalker") < script.index("run_family osf") < script.index("run_family sleepfm") < script.index('echo "[final]')
 
 
 def test_entrypoint_arguments_are_forwarded_after_separator():
     run_script = load_run_script()
 
-    runner, entrypoint = run_script.split_arguments(["tools/train.py", "one.yml", "two.yml", "--", "--dry-run"])
+    runner, entrypoint = run_script.split_arguments(["tools/train.py", "one.yml", "two.yml", "--", "dry"])
 
     assert runner == ["tools/train.py", "one.yml", "two.yml"]
-    assert entrypoint == ["--dry-run"]
+    assert entrypoint == ["dry"]
 
 
 def test_gpu_and_session_names_are_validated():
@@ -69,6 +84,6 @@ def test_queue_builds_entrypoint_command_without_reading_configs(monkeypatch, tm
     monkeypatch.setattr(run_script, "launch_job", launch_job)
     monkeypatch.setattr(run_script.time, "sleep", lambda _seconds: None)
 
-    sessions = run_script.run_queue(entrypoint, [config], ["--dry-run"], python, ["2"], "test", 0.01)
+    sessions = run_script.run_queue(entrypoint, [config], ["dry"], python, ["2"], "test", 0.01)
 
-    assert launched[sessions[0]] == ("2", [str(python), str(entrypoint), str(config), "--dry-run"])
+    assert launched[sessions[0]] == ("2", [str(python), str(entrypoint), "dry", str(config)])

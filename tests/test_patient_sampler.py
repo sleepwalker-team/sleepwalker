@@ -80,11 +80,29 @@ def test_patient_sampler_keeps_groups_local_and_is_repeatable_within_epoch():
 
 def test_build_loader_selects_patient_sampler_only_when_configured():
     dataset = RangeDataset([4, 4, 4])
-    patient_loader = build_loader(dataset, batch_size=2, num_workers=0, n_samples=9, collate_fn=lambda samples: samples, shuffle=True, seed=17, patients_per_epoch=2, patient_group_size=2)
-    legacy_loader = build_loader(dataset, batch_size=2, num_workers=0, n_samples=9, collate_fn=lambda samples: samples, shuffle=True, seed=17)
+    patient_loader = build_loader(dataset, batch_size=2, num_workers=0, n_samples=9, collate_fn=lambda samples: samples, sampling="patient_balanced", seed=17, patients_per_epoch=2, patient_group_size=2)
+    legacy_loader = build_loader(dataset, batch_size=2, num_workers=0, n_samples=9, collate_fn=lambda samples: samples, sampling="random", seed=17)
 
     assert isinstance(patient_loader.sampler, PatientSampler)
     assert isinstance(legacy_loader.sampler, RandomSampler)
+
+
+def test_build_loader_derives_patient_group_size_from_loader_capacity():
+    dataset = RangeDataset([100] * 64)
+
+    loader = build_loader(dataset, batch_size=32, num_workers=4, n_samples=1024, collate_fn=lambda samples: samples, sampling="patient_balanced", seed=17, patients_per_epoch=64)
+
+    assert isinstance(loader.sampler, PatientSampler)
+    assert loader.sampler.patient_group_size == 16
+
+
+def test_build_loader_preserves_explicit_patient_group_size():
+    dataset = RangeDataset([100] * 64)
+
+    loader = build_loader(dataset, batch_size=32, num_workers=4, n_samples=1024, collate_fn=lambda samples: samples, sampling="patient_balanced", seed=17, patients_per_epoch=64, patient_group_size=7)
+
+    assert isinstance(loader.sampler, PatientSampler)
+    assert loader.sampler.patient_group_size == 7
 
 
 def test_patient_sampler_rejects_datasets_without_patient_ranges():

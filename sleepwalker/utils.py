@@ -284,7 +284,8 @@ class MlflowSink:
             self.mlflow.start_run(
                 experiment_id=exp_id,
                 run_name=run_name,
-                tags=tags or {}
+                tags=tags or {},
+                log_system_metrics=True,
             )
         #     self._run_id = run.info.run_id
         #     self._experiment_id = run.info.experiment_id

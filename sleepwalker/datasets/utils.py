@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import torch
 import xmltodict as xtd
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader
 
 from sklearn.model_selection import KFold
 
@@ -28,36 +28,6 @@ from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_c
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.utils import logger
 
-
-class RepeatSampler(Sampler[int]):
-    """Repeat each sampled index a fixed number of times.
-
-    Args:
-        sampler: Base sampler producing logical sample indices.
-        n_repeat: Number of times each index should be yielded.
-
-    Notes:
-        ``BaseTrainer`` uses this sampler to evaluate repeated windows and then
-        average the corresponding model outputs.
-    """
-
-    def __init__(self, sampler: Sampler[int], n_repeat: int = 1):
-        if n_repeat <= 0:
-            raise ValueError("n_repeat must be positive.")
-        self.sampler = sampler
-        self.n_repeat = n_repeat
-
-    def __iter__(self):
-        for idx in self.sampler:
-            for _ in range(self.n_repeat):
-                yield idx
-
-    def __len__(self):
-        return len(self.sampler) * self.n_repeat
-
-    def set_epoch(self, epoch: int):
-        if hasattr(self.sampler, "set_epoch"):
-            self.sampler.set_epoch(epoch)
 
 def summarize_dataset(
     dataset_clazz,
@@ -214,6 +184,8 @@ def summarize_dataset(
 
     logger.progress_start(len(loader)*batch_size, desc=f"Estimating class frequencies", leave=True)
     for batch in loader:
+        if batch is None:
+            continue
         try:
             edf_path = batch["patient"][0]
             start_dt = pd.Timestamp(batch["time"][0])
@@ -420,6 +392,8 @@ def estimate_class_cnts(loader: DataLoader):
     class_cnts = torch.zeros(len(dataset.get_classes()))
     logger.progress_start(total_batches * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
+        if batch is None:
+            continue
         y = batch["target"]
         if "target_mask" in batch:
             mask = batch["target_mask"].to(dtype=torch.bool)
@@ -447,6 +421,8 @@ def dataloader_to_numpy(loader: DataLoader):
     batch_size = loader.batch_size or 1
     logger.progress_start(total_batches * batch_size, desc="Converting dataloader to numpy", leave=True)
     for batch in loader:
+        if batch is None:
+            continue
         X.append(batch["data"].cpu().numpy())
         if batch["data"].shape[0] < batch_size:
             logger.warning("Incomplete batch found")
@@ -570,6 +546,8 @@ def export_dataloader_to_numpy_dir(
     expected = len(loader) * (loader.batch_size or 1)
     logger.progress_start(expected, desc='Exporting dataset to numpy cache', leave=True)
     for batch in loader:
+        if batch is None:
+            continue
         if 'data' not in batch or 'patient' not in batch or 'time' not in batch:
             raise ValueError('Export requires item keys: data, patient, time')
 

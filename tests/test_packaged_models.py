@@ -6,7 +6,7 @@ from sleepwalker.deployment import PackagedModel
 from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.models.PackagedClassifierModel import PackagedClassifierModel
 from sleepwalker.models.PackagedEmbeddingModel import PackagedEmbeddingModel
-from tools.foundation_models import trace_encoder
+from tools.foundation_models import SleepFMClinicalEncoder, trace_encoder
 
 
 class WindowEmbedding(BaseModel, EmbeddingModel):
@@ -41,6 +41,16 @@ class ParameterizedEncoder(torch.nn.Module):
         return self.projection(x)
 
 
+class MaskAwareBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones(()))
+
+    def forward(self, x, mask):
+        contextual_embeddings = (x + mask.to(dtype=x.dtype).unsqueeze(-1)) * self.scale
+        return contextual_embeddings.mean(dim=1), contextual_embeddings
+
+
 def make_embedding_package():
     dataset = UnlabelledDataset(
         channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
@@ -69,8 +79,6 @@ def test_packaged_classifier_model_stacks_native_windows_and_trains_a_head(tmp_p
         package=package_path,
         classes=["negative", "positive"],
         ts_len=120,
-        sampling_frequency=2,
-        input_channels=["EEG"],
         sequence_len=2,
         freeze_encoder=True,
     )
@@ -90,7 +98,7 @@ def test_packaged_classifier_model_stacks_native_windows_and_trains_a_head(tmp_p
 def test_packaged_classifier_model_rejects_non_exact_outer_windows():
     package = make_embedding_package()
     try:
-        PackagedClassifierModel(package=package, classes=["negative", "positive"], ts_len=111, sampling_frequency=2, input_channels=["EEG"])
+        PackagedClassifierModel(package=package, classes=["negative", "positive"], ts_len=111)
     except ValueError as error:
         assert "exact number" in str(error)
     else:
@@ -104,7 +112,7 @@ def test_traced_imported_embedding_package_is_self_contained(tmp_path):
     path = PackagedModel(name="imported", model=model, dataset=dataset).save(tmp_path / "imported")
 
     loaded = PackagedModel.load(path)
-    assert loaded.features(torch.ones(2, 60, 1)).shape == (2, 1)
+    assert loaded.model.features(torch.ones(2, 60, 1)).shape == (2, 1)
 
 
 def test_foundation_trace_keeps_state_as_movable_parameters():
@@ -115,3 +123,12 @@ def test_foundation_trace_keeps_state_as_movable_parameters():
     traced.to(dtype=torch.float64)
     assert all(parameter.dtype == torch.float64 for parameter in traced.parameters())
     assert traced(torch.zeros(1, 2, dtype=torch.float64)).dtype == torch.float64
+
+
+def test_sleepfm_trace_creates_padding_masks_on_the_input_device():
+    encoder = SleepFMClinicalEncoder(MaskAwareBackbone(), [[0], [1], [2], [3]])
+    traced, embedding_dim = trace_encoder(encoder, torch.zeros(1, 4, 2))
+
+    assert embedding_dim == 8
+    traced.to(device="meta")
+    assert traced(torch.zeros(2, 4, 2, device="meta")).shape == (2, 8)

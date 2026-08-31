@@ -319,7 +319,7 @@ def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: 
         }
 
         for role, patients in split.items():
-            dataset = build_dataset(entry)
+            dataset = template.clone() if hasattr(template, "clone") else build_dataset(entry)
             if entry.get("patient_filter") is not None:
                 filtered = apply_patient_filter(
                     entry["patient_filter"],
@@ -367,6 +367,7 @@ def run_options_from_dict(config: Mapping[str, Any], dry_run: bool, fold: str | 
         run_options["num_workers_dataloader"] = 0
         run_options["test_repeats"] = [1]
         run_options["use_mlflow"] = False
+        run_options["package_path"] = None
         run_options["log_path"] = tempfile.mkdtemp(prefix="sleepwalker-dry-run-")
     return run_options
 
@@ -377,16 +378,19 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
     seed_everything(int(config.get("seed", 17)))
     train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold)
     training_dataset = combine_datasets(train_datasets)
-    input_channels = training_dataset.get_input_channels()
     sequence_len = int(config["trainer"].get("sequence_len", 1))
     context = {
         "classes": training_dataset.get_classes(),
-        "input_channels": input_channels,
-        "n_channels": len(input_channels),
-        "ts_len": training_dataset.get_timeseries_len(),
-        "sampling_frequency": training_dataset.sample_frequency,
         "sequence_len": sequence_len,
     }
+    input_channels = training_dataset.get_input_channels()
+    if not isinstance(input_channels, Mapping):
+        context.update({
+            "input_channels": input_channels,
+            "n_channels": len(input_channels),
+            "ts_len": training_dataset.get_timeseries_len(),
+            "sampling_frequency": training_dataset.sample_frequency,
+        })
 
     model = build_component(config["model"], context)
     validate_model_input(model, training_dataset)
@@ -418,6 +422,16 @@ def validate_model_input(model, dataset) -> None:
     """Validate model input metadata against the dataset that supplies it."""
 
     shape, meta = model.input_spec()
+    if isinstance(shape, dict):
+        if not hasattr(dataset, "input_spec"):
+            raise TypeError("A mapping-input model requires a dataset with input_spec().")
+        expected_shape = dataset.input_spec()
+        if shape != expected_shape:
+            raise ValueError(f"Model inputs {shape} do not match training dataset inputs {expected_shape}.")
+        if meta.get("layout") != "mapping":
+            raise ValueError(f"Mapping-input models must declare layout='mapping', got {meta.get('layout')!r}.")
+        return
+
     expected_shape = (1, dataset.get_timeseries_len(), len(dataset.get_input_channels()))
     if tuple(shape) != expected_shape:
         raise ValueError(f"Model input {tuple(shape)} does not match training dataset input {expected_shape}.")

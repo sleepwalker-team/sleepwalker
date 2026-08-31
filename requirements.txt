@@ -16,3 +16,11 @@ xmltodict
 mysqlclient
 mne
 git+https://github.com/lamarr-institute/haml.git
+h5py
+loguru
+lightning
+torchvision
+einops
+transformers
+timm
+pynvml

@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 import pyedflib
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import edf_to_df, read_edf_meta
@@ -214,7 +214,7 @@ class EDFFile:
     unit_factors: Optional[dict[str, float]] = None
     z_statistics: Optional[dict[str, tuple[float, float]]] = None
 
-    def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type):
+    def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type, channels: Optional[Sequence[str]] = None):
         """Load one signal window for the prepared patient.
 
         Args:
@@ -229,8 +229,12 @@ class EDFFile:
             signal columns. Fixed dataset normalizers are applied column-wise
             before returning.
         """
+        requested_channels = self.channels if channels is None else list(channels)
+        unknown_channels = sorted(set(requested_channels) - set(self.channels))
+        if unknown_channels:
+            raise ValueError(f"Requested channels not prepared for {self.path}: {unknown_channels}.")
         if self.X is None:
-            x_df = edf_to_df(self.path, self.channels, start_date, end_date, sample_frequency, resample_type, True)
+            x_df = edf_to_df(self.path, requested_channels, start_date, end_date, sample_frequency, resample_type, True)
             if self.unit_factors:
                 for col, factor in self.unit_factors.items():
                     if col in x_df.columns and factor != 1.0:
@@ -238,16 +242,20 @@ class EDFFile:
             # TODO allow normalization after augmentation?  
             return apply_normalizers(x_df, self.normalizers)
         else:
-            return self.X.loc[start_date:end_date]
+            return self.X.loc[start_date:end_date, requested_channels]
 
-    def apply_z_normalization(self, data_df: pd.DataFrame) -> pd.DataFrame:
+    def apply_z_normalization(self, data_df: pd.DataFrame, channels: Optional[Sequence[str]] = None) -> pd.DataFrame:
         """Apply fixed full-recording z-score statistics in place."""
         if self.z_statistics is None:
             return data_df
-        missing = sorted(set(self.z_statistics) - set(data_df.columns))
+        required_channels = list(self.z_statistics) if channels is None else list(channels)
+        missing = sorted(set(required_channels) - set(data_df.columns))
         if missing:
             raise ValueError(f"Missing channels required for recording z-normalization: {missing}.")
-        for col, (mean, standard_deviation) in self.z_statistics.items():
+        for col in required_channels:
+            if col not in self.z_statistics:
+                raise ValueError(f"Missing recording z-normalization statistics for channel '{col}'.")
+            mean, standard_deviation = self.z_statistics[col]
             data_df[col] = (data_df[col] - mean) / standard_deviation
         return data_df
     
@@ -280,17 +288,30 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
         stacked, while metadata such as ``time`` and ``patient`` remains a
         list.
     """
+    valid_samples = [sample for sample in batch if sample is not None]
+    if len(valid_samples) == 0:
+        return None
+
     final_dict = defaultdict(list)
 
-    for b in batch:
-        if b:
-            for k, v in b.items():
-                final_dict[k].append(v)
+    for sample in valid_samples:
+        if not isinstance(sample, Mapping):
+            raise TypeError(f"Dataset samples must be mappings or None, got {type(sample).__name__}.")
+        for key, value in sample.items():
+            final_dict[key].append(value)
     
     collated = {}
     for key, values in final_dict.items():
         if key in ignore_list:
             collated[key] = values
+        elif all(isinstance(value, Mapping) for value in values):
+            keys = set(values[0])
+            if any(set(value) != keys for value in values[1:]):
+                raise ValueError(f"Cannot collate mapping key '{key}' with inconsistent nested keys.")
+            collated[key] = {
+                nested_key: torch.stack([value[nested_key] for value in values])
+                for nested_key in values[0]
+            }
         elif all(isinstance(value, torch.Tensor) for value in values):
             collated[key] = torch.stack(values)
         elif all(isinstance(value, numbers.Number) for value in values):
@@ -301,6 +322,34 @@ def batch_collate(batch, ignore_list = ["time", "patient"]):
                 f"{sorted({type(value).__name__ for value in values})}."
             )
     return collated
+
+def stack_repeated_views(views: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if len(views) == 0:
+        raise ValueError("Cannot stack an empty repeated-view sequence.")
+    keys = set(views[0])
+    if "data" not in keys:
+        raise ValueError("Repeated views require a 'data' field.")
+    if any(set(view) != keys for view in views[1:]):
+        raise ValueError("Repeated views returned inconsistent fields.")
+
+    view_data = [view["data"] for view in views]
+    if not isinstance(view_data[0], (torch.Tensor, Mapping)):
+        raise TypeError(f"Repeated views require tensor or mapping-valued data, got {type(view_data[0]).__name__}.")
+
+    result = dict(views[0])
+    result["data"] = default_collate(view_data)
+    for key in keys - {"data"}:
+        first = views[0][key]
+        values = [view[key] for view in views[1:]]
+        if isinstance(first, torch.Tensor):
+            matches = all(isinstance(value, torch.Tensor) and torch.equal(first, value) for value in values)
+        elif isinstance(first, np.ndarray):
+            matches = all(isinstance(value, np.ndarray) and np.array_equal(first, value) for value in values)
+        else:
+            matches = all(first == value for value in values)
+        if not matches:
+            raise ValueError(f"Repeated views disagree on fixed field '{key}'.")
+    return result
 
 class EventIndex:
     """
@@ -433,8 +482,8 @@ class BaseDataset(Dataset, ABC):
     - a candidate window is selected from the precomputed index
     - `prepare_target` may reject it before signal loading
     - `prepare_sample` may reject it after signal loading
-    - if rejected, another candidate is sampled until a valid item is found or
-      `online_max_tries` is exceeded
+    - the configured rejection strategy may try fallback candidates
+    - exhausted expected rejection returns ``None``; construction errors raise
 
     In practice, performance depends strongly on where you place filtering:
     - filtering in `prepare_target` is cheap and usually preferable
@@ -536,9 +585,8 @@ class BaseDataset(Dataset, ABC):
 
     resample_type
         Resampling mode passed to `edf_to_df(...)`. This controls how signals
-        are aligned to `sample_frequency`. Common choices depend on the signal
-        loader implementation; `"nearest"` is the default and safe for most
-        annotation-aligned use cases.
+        are aligned to `sample_frequency`. `"nearest"` is the default;
+        `"polyphase"` applies an antialiasing filter for model inputs.
 
     total_input
         Length of the signal window returned for each item. Accepts values such
@@ -578,10 +626,19 @@ class BaseDataset(Dataset, ABC):
         the final item dictionary or `None`.
 
     online_max_tries
-        Number of attempts `__getitem__` makes first within the sampled patient
-        and then across the full dataset when candidates are rejected by
-        `prepare_target` or `prepare_sample`. This gives twice this number of
-        attempts in total. A value of zero only tries the requested window.
+        Retry budget used by the configured rejection strategy. The
+        ``patient_then_global`` strategy gives this many attempts in each
+        phase, counting the requested window as the first patient attempt.
+
+    rejection_strategy
+        ``none`` tries only the requested candidate. ``patient`` and ``global``
+        sample fallbacks from the corresponding range. ``patient_then_global``
+        preserves the stochastic training behavior of trying both phases.
+
+    n_views
+        Number of independently prepared views returned for one accepted
+        candidate. Only the ``data`` field is stacked; targets and metadata
+        must agree across views.
 
     force_one_day
         If `True`, reject patients whose mapped labels appear to span more than
@@ -672,7 +729,9 @@ class BaseDataset(Dataset, ABC):
         prepare_patient: Optional[Callable[..., Optional[tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
         prepare_target: Optional[Callable] = None,
         prepare_sample: Callable = prepare_tensor_sample,
-        online_max_tries:int = 128,
+        online_max_tries:int = 16,
+        rejection_strategy: str = "patient_then_global",
+        n_views: int = 1,
         force_one_day: bool = True,
         rereference: Optional[List[List[str]]] = None, # [ ["C3-A1", "C4-A2"] ]
         z_normalize: bool = False,
@@ -702,6 +761,12 @@ class BaseDataset(Dataset, ABC):
         self.online_max_tries = int(online_max_tries)
         if self.online_max_tries < 0:
             raise ValueError("online_max_tries must not be negative.")
+        self.rejection_strategy = str(rejection_strategy)
+        if self.rejection_strategy not in {"none", "patient", "global", "patient_then_global"}:
+            raise ValueError("rejection_strategy must be 'none', 'patient', 'global', or 'patient_then_global'.")
+        self.n_views = int(n_views)
+        if self.n_views < 1:
+            raise ValueError("n_views must be positive.")
         self.initialized = False
         self.force_one_day = force_one_day
         self.rereference = rereference
@@ -788,6 +853,18 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         """Return the number of prepared patient recordings."""
         return len(self.edf_files)
+
+    def set_rejection_strategy(self, strategy: str) -> None:
+        strategy = str(strategy)
+        if strategy not in {"none", "patient", "global", "patient_then_global"}:
+            raise ValueError("rejection strategy must be 'none', 'patient', 'global', or 'patient_then_global'.")
+        self.rejection_strategy = strategy
+
+    def set_n_views(self, n_views: int) -> None:
+        n_views = int(n_views)
+        if n_views < 1:
+            raise ValueError("n_views must be positive.")
+        self.n_views = n_views
 
     def get_patient_ranges(self) -> list[tuple[int, int]]:
         """Return each prepared patient's half-open range in the global index."""
@@ -1257,31 +1334,50 @@ class BaseDataset(Dataset, ABC):
         )
         self.initialized = True
 
-    def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def select_channels(self, available_columns: Sequence[str]) -> list[tuple[ChannelConfig, str]]:
+        """Select the physical alias used for each logical model input."""
+        available_set = set(available_columns)
+        selected_channels = []
+        for cfg in self.channels:
+            available = [name for name in cfg.physical_names if name in available_set]
+            if len(available) == 0:
+                raise ValueError(f"No physical channels found for logical channel '{cfg.logical_name}'.")
+            if self.group_sampling_strategy in {'random', 'first'}:
+                selected_name = available[int(np.random.choice(len(available)))] if self.group_sampling_strategy == 'random' else available[0]
+                selected_channels.append((cfg, selected_name))
+            elif self.group_sampling_strategy == 'none':
+                selected_channels.extend((cfg, name) for name in available)
+            else:
+                raise NotImplementedError('Cannot sample for group_sampling_strategy', self.group_sampling_strategy)
+        return selected_channels
+
+    def channels_to_load(self, selected_channels: Sequence[tuple[ChannelConfig, str]], available_columns: Sequence[str]) -> list[str]:
+        """Return selected signals plus quality and rereference dependencies."""
+        available_set = set(available_columns)
+        channels = [physical_name for cfg, physical_name in selected_channels]
+        if self.group_sampling_strategy in {'random', 'first'}:
+            channels.extend(
+                quality_name
+                for cfg, physical_name in selected_channels
+                if (quality_name := cfg.quality_name_for(physical_name)) is not None
+            )
+        if self.rereference:
+            channels.extend(channel for group in self.rereference for channel in group if channel in available_set)
+        return list(dict.fromkeys(channels))
+
+    def run_build_sample(self, item: Dict[str, Any], x_df: pd.DataFrame, selected_channels: Optional[Sequence[tuple[ChannelConfig, str]]] = None) -> Optional[Dict[str, Any]]:
         """Finalize one loaded signal window into a training or inference item."""
         quality_df = None
         if len(self.channels) > 0:
-            available_columns = list(x_df.columns)
-            available_set = set(available_columns)
-            selected_channels = []
+            selected_channels = self.select_channels(x_df.columns) if selected_channels is None else list(selected_channels)
             renamed_columns = []
             selected_quality = {}
 
-            for cfg in self.channels:
-                available = [name for name in cfg.physical_names if name in available_set]
-                if len(available) == 0:
-                    raise ValueError(
-                        f"No physical channels found for logical channel '{cfg.logical_name}'."
-                    )
-
+            for cfg, selected_name in selected_channels:
+                if selected_name not in x_df.columns:
+                    raise ValueError(f"Selected physical channel '{selected_name}' was not loaded.")
+                renamed_columns.append(cfg.logical_name)
                 if self.group_sampling_strategy in {'random', 'first'}:
-                    selected_name = (
-                        available[int(np.random.choice(len(available)))]
-                        if self.group_sampling_strategy == 'random'
-                        else available[0]
-                    )
-                    selected_channels.append((cfg, selected_name))
-                    renamed_columns.append(cfg.logical_name)
                     quality_name = cfg.quality_name_for(selected_name)
                     if quality_name is not None:
                         if quality_name not in x_df.columns:
@@ -1290,12 +1386,6 @@ class BaseDataset(Dataset, ABC):
                                 f"for selected channel '{selected_name}'."
                             )
                         selected_quality[cfg.logical_name] = x_df[quality_name].copy()
-                elif self.group_sampling_strategy == 'none':
-                    # TODO: Quality not supported right now
-                    selected_channels.extend((cfg, name) for name in available)
-                    renamed_columns.extend([cfg.logical_name] * len(available))
-                else:
-                    raise NotImplementedError('Cannot sample for group_sampling_strategy', self.group_sampling_strategy)
 
             selected_values = []
             for cfg, selected_name in selected_channels:
@@ -1368,9 +1458,11 @@ class BaseDataset(Dataset, ABC):
                 raise ValueError(f"prepare_target must return dict or None, but received {type(prepared_target)}.")
             item.update(prepared_target)
 
-        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
+        selected_channels = self.select_channels(file.channels)
+        channels_to_load = self.channels_to_load(selected_channels, file.channels)
+        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type, channels=channels_to_load)
         self.apply_rereference(x_df)
-        file.apply_z_normalization(x_df)
+        file.apply_z_normalization(x_df, channels=[physical_name for cfg, physical_name in selected_channels])
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for
@@ -1388,15 +1480,46 @@ class BaseDataset(Dataset, ABC):
         elif len(x_df) > self.get_timeseries_len():
             x_df = x_df.head(n = self.get_timeseries_len())
 
-        transformed_item = self.run_build_sample(item, x_df)
+        transformed_item = self.run_build_sample(item, x_df, selected_channels=selected_channels)
         if transformed_item is None:
             return None
         item.update(transformed_item)
 
         return item
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Return one sample, retrying locally and then globally when necessary.
+    def candidate_indices(self, original_idx: int):
+        """Yield the requested candidate followed by configured rejection fallbacks."""
+        original_pidx = bisect.bisect_right(self.upper_bounds, original_idx)
+        yield original_idx
+        strategy = self.rejection_strategy
+        if strategy == "none":
+            return
+        if strategy in {"patient", "patient_then_global"}:
+            for _ in range(max(0, self.online_max_tries - 1)):
+                yield int(np.random.randint(self.lower_bounds[original_pidx], self.upper_bounds[original_pidx]))
+        if strategy in {"global", "patient_then_global"}:
+            for _ in range(self.online_max_tries):
+                yield int(np.random.choice(len(self)))
+
+    def item_from_index(self, idx: int) -> Optional[Dict[str, Any]]:
+        """Materialize one exact indexed candidate without fallback sampling."""
+        pidx = bisect.bisect_right(self.upper_bounds, idx)
+        file = self.edf_files[pidx]
+        new_idx = idx - self.lower_bounds[pidx]
+        if file.start_offsets is not None:
+            cur_date = file.start_date + self.stride * int(file.start_offsets[new_idx])
+        else:
+            cur_date = file.start_date + self.stride * new_idx
+        views = []
+        for _ in range(self.n_views):
+            item = self.get_item(file, cur_date)
+            if item is None:
+                return None
+            views.append(item)
+        return views[0] if self.n_views == 1 else stack_repeated_views(views)
+
+    def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
+        """Return one logical sample, using configured fallbacks after rejection.
 
         Args:
             idx: Global window index into the prepared patient list.
@@ -1404,62 +1527,16 @@ class BaseDataset(Dataset, ABC):
         Returns:
             A sample dictionary produced by :meth:`get_item`.
 
-        Raises:
-            ValueError: If the dataset was not initialized or if repeated
-                rejection exhausts both retry phases.
+        Expected candidate rejection returns ``None`` after the configured
+        strategy is exhausted. Exceptions raised while constructing a
+        candidate are not rejection and propagate immediately.
         """
         if not self.initialized:
             raise ValueError(f"{self.__class__.__name__} is not initialized. Call initialize(...) before using __getitem__.")
-
-        original_idx = idx
-        original_pidx = bisect.bisect_right(self.upper_bounds, original_idx)
-        original_file = self.edf_files[original_pidx]
-        total_attempts = max(1, 2 * self.online_max_tries)
-        last_exception = None
-        none_returns = 0
-        last_file = original_file
-        last_idx = original_idx
-
-        for attempt in range(total_attempts):
-            pidx = bisect.bisect_right(self.upper_bounds, idx)
-            file = self.edf_files[pidx]
-            last_file = file
-            last_idx = idx
-
-            new_idx = idx - self.lower_bounds[pidx] 
-            if file.start_offsets is not None:
-                cur_date = file.start_date + self.stride * int(file.start_offsets[new_idx])
-            else:
-                cur_date = file.start_date + self.stride * new_idx 
-
-            item = None
-            attempt_exception = None
-            try:
-                item = self.get_item(file, cur_date)
-            except Exception as exception:
-                attempt_exception = exception
-                last_exception = exception
-
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        for candidate_idx in self.candidate_indices(idx):
+            item = self.item_from_index(candidate_idx)
             if item is not None:
                 return item
-
-            if attempt_exception is None:
-                none_returns += 1
-
-            if attempt == total_attempts - 1:
-                break
-            if attempt < self.online_max_tries - 1:
-                idx = int(np.random.randint(self.lower_bounds[original_pidx], self.upper_bounds[original_pidx]))
-            else:
-                if attempt == self.online_max_tries - 1:
-                    logger.warning(f"Exhausted {self.online_max_tries} patient-local attempts for index {original_idx} from patient {original_file.path}; switching to global attempts.")
-                idx = int(np.random.choice(len(self)))
-
-        message = (
-            f"Failed to get a clean item in {self.__class__.__name__} after {self.online_max_tries} patient-local attempts and {self.online_max_tries} global attempts. "
-            f"Original index was {original_idx} from patient {original_file.path}; last index was {last_idx} from patient {last_file.path}. "
-            f"get_item returned None {none_returns} times. Last exception was {last_exception}."
-        )
-        if last_exception is not None:
-            raise ValueError(message) from last_exception
-        raise ValueError(message)
+        return None

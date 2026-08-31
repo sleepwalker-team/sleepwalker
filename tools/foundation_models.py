@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download and convert the pinned SleepFM, SleepGPT, and OSF encoders."""
+"""Download and convert pinned sleep foundation-model encoders."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import sys
 import urllib.request
 
 import torch
-import torch.nn.functional as functional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -30,10 +29,10 @@ from sleepwalker.models.preprocessors.FixedChannelStandardizer import FixedChann
 
 SOURCES = {
     "sleepfm": {
-        "repository": "https://github.com/rthapa84/sleepfm-codebase.git",
-        "revision": "a886960f5b6977bc525b0aacdd8811e5529d8fa3",
-        "checkpoint": "repository/sleepfm/checkpoint/best.pt",
-        "checkpoint_sha256": "a2fe7e5abf70f8a448c5577a085e0b7096332dcb1ec7497916e425446ac24575",
+        "repository": "https://github.com/zou-group/sleepfm-clinical.git",
+        "revision": "2bcbae04c3592f61352addb7ac3d4193f0a3ca25",
+        "checkpoint": "repository/sleepfm/checkpoints/model_base/best.pt",
+        "checkpoint_sha256": "ffc9fc10233ebc4d0aae71abce87070db51b8bac6e4b16a5c1b4401a5f73f799",
     },
     "sleepgpt": {
         "repository": "https://github.com/LordXX505/SleepGPT.git",
@@ -52,18 +51,27 @@ SOURCES = {
 }
 
 
-class SleepFMEncoder(torch.nn.Module):
-    def __init__(self, respiratory, sleep, ecg):
+class SleepFMClinicalEncoder(torch.nn.Module):
+    """Expose the released modality-specific five-second embeddings as one vector."""
+
+    def __init__(self, backbone, modality_channel_indices: list[list[int]]):
         super().__init__()
-        self.respiratory = respiratory
-        self.sleep = sleep
-        self.ecg = ecg
+        if len(modality_channel_indices) != 4 or any(len(indices) == 0 for indices in modality_channel_indices):
+            raise ValueError("SleepFM requires non-empty BAS, respiratory, ECG, and EMG channel groups.")
+        self.backbone = backbone
+        self.register_buffer("bas_indices", torch.tensor(modality_channel_indices[0], dtype=torch.long))
+        self.register_buffer("resp_indices", torch.tensor(modality_channel_indices[1], dtype=torch.long))
+        self.register_buffer("ecg_indices", torch.tensor(modality_channel_indices[2], dtype=torch.long))
+        self.register_buffer("emg_indices", torch.tensor(modality_channel_indices[3], dtype=torch.long))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        respiratory = functional.normalize(self.respiratory(x[:, :3]), dim=-1)
-        sleep = functional.normalize(self.sleep(x[:, 3:8]), dim=-1)
-        ecg = functional.normalize(self.ecg(x[:, 8:9]), dim=-1)
-        return torch.cat([respiratory, sleep, ecg], dim=-1)
+        embeddings = []
+        for indices in (self.bas_indices, self.resp_indices, self.ecg_indices, self.emg_indices):
+            modality = x.index_select(1, indices)
+            channel_mask = torch.zeros_like(modality[:, :, 0], dtype=torch.bool)
+            _, contextual_embeddings = self.backbone(modality, channel_mask)
+            embeddings.append(contextual_embeddings.flatten(start_dim=1))
+        return torch.cat(embeddings, dim=1)
 
 
 class OSFEncoder(torch.nn.Module):
@@ -223,18 +231,44 @@ def remove_data_parallel_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str
 
 
 def convert_sleepfm(model_root: Path):
-    upstream = load_file_module("sleepfm_conversion_models", model_root / "repository" / "sleepfm" / "model" / "models.py")
+    upstream = load_file_module("sleepfm_clinical_conversion_models", model_root / "repository" / "sleepfm" / "models" / "models.py")
+    with (model_root / "repository" / "sleepfm" / "checkpoints" / "model_base" / "config.json").open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    expected = {
+        "model": "SetTransformer",
+        "patch_size": 640,
+        "embed_dim": 128,
+        "sampling_duration": 5,
+        "sampling_freq": 128,
+        "modality_types": ["BAS", "RESP", "EKG", "EMG"],
+    }
+    mismatches = {key: (config.get(key), value) for key, value in expected.items() if config.get(key) != value}
+    if mismatches:
+        raise ValueError(f"Unexpected SleepFM base configuration: {mismatches}.")
+
+    backbone = upstream.SetTransformer(
+        config["in_channels"],
+        config["patch_size"],
+        config["embed_dim"],
+        config["num_heads"],
+        config["num_layers"],
+        pooling_head=config["pooling_head"],
+        dropout=0.0,
+    )
     checkpoint = torch.load(model_root / SOURCES["sleepfm"]["checkpoint"], map_location="cpu", weights_only=False)
-    encoders = []
-    for channels, key in [(3, "resp_state_dict"), (5, "sleep_state_dict"), (1, "ekg_state_dict")]:
-        encoder = upstream.EffNet(in_channel=channels, stride=2, dilation=1)
-        encoder.fc = torch.nn.Linear(encoder.fc.in_features, 512)
-        encoder.load_state_dict(remove_data_parallel_prefix(checkpoint[key]))
-        encoders.append(encoder)
-    example = torch.zeros(1, 9, 30 * 256)
-    traced, embedding_dim = trace_encoder(SleepFMEncoder(*encoders), example)
-    channels = ["CHEST", "SaO2", "ABD", "C3-M2", "C4-M1", "O1-M2", "O2-M1", "E1-M2", "ECG"]
-    return traced, embedding_dim, 256, channels, None
+    if set(checkpoint) != {"state_dict"}:
+        raise ValueError(f"Unexpected SleepFM checkpoint keys: {sorted(checkpoint)}.")
+    backbone.load_state_dict(remove_data_parallel_prefix(checkpoint["state_dict"]), strict=True)
+
+    channels = ["ECG", "EMG_Chin", "EMG_LLeg", "EMG_RLeg", "ABD", "THX", "NP", "SpO2", "SN", "EOG_E1_A2", "EOG_E2_A1", "EEG_C3_A2", "EEG_C4_A1"]
+    modality_channel_indices = [list(range(9, 13)), list(range(4, 9)), [0], list(range(1, 4))]
+    window_seconds = int(config["sampling_duration"] * 60)
+    example = torch.zeros(1, len(channels), window_seconds * config["sampling_freq"])
+    traced, embedding_dim = trace_encoder(SleepFMClinicalEncoder(backbone, modality_channel_indices), example)
+    expected_embedding_dim = len(config["modality_types"]) * (window_seconds // 5) * config["embed_dim"]
+    if embedding_dim != expected_embedding_dim:
+        raise ValueError(f"SleepFM returned {embedding_dim} features, expected {expected_embedding_dim} contextual features.")
+    return traced, embedding_dim, config["sampling_freq"], channels, None, window_seconds
 
 
 def convert_osf(model_root: Path):
@@ -249,7 +283,7 @@ def convert_osf(model_root: Path):
     channels = ["ECG", "EMG_Chin", "EMG_LLeg", "EMG_RLeg", "ABD", "THX", "NP", "SN", "EOG_E1_A2", "EOG_E2_A1", "EEG_C3_A2", "EEG_C4_A1"]
     if len(channels) != int(metadata["num_leads"]):
         raise ValueError("OSF checkpoint channel count does not match the published channel order.")
-    return traced, embedding_dim, int(round(int(metadata["seq_len"]) / 30)), channels, torch.nn.Hardtanh(-6.0, 6.0)
+    return traced, embedding_dim, int(round(int(metadata["seq_len"]) / 30)), channels, torch.nn.Hardtanh(-6.0, 6.0), 30
 
 
 def convert_sleepgpt(model_root: Path):
@@ -282,7 +316,7 @@ def convert_sleepgpt(model_root: Path):
     pretrained_standard_deviations = [34.6887, 34.9556, 23.2826, 35.4035, 26.8738, 4.9272, 25.1366, 3.6142]
     means = [pretrained_means[index] for index in input_channel_indices]
     standard_deviations = [pretrained_standard_deviations[index] for index in input_channel_indices]
-    return traced, embedding_dim, 100, channels, FixedChannelStandardizer(means, standard_deviations)
+    return traced, embedding_dim, 100, channels, FixedChannelStandardizer(means, standard_deviations), 30
 
 
 def convert(model_name: str, model_root: str | Path, destination: str | Path):
@@ -292,18 +326,19 @@ def convert(model_name: str, model_root: str | Path, destination: str | Path):
         raise FileExistsError(f"Package destination already exists: {destination}")
     source = load_source(model_root, model_name)
     converters = {"sleepfm": convert_sleepfm, "sleepgpt": convert_sleepgpt, "osf": convert_osf}
-    encoder, embedding_dim, sample_frequency, channel_names, preprocessor = converters[model_name](model_root)
-    ts_len = 30 * sample_frequency
+    encoder, embedding_dim, sample_frequency, channel_names, preprocessor, window_seconds = converters[model_name](model_root)
+    ts_len = window_seconds * sample_frequency
     preprocessors = [] if preprocessor is None else [preprocessor]
     model = PackagedEmbeddingModel(encoder=encoder, embedding_dim=embedding_dim, ts_len=ts_len, n_channels=len(channel_names), channel_first=True, preprocessors=preprocessors)
     input_unit = "uV" if model_name == "sleepgpt" else None
     dataset = UnlabelledDataset(
         channels=[ChannelConfig(logical_name=name, physical_names=[name], unit=input_unit) for name in channel_names],
         sample_frequency=sample_frequency,
-        total_input="30s",
-        target_resolution="30s",
-        stride="30s",
-        z_normalize=model_name == "osf",
+        resample_type="polyphase" if model_name == "sleepfm" else "nearest",
+        total_input=f"{window_seconds}s",
+        target_resolution=f"{window_seconds}s",
+        stride=f"{window_seconds}s",
+        z_normalize=model_name in {"osf", "sleepfm"},
         assume_units_if_missing=True,
     )
     return save_packaged_model(destination, name=model_name, model=model, dataset=dataset, classification_contract=None, task=None, config={"foundation_model": model_name, "source": source})

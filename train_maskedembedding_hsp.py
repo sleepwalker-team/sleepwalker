@@ -19,6 +19,7 @@ from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterN
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
+from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config
 from sleepwalker.utils import logger, MlflowSink, count_parameters
 from os import makedirs
 
@@ -121,7 +122,7 @@ task_config = {
         'loss_mode': 'inverse',
     },
 }
-normalized_task_config = MultiLabelTrainer.normalize_task_config(task_config)
+normalized_task_config = normalize_multitask_config(task_config)
 
 def assure_all_groups_present(data_df):
     groups = {group_name: [cc.name for cc in CHANNELS if cc.group == group_name] for group_name in set([c.group for c in CHANNELS])}
@@ -180,7 +181,7 @@ def prepare_multiclass_sample(data, target, task_config, **item):
         new_item[f'mask_{modality_name}'] = mask
 
     # Build all different target annotations
-    targets, _ = MultiLabelTrainer.build_multitask_target(target, task_config)
+    targets, _ = build_multitask_target(target, task_config)
     for task_idx, (task_name, cfg) in enumerate(task_config.items()):
         task_targets = targets[task_idx, :cfg['n_steps'], :len(cfg['labels'])]
         new_item[f'target_{task_name}'] = task_targets[len(task_targets) // 2]

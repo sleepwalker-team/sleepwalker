@@ -187,7 +187,7 @@ def test_multitask_predictions_include_centered_task_offset():
     assert frame.loc[0, "arousal__step_39__time"] == start + pd.Timedelta("39s")
 
 
-def test_prediction_missing_unit_override_does_not_hide_conflicts(monkeypatch, tmp_path):
+def test_stored_missing_unit_policy_does_not_hide_conflicts(monkeypatch, tmp_path):
     import sleepwalker.datasets.Basedataset as basedataset_module
 
     original = basedataset_module.read_edf_meta
@@ -198,6 +198,6 @@ def test_prediction_missing_unit_override_does_not_hide_conflicts(monkeypatch, t
         return meta
 
     monkeypatch.setattr(basedataset_module, "read_edf_meta", conflicting_units)
-    package = PackagedModel.load(make_package().save(tmp_path / "package"))
+    package = PackagedModel.load(make_package(make_dataset(assume_units_if_missing=True)).save(tmp_path / "package"))
     with pytest.raises(ValueError, match="Incompatible"):
-        package.predict_edf(DATA / "signals_01.edf", assume_units_if_missing=True)
+        package.predict_edf(DATA / "signals_01.edf")

@@ -5,24 +5,30 @@
 seed: 17
 data:
   name: sleepwalker.datasets.HSP.HSP
-  sample_frequency: 256
+  sample_frequency: 128
+  resample_type: polyphase
+  z_normalize: true
   channels:
-    - {logical_name: CHEST, physical_names: [CHEST, Chest, Thorax]}
-    - {logical_name: SaO2, physical_names: [SaO2, SpO2, SPO2]}
-    - {logical_name: ABD, physical_names: [ABD, Abdomen, Abdominal]}
-    - {logical_name: C3-M2, physical_names: [C3-M2]}
-    - {logical_name: C4-M1, physical_names: [C4-M1]}
-    - {logical_name: O1-M2, physical_names: [O1-M2]}
-    - {logical_name: O2-M1, physical_names: [O2-M1]}
-    - {logical_name: E1-M2, physical_names: [E1-M2]}
     - {logical_name: ECG, physical_names: [ECG, ECG-LA, ECG-RA]}
+    - {logical_name: EMG_Chin, physical_names: [CHIN1-CHIN2, Chin1-Chin2, CHIN, EMG]}
+    - {logical_name: EMG_LLeg, physical_names: [LAT, LLEG+, LLEG-, L LEG]}
+    - {logical_name: EMG_RLeg, physical_names: [RAT, RLEG+, RLEG-, R LEG]}
+    - {logical_name: ABD, physical_names: [ABD, ABDOMEN, Abdomen]}
+    - {logical_name: THX, physical_names: [CHEST, THORAX, Chest]}
+    - {logical_name: NP, physical_names: [PTAF, AIRFLOW, AirFlow, THERMISTOR, Thermistor, Flow]}
+    - {logical_name: SpO2, physical_names: [SaO2, SpO2, SPO2]}
+    - {logical_name: SN, physical_names: [SN, Snore, SNORE, Snoring]}
+    - {logical_name: EOG_E1_A2, physical_names: [E1-M2]}
+    - {logical_name: EOG_E2_A1, physical_names: [E2-M1, E2-M2, E2]}
+    - {logical_name: EEG_C3_A2, physical_names: [C3-M2]}
+    - {logical_name: EEG_C4_A1, physical_names: [C4-M1]}
   event_mapping:
     wake: wake
     n1: n1
     n2: n2
     n3: n3
     rem: rem
-  total_input: 150s
+  total_input: 300s
   target_resolution: 150s
   stride: 30s
   assume_units_if_missing: true
@@ -31,7 +37,7 @@ data:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
     target_classes: *classes
     sequence_len: 5
-  files: iclr2026/splits/hsp.yml
+  files: iclr2026/configs/hsp.yml
   label: HSP
   num_workers: 16
 

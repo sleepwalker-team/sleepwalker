@@ -6,9 +6,11 @@ from torch.utils.data import DataLoader, Dataset
 
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
-from sleepwalker.models.CompositeModel import CompositeModel, CompositeModelEntry
+from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
+import sleepwalker.trainer.utils.targets as target_utils
 from sleepwalker.trainer.losses import class_weights_for_loss, estimate_multilabel_class_cnts
+from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config, prepare_multitask_target
 
 
 class DummyEmbeddingModel(BaseModel, EmbeddingModel):
@@ -25,6 +27,9 @@ class DummyEmbeddingModel(BaseModel, EmbeddingModel):
 
     def compute(self, x: torch.Tensor) -> torch.Tensor:
         return self.encode(x)
+
+    def input_spec(self):
+        return (1, 4, self.proj.in_features), {"layout": "BTC", "ts_len": 4, "n_channels": self.proj.in_features}
 
 
 class MultiLabelBatchDataset(Dataset):
@@ -111,7 +116,7 @@ def test_trainer_builds_task_metadata():
 
 def test_build_multitask_target_uses_task_steps():
     trainer = build_trainer()
-    y, target_mask = trainer.build_multitask_target(make_target_df(), trainer.task_config)
+    y, target_mask = build_multitask_target(make_target_df(), trainer.task_config)
 
     assert y.shape == (2, 3, 5)
     assert y[0, :1, :5].argmax(dim=-1).tolist() == [2]
@@ -125,7 +130,7 @@ def test_prepare_target_normalizes_raw_task_config():
         "breathing": {"labels": ["apnea", "hypopnea", "regular breathing"], "default": "regular breathing", "target_resolution": "10s", "sequence_len": 3},
     }
 
-    prepared = MultiLabelTrainer.prepare_target(make_target_df(), task_config=task_config)
+    prepared = prepare_multitask_target(make_target_df(), task_config=task_config)
 
     assert prepared["target"].shape == (2, 3, 5)
     assert prepared["target_mask"].tolist() == [[True, False, False], [True, True, True]]
@@ -137,7 +142,7 @@ def test_build_multitask_target_rejects_multiple_active_labels_within_step():
     target.loc[target.index[:10], "hypopnea"] = 1
 
     with pytest.raises(ValueError, match="task 'breathing'"):
-        trainer.build_multitask_target(target, trainer.task_config)
+        build_multitask_target(target, trainer.task_config)
 
 
 def test_build_multitask_target_returns_none_when_raise_error_is_false():
@@ -145,7 +150,7 @@ def test_build_multitask_target_returns_none_when_raise_error_is_false():
     target = make_target_df()
     target.loc[target.index[:10], "hypopnea"] = 1
 
-    assert trainer.build_multitask_target(target, trainer.task_config, raise_error=False) is None
+    assert build_multitask_target(target, trainer.task_config, raise_error=False) is None
 
 
 def test_build_multitask_target_uses_task_specific_percentage():
@@ -153,14 +158,14 @@ def test_build_multitask_target_uses_task_specific_percentage():
         "sleep staging": {"labels": ["wake", "n1"], "default": None, "percentage": 0.8, "target_resolution": "20s", "sequence_len": 1},
         "breathing": {"labels": ["apnea", "regular breathing"], "default": "regular breathing", "percentage": 0.2, "target_resolution": "10s", "sequence_len": 2},
     }
-    task_config = MultiLabelTrainer.normalize_task_config(task_config)
+    task_config = normalize_multitask_config(task_config)
     idx = pd.date_range("2024-01-01", periods=20, freq="1s")
     target = pd.DataFrame(0, index=idx, columns=["wake", "n1", "apnea", "regular breathing"])
     target.loc[idx[:17], "n1"] = 1
     target.loc[idx[:3], "apnea"] = 1
     target.loc[idx[10:11], "apnea"] = 1
 
-    y, target_mask = MultiLabelTrainer.build_multitask_target(target, task_config)
+    y, target_mask = build_multitask_target(target, task_config)
 
     assert y[0, :1, :2].argmax(dim=-1).tolist() == [1]
     assert y[1, :2, :2].argmax(dim=-1).tolist() == [0, 1]
@@ -168,7 +173,7 @@ def test_build_multitask_target_uses_task_specific_percentage():
 
 
 def test_build_multitask_target_centers_explicit_spans_and_builds_soft_step_masks():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "2s", "sequence_len": 2},
         "event": {
             "labels": ["no_event", "event"],
@@ -184,7 +189,7 @@ def test_build_multitask_target_centers_explicit_spans_and_builds_soft_step_mask
     target.loc[index[4:12], "n2"] = 1
     target.loc[index[0], "event"] = 1
 
-    values, target_mask = MultiLabelTrainer.build_multitask_target(target, task_config)
+    values, target_mask = build_multitask_target(target, task_config)
 
     assert task_config["sleep"]["target_offset"] == pd.Timedelta("2s")
     assert values[0, :2, :2].argmax(dim=-1).tolist() == [1, 1]
@@ -215,7 +220,7 @@ def test_trainer_rejects_unknown_condition_label():
 
 
 def test_run_epoch_masks_conditioned_tasks_during_wake():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
     })
@@ -225,13 +230,12 @@ def test_run_epoch_masks_conditioned_tasks_during_wake():
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = CompositeModel(
-        task_config=task_config,
-        input_channels=["sig"],
-        models=[CompositeModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
+    model = ModelGraphClassifier(
+        nodes={"shared": GraphNode(DummyEmbeddingModel(1, 1), {task: {"classes": cfg["labels"], "sequence_len": cfg["sequence_len"]} for task, cfg in task_config.items()})},
+        method="latent",
     )
     with torch.no_grad():
-        model.embedding_models[0].proj.weight.zero_()
+        model.models["shared"].proj.weight.zero_()
         model.heads["sleep"].weight.zero_()
         model.heads["sleep"].bias.copy_(torch.tensor([0.0, 1.0]))
         model.heads["breathing"].weight.zero_()
@@ -264,8 +268,22 @@ def test_run_epoch_masks_conditioned_tasks_during_wake():
     assert masked_loss < unmasked_loss
 
 
+def test_multilabel_training_allows_an_exhausted_loader():
+    class Loader(list):
+        batch_size = 2
+        dataset = type("Dataset", (), {"target_resolution": "30s"})()
+
+    model = torch.nn.Linear(1, 1)
+    trainer = build_trainer()
+
+    loss, cms = trainer.run_epoch(Loader([None]), torch.optim.SGD(model.parameters(), lr=0.1), model, prefix="TRAIN")
+
+    assert loss == 0
+    assert all(cm.sum() == 0 for cm in cms.values())
+
+
 def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_has_multiple_steps():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "coarse": {"labels": ["off", "on"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "10s", "sequence_len": 3},
         "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
@@ -276,13 +294,12 @@ def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_h
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = CompositeModel(
-        task_config=task_config,
-        input_channels=["sig"],
-        models=[CompositeModelEntry(DummyEmbeddingModel(1, 1), ["sig"])],
+    model = ModelGraphClassifier(
+        nodes={"shared": GraphNode(DummyEmbeddingModel(1, 1), {task: {"classes": cfg["labels"], "sequence_len": cfg["sequence_len"]} for task, cfg in task_config.items()})},
+        method="latent",
     )
     with torch.no_grad():
-        model.embedding_models[0].proj.weight.zero_()
+        model.models["shared"].proj.weight.zero_()
         model.heads["coarse"].weight.zero_()
         model.heads["coarse"].bias.copy_(torch.tensor([1.0, 0.0]))
         model.heads["sleep"].weight.zero_()
@@ -307,7 +324,7 @@ def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_h
 
 
 def test_estimate_class_cnts_respects_conditioning():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "breathing": {
             "labels": ["apnea", "regular"],
@@ -344,7 +361,7 @@ def test_estimate_class_cnts_respects_conditioning():
 
 
 def test_configure_losses_uses_explicit_task_weights_when_given():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {
             "labels": ["wake", "n2"],
             "default": None,
@@ -375,7 +392,7 @@ def test_configure_losses_uses_explicit_task_weights_when_given():
 
 
 def test_configure_losses_derives_task_weights_from_class_counts():
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {
             "labels": ["wake", "n2"],
             "default": None,
@@ -412,18 +429,48 @@ def test_configure_losses_derives_task_weights_from_class_counts():
     assert breathing_weight[0] > breathing_weight[1]
 
 
+def test_warmup_uses_configured_class_counts_without_loading_data(monkeypatch):
+    trainer = build_trainer()
+    for task, cfg in trainer.task_config.items():
+        cfg["loss_mode"] = "inverse"
+        cfg["class_counts"] = {label: float(index + 1) for index, label in enumerate(cfg["labels"])}
+
+    monkeypatch.setattr(
+        "sleepwalker.trainer.MultiLabelTrainer.estimate_multilabel_class_cnts",
+        lambda *args, **kwargs: pytest.fail("configured counts must skip online estimation"),
+    )
+    trainer.warmup_trainer(None)
+
+    for task, cfg in trainer.task_config.items():
+        assert isinstance(trainer.task_loss_functions[task], partial)
+        assert trainer.task_loss_functions[task].keywords["weight"].shape == (len(cfg["labels"]),)
+
+
+def test_task_config_rejects_incomplete_class_counts():
+    with pytest.raises(ValueError, match="class_counts must contain exactly"):
+        normalize_multitask_config({
+            "sleep": {
+                "labels": ["wake", "n2"],
+                "default": None,
+                "target_resolution": "30s",
+                "sequence_len": 1,
+                "class_counts": {"wake": 10},
+            }
+        })
+
+
 def test_prepare_target_respects_task_specific_class_counts(monkeypatch):
-    task_config = MultiLabelTrainer.normalize_task_config({
+    task_config = normalize_multitask_config({
         "sleep": {"labels": ["wake", "n2"], "default": None, "target_resolution": "30s", "sequence_len": 1},
         "breathing": {"labels": ["apnea", "regular"], "default": "regular", "target_resolution": "10s", "sequence_len": 3},
     })
     prepared = make_multitask_item(task_config, {"sleep": [1], "breathing": [0, 1, 0]})
-    monkeypatch.setattr(MultiLabelTrainer, "build_multitask_target", staticmethod(lambda targets, task_config, raise_error=False: (prepared["target"], prepared["target_mask"])))
+    monkeypatch.setattr(target_utils, "build_multitask_target", lambda targets, task_config, raise_error=False: (prepared["target"], prepared["target_mask"]))
 
     random_values = iter([0.1, 0.3])
-    monkeypatch.setattr("sleepwalker.trainer.MultiLabelTrainer.random.random", lambda: next(random_values))
+    monkeypatch.setattr(target_utils.random, "random", lambda: next(random_values))
 
-    keep = MultiLabelTrainer.prepare_target(
+    keep = prepare_multitask_target(
         target=pd.DataFrame(),
         task_config=task_config,
         class_cnts={
@@ -431,7 +478,7 @@ def test_prepare_target_respects_task_specific_class_counts(monkeypatch):
             "breathing": {"apnea": 1.0, "regular": 9.0},
         },
     )
-    drop = MultiLabelTrainer.prepare_target(
+    drop = prepare_multitask_target(
         target=pd.DataFrame(),
         task_config=task_config,
         class_cnts={

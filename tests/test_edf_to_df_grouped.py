@@ -24,7 +24,7 @@ import pyedflib
 import pytest
 from pyedflib import DO_NOT_CHECK_FILE_SIZE, DO_NOT_READ_ANNOTATIONS
 
-from sleepwalker.core.signal import edf_to_df
+from sleepwalker.core.signal import edf_to_df, polyphase_resample_frame
 
 DATA_DIR = Path(__file__).parent / "data"
 SYNTH_PATHS: List[Path] = sorted(DATA_DIR.glob("signals_*.edf"))
@@ -199,3 +199,15 @@ def test_all_channels_missing_returns_empty(synth_edf):
         synth_edf, ["NOT_A_CHANNEL_1", "NOT_A_CHANNEL_2"], None, None, 100.0
     )
     assert reference.empty and current.empty
+
+
+def test_polyphase_resampling_has_exact_target_grid():
+    index = pd.date_range("2025-01-01", periods=200, freq=pd.to_timedelta(1 / 200, unit="s"))
+    frame = pd.DataFrame({"signal": np.sin(np.arange(200) / 10)}, index=index)
+
+    result = polyphase_resample_frame(frame, source_frequency=200, target_frequency=50)
+
+    assert result.shape == (50, 1)
+    assert result.index[0] == index[0]
+    assert result.index[1] - result.index[0] == pd.Timedelta(milliseconds=20)
+    assert np.isfinite(result.to_numpy()).all()

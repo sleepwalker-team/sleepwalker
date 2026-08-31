@@ -26,13 +26,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.core.signal import read_edf_meta
-from sleepwalker.deployment import load_packaged_model
-from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
+from sleepwalker.deployment import PackagedModel, load_packaged_model
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
 from sleepwalker.trainer.utils.splits import fold_names, load_files
-from sleepwalker.trainer.utils.targets import annotation_coverage, prepare_multiclass_target, prepare_single_target
-from sleepwalker.training.execution import RepeatedViewModel, execute_batches
+from sleepwalker.trainer.utils.targets import annotation_coverage, normalize_multitask_config, prepare_multiclass_target, prepare_multitask_target as prepare_multitask_training_target, prepare_single_target
+from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 from sleepwalker.utils import logger
 from tools.train import apply_patient_filter, build_callback, build_channel, build_value, import_name, read_yaml
@@ -53,7 +52,7 @@ def read_config(path: str | Path) -> dict[str, Any]:
     return config
 
 
-def execute(package_path: str | Path, config: Mapping[str, Any]) -> list[dict[str, Any]]:
+def execute(package_path: str | Path | PackagedModel, config: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Run the visible patient-streaming evaluation workflow."""
     seed_everything(int(config.get("seed", 17)))
     test_options = config["test"]
@@ -64,7 +63,8 @@ def execute(package_path: str | Path, config: Mapping[str, Any]) -> list[dict[st
     temporary = output.with_suffix(output.suffix + ".tmp")
 
     device = str(test_options.get("device", "cuda:0" if torch.cuda.is_available() else "cpu"))
-    package = load_packaged_model(package_path, map_location=device)
+    package = package_path if isinstance(package_path, PackagedModel) else load_packaged_model(package_path, map_location=device)
+    package_reference = package.name if isinstance(package_path, PackagedModel) else str(package_path)
     if package.classification_contract is None:
         raise TypeError(f"Package '{package.name}' does not contain a classifier.")
     package.model.to(device).eval()
@@ -75,7 +75,7 @@ def execute(package_path: str | Path, config: Mapping[str, Any]) -> list[dict[st
         run_record = {
             "record_type": "run",
             "package": package.name,
-            "package_path": str(package_path),
+            "package_path": package_reference,
             "task": package.task,
             "classification_contract": json_ready(package.classification_contract),
             "git_commit": package.git_commit,
@@ -93,7 +93,11 @@ def execute(package_path: str | Path, config: Mapping[str, Any]) -> list[dict[st
             if dataset.get_n_patients() == 0 or len(dataset) == 0:
                 raise ValueError(f"Dataset '{entry['label']}' produced no evaluable windows.")
 
-            accumulators: dict[tuple[str, str], MetricAccumulator] = {}
+            expected_tasks = [package.task] if package.classification_contract["type"] == "single-head-multiclass" else list(package.classification_contract["tasks"])
+            if any(task is None for task in expected_tasks):
+                raise ValueError("A single-head package must define task.")
+            task_classes = {package.task: list(package.classification_contract["classes"])} if package.classification_contract["type"] == "single-head-multiclass" else {task: list(spec["classes"]) for task, spec in package.classification_contract["tasks"].items()}
+            accumulators = {(analysis_name, task): MetricAccumulator(task_classes[task]) for analysis_name, _ in analyses for task in expected_tasks}
             prediction_options = {**test_options, "device": device, "seed": int(config.get("seed", 17))}
             for patient, signals, task_frames in predict_patients(package, dataset, prediction_options):
                 for analysis_name, pipeline in analyses:
@@ -117,14 +121,9 @@ def execute(package_path: str | Path, config: Mapping[str, Any]) -> list[dict[st
                             "metrics": patient_metrics,
                         })
 
-            expected_tasks = [package.task] if package.classification_contract["type"] == "single-head-multiclass" else list(package.classification_contract["tasks"])
-            if any(task is None for task in expected_tasks):
-                raise ValueError("A single-head package must define task.")
             for analysis_name, _ in analyses:
                 for task in expected_tasks:
                     key = (analysis_name, task)
-                    if key not in accumulators:
-                        raise ValueError(f"Analysis '{analysis_name}' produced no rows for task '{task}' on dataset '{entry['label']}'.")
                     write_record(handle, records, {
                         "record_type": "aggregate",
                         "package": package.name,
@@ -268,6 +267,8 @@ def prepare_dataset(package, entry: Mapping[str, Any]):
     arguments.update(overrides)
     arguments["prepare_target"] = build_evaluation_target(package, entry, sorted(set(arguments["event_mapping"].values())))
     dataset = import_name(dataset_name)(**arguments)
+    if hasattr(package.dataset, "with_labels"):
+        dataset = package.dataset.with_labels(dataset)
     package.assert_compatible(dataset, allow_preprocessing_override=True)
     patients, selected_fold = resolve_entry_files(package, entry)
     if entry.get("patient_filter") is not None:
@@ -303,7 +304,7 @@ def build_evaluation_target(package, entry: Mapping[str, Any], annotation_labels
         raise ValueError(f"Dataset '{entry['label']}' target overrides refer to unknown tasks {unknown_tasks}.")
     for task_name, task_options in options.items():
         task_config[task_name].update(task_options)
-    task_config = MultiLabelTrainer.normalize_task_config(task_config)
+    task_config = normalize_multitask_config(task_config)
     return partial(prepare_multitask_target, task_config=task_config, annotation_labels=annotation_labels)
 
 
@@ -317,7 +318,7 @@ def task_target_slice(target: pd.DataFrame, task: Mapping[str, Any]) -> pd.DataF
 
 
 def prepare_multitask_target(target, target_extra=None, patient=None, time=None, *, task_config: Mapping[str, Mapping[str, Any]], annotation_labels: Sequence[str]):
-    prepared = MultiLabelTrainer.prepare_target(target, target_extra=target_extra, patient=patient, time=time, task_config=task_config)
+    prepared = prepare_multitask_training_target(target, target_extra=target_extra, patient=patient, time=time, task_config=task_config)
     if prepared is None:
         return None
     tasks = list(task_config.values())
@@ -374,29 +375,35 @@ def multitask_frames(package, dataset, outputs, batch) -> dict[str, tuple[list[s
 def predict_patients(package, dataset, test_options: Mapping[str, Any]):
     workers = int(test_options.get("num_workers_dataloader", 0))
     n_repeat = int(test_options.get("n_repeat", 1))
-    loader = build_loader(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=workers, n_samples=None, collate_fn=batch_collate, shuffle=False, seed=int(test_options.get("seed", 0)), n_repeat=n_repeat)
-    model = RepeatedViewModel(package.model) if n_repeat > 1 else package.model
+    loader = build_loader(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=int(test_options.get("seed", 0)), rejection_strategy="none", n_views=n_repeat)
+    model = (RepeatedViewModel(package.model) if n_repeat > 1 else package.model).to(test_options["device"])
+    model.eval()
     current_patient = None
     current_chunks: dict[str, list[pd.DataFrame]] = {}
     current_classes: dict[str, list[str]] = {}
     signal_map = {str(file.path): list(read_edf_meta(file.path)["signals"]) for file in dataset.edf_files}
-    for outputs, batch in execute_batches(model, loader, test_options["device"]):
-        if package.classification_contract["type"] == "single-head-multiclass":
-            batch_frames = single_frame(package, dataset, outputs, batch)
-        else:
-            batch_frames = multitask_frames(package, dataset, outputs, batch)
-        ordered_patients = list(dict.fromkeys(str(patient) for patient in batch["patient"]))
-        for patient in ordered_patients:
-            if current_patient is not None and patient != current_patient:
-                yield current_patient, signal_map[current_patient], {task: (current_classes[task], pd.concat(chunks, ignore_index=True)) for task, chunks in current_chunks.items()}
-                current_chunks = {}
-                current_classes = {}
-            current_patient = patient
-            for task, (classes, frame) in batch_frames.items():
-                selected = frame.loc[frame["patient"] == patient].drop(columns="patient")
-                if not selected.empty:
-                    current_chunks.setdefault(task, []).append(selected)
-                    current_classes[task] = classes
+    with torch.inference_mode():
+        for batch in loader:
+            if batch is None:
+                continue
+            data = {key: value.to(test_options["device"], non_blocking=True) for key, value in batch["data"].items()} if isinstance(batch["data"], dict) else batch["data"].to(test_options["device"], non_blocking=True)
+            outputs = model(data)
+            if package.classification_contract["type"] == "single-head-multiclass":
+                batch_frames = single_frame(package, dataset, outputs, batch)
+            else:
+                batch_frames = multitask_frames(package, dataset, outputs, batch)
+            ordered_patients = list(dict.fromkeys(str(patient) for patient in batch["patient"]))
+            for patient in ordered_patients:
+                if current_patient is not None and patient != current_patient:
+                    yield current_patient, signal_map[current_patient], {task: (current_classes[task], pd.concat(chunks, ignore_index=True)) for task, chunks in current_chunks.items()}
+                    current_chunks = {}
+                    current_classes = {}
+                current_patient = patient
+                for task, (classes, frame) in batch_frames.items():
+                    selected = frame.loc[frame["patient"] == patient].drop(columns="patient")
+                    if not selected.empty:
+                        current_chunks.setdefault(task, []).append(selected)
+                        current_classes[task] = classes
     if current_patient is not None:
         yield current_patient, signal_map[current_patient], {task: (current_classes[task], pd.concat(chunks, ignore_index=True)) for task, chunks in current_chunks.items()}
 
@@ -405,25 +412,11 @@ def safe_divide(numerator: float, denominator: float) -> float:
     return 0.0 if denominator == 0 else float(numerator / denominator)
 
 
-def binary_curve_metrics(true_positive: float, false_positive: float, false_negative: float, true_negative: float) -> tuple[float | None, float | None]:
-    positives = true_positive + false_negative
-    negatives = true_negative + false_positive
-    if positives == 0:
-        return None, None
-    recall = safe_divide(true_positive, positives)
-    precision = safe_divide(true_positive, true_positive + false_positive)
-    prevalence = safe_divide(positives, positives + negatives)
-    auprc = recall * precision + (1.0 - recall) * prevalence
-    auroc = None if negatives == 0 else 0.5 * (recall + safe_divide(true_negative, negatives))
-    return auroc, auprc
-
-
 def confusion_metrics(matrix: np.ndarray, classes: list[str]) -> dict[str, Any]:
     matrix = np.asarray(matrix, dtype=np.int64)
     true_positive = np.diag(matrix).astype(float)
     false_positive = matrix.sum(axis=0) - true_positive
     false_negative = matrix.sum(axis=1) - true_positive
-    true_negative = matrix.sum() - true_positive - false_positive - false_negative
     precision = np.divide(true_positive, true_positive + false_positive, out=np.zeros_like(true_positive), where=true_positive + false_positive > 0)
     recall = np.divide(true_positive, true_positive + false_negative, out=np.zeros_like(true_positive), where=true_positive + false_negative > 0)
     f1 = np.divide(2 * precision * recall, precision + recall, out=np.zeros_like(precision), where=precision + recall > 0)
@@ -445,17 +438,6 @@ def confusion_metrics(matrix: np.ndarray, classes: list[str]) -> dict[str, Any]:
         "confusion_matrix": matrix.tolist(),
         "per_class": {name: {"precision": float(precision[index]), "recall": float(recall[index]), "sensitivity": float(recall[index]), "f1": float(f1[index]), "support": int(row_sums[index])} for index, name in enumerate(classes)},
     }
-    aurocs = []
-    auprcs = []
-    for index, name in enumerate(classes):
-        auroc, auprc = binary_curve_metrics(true_positive[index], false_positive[index], false_negative[index], true_negative[index])
-        result["per_class"][name].update({"auroc": auroc, "auprc": auprc})
-        if auroc is not None:
-            aurocs.append(auroc)
-        if auprc is not None:
-            auprcs.append(auprc)
-    micro_auroc, micro_auprc = binary_curve_metrics(true_positive.sum(), false_positive.sum(), false_negative.sum(), true_negative.sum())
-    result.update({"auroc_micro": micro_auroc, "auroc_macro": float(np.mean(aurocs)) if aurocs else None, "auprc_micro": micro_auprc, "auprc_macro": float(np.mean(auprcs)) if auprcs else None})
     return result
 
 
@@ -467,12 +449,12 @@ def patient_classification_metrics(frame: pd.DataFrame, classes: list[str]) -> d
 
 
 def mean_patient_metrics(values: list[dict[str, Any]], classes: list[str]) -> dict[str, Any]:
-    fields = ["accuracy", "f1_micro", "f1_macro", "cohen_kappa", "auroc_micro", "auroc_macro", "auprc_micro", "auprc_macro", "precision_macro", "recall_macro", "sensitivity_macro"]
+    fields = ["accuracy", "f1_micro", "f1_macro", "cohen_kappa", "precision_macro", "recall_macro", "sensitivity_macro"]
     result = {field: float(np.mean([value[field] for value in values if value[field] is not None])) if any(value[field] is not None for value in values) else None for field in fields}
     result["per_class"] = {}
     for name in classes:
         result["per_class"][name] = {}
-        for field in ["precision", "recall", "sensitivity", "f1", "auroc", "auprc"]:
+        for field in ["precision", "recall", "sensitivity", "f1"]:
             current = [value["per_class"][name][field] for value in values if value["per_class"][name].get(field) is not None]
             result["per_class"][name][field] = float(np.mean(current)) if current else None
     return result
@@ -496,7 +478,6 @@ class MetricAccumulator:
             "n_patients_evaluated": len(self.patient_metrics),
             "metrics": metrics,
             "patient_mean_metrics": mean_patient_metrics(self.patient_metrics, self.classes),
-            "curve_method": "summed_patient_confusion_matrices",
             "patient_confusion_matrices": self.patient_confusion_matrices,
         }
 

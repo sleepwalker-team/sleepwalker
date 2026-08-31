@@ -184,6 +184,8 @@ def estimate_multilabel_class_cnts(
     batch_size = loader.batch_size or 1
     logger.progress_start(len(loader) * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
+        if batch is None:
+            continue
         y = batch["target"]
         if "target_mask" not in batch:
             raise ValueError("Multitask batches must contain target_mask.")

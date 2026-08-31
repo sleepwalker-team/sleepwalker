@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import redirect_stdout
+from fractions import Fraction
 import io
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -18,6 +19,7 @@ import pandas as pd
 import pyedflib
 from pyedflib import DO_NOT_CHECK_FILE_SIZE, DO_NOT_READ_ANNOTATIONS, EdfReader
 import mne 
+from scipy.signal import resample_poly
 
 from sleepwalker.utils import logger
 
@@ -325,6 +327,20 @@ def read_edf_meta(
             except Exception:
                 pass
 
+def polyphase_resample_frame(frame: pd.DataFrame, source_frequency: float, target_frequency: float) -> pd.DataFrame:
+    """Resample uniformly sampled channels with an antialiasing polyphase filter."""
+    if frame.empty:
+        return frame
+    if source_frequency <= 0 or target_frequency <= 0:
+        raise ValueError("Source and target frequencies must be positive.")
+    if np.isclose(source_frequency, target_frequency):
+        return frame
+    ratio = Fraction(float(target_frequency) / float(source_frequency)).limit_denominator(10000)
+    values = resample_poly(frame.to_numpy(), ratio.numerator, ratio.denominator, axis=0)
+    index = pd.date_range(start=frame.index[0], periods=len(values), freq=pd.to_timedelta(1.0 / target_frequency, unit="s"))
+    return pd.DataFrame(values, columns=frame.columns, index=index)
+
+
 def edf_to_df(
     edf: Union[str, os.PathLike, pyedflib.EdfReader],
     channels: List[str],
@@ -343,8 +359,8 @@ def edf_to_df(
             file.
         end: Optional extraction end timestamp. ``None`` means end of file.
         frequency: Target resampling frequency in Hz.
-        how: Resampling mode. Supported values in current code are
-            ``"nearest"``, ``"mean"``, and ``"max"``.
+        how: Resampling mode. Supported values are ``"nearest"``, ``"mean"``,
+            ``"max"``, and antialiased ``"polyphase"``.
         verbose: Whether to log backend failures and some missing-channel
             situations.
 
@@ -358,6 +374,8 @@ def edf_to_df(
         resampling and gap filling, but exact backend equivalence is not
         documented.
     """
+    if how not in {"nearest", "mean", "max", "polyphase"}:
+        raise ValueError(f"Unknown EDF resampling mode {how!r}.")
     close_after = isinstance(edf, (str, os.PathLike))
     if isinstance(edf, os.PathLike):
         edf = os.fspath(edf)
@@ -416,7 +434,9 @@ def edf_to_df(
 
                 index = pd.date_range(start=start_, periods=min_len, freq=dt)
                 df = pd.DataFrame(arrays, index=index)
-                if how == "mean":
+                if how == "polyphase":
+                    df = polyphase_resample_frame(df, fs, frequency)
+                elif how == "mean":
                     df = df.resample(resample_rate).mean()
                 elif how == "max":
                     df = df.resample(resample_rate).max()
@@ -481,7 +501,9 @@ def edf_to_df(
 
         # resample
         resample_rate = pd.to_timedelta(1.0 / frequency, unit="s")
-        if how == "mean":
+        if how == "polyphase":
+            df = polyphase_resample_frame(df, sfreq, frequency)
+        elif how == "mean":
             df = df.resample(resample_rate).mean()
         elif how == "max":
             df = df.resample(resample_rate).max()

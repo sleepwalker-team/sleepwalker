@@ -6,8 +6,6 @@ different temporal resolutions.
 """
 
 from functools import partial
-import random
-from collections import OrderedDict
 from typing import Callable, Optional
 
 import numpy as np
@@ -17,7 +15,7 @@ from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.losses import build_multilabel_task_masks, class_weights_for_loss, estimate_multilabel_class_cnts
 from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
 from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
-from sleepwalker.trainer.utils.targets import build_multiclass_sequence, build_sequence_mask
+from sleepwalker.trainer.utils.targets import normalize_multitask_config
 from sleepwalker.utils import logger
 
 
@@ -82,7 +80,7 @@ class MultiLabelTrainer(BaseTrainer):
         )
         self.log_batches = log_batches
 
-        self.task_config = self.normalize_task_config(task_config)
+        self.task_config = normalize_multitask_config(task_config)
         self.task_specs = list(self.task_config.values())
         self.task_idx = {cfg["task"]: idx for idx, cfg in enumerate(self.task_specs)}
         self.target_resolution = max(cfg["target_span"] for cfg in self.task_specs)
@@ -153,21 +151,35 @@ class MultiLabelTrainer(BaseTrainer):
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
         """Estimate per-task class counts and configure weighted losses."""
-        needs_counts = any((cfg.get("loss_mode", "none") or "none") != "none" for cfg in self.task_config.values())
-        if not needs_counts:
+        tasks_needing_counts = [
+            cfg["task"]
+            for cfg in self.task_config.values()
+            if (cfg.get("loss_mode", "none") or "none") != "none"
+        ]
+        if not tasks_needing_counts:
             return
 
-        class_cnts = estimate_multilabel_class_cnts(
-            data_loader,
-            self.task_config,
-            condition_task=self.condition_task,
-            condition_labels=[
-                self.task_config[self.condition_task]["labels"][idx]
-                for idx in sorted(self.condition_label_idx)
-            ] if self.condition_task is not None else None,
-            conditioned_tasks=list(self.conditioned_tasks) if self.condition_task is not None else None,
-        )
-        logger.info(f"Estimated class counts: {class_cnts}")
+        class_cnts = {
+            task: dict(self.task_config[task]["class_counts"])
+            for task in tasks_needing_counts
+            if self.task_config[task]["class_counts"] is not None
+        }
+        missing_tasks = [task for task in tasks_needing_counts if task not in class_cnts]
+        if missing_tasks:
+            estimated = estimate_multilabel_class_cnts(
+                data_loader,
+                self.task_config,
+                condition_task=self.condition_task,
+                condition_labels=[
+                    self.task_config[self.condition_task]["labels"][idx]
+                    for idx in sorted(self.condition_label_idx)
+                ] if self.condition_task is not None else None,
+                conditioned_tasks=list(self.conditioned_tasks) if self.condition_task is not None else None,
+            )
+            class_cnts.update({task: estimated[task] for task in missing_tasks})
+            logger.info(f"Estimated class counts for {missing_tasks}: {class_cnts}")
+        else:
+            logger.info(f"Using configured class counts: {class_cnts}")
 
         for cfg in self.task_specs:
             task = cfg["task"]
@@ -192,189 +204,6 @@ class MultiLabelTrainer(BaseTrainer):
                 self.task_loss_functions[task] = partial(loss_function, weight=weights_torch)
             else:
                 self.task_loss_functions[task] = loss_function
-
-    @staticmethod
-    def normalize_task_config(task_config: dict[str, dict]):
-        """Validate task steps and derive each centered target span.
-
-        ``target_resolution`` is the duration of one output step and
-        ``sequence_len`` is the number of steps.
-        """
-        if len(task_config) == 0:
-            raise ValueError("task_config must not be empty.")
-        for task, cfg in task_config.items():
-            if "target_resolution" not in cfg:
-                raise ValueError(f"Task '{task}' is missing target_resolution.")
-            if "sequence_len" not in cfg:
-                raise ValueError(f"Task '{task}' is missing sequence_len.")
-
-        normalized = OrderedDict()
-        used_classes = set()
-        for task, cfg in task_config.items():
-            labels = list(cfg["labels"])
-            if len(labels) == 0:
-                raise ValueError(f"Task '{task}' does not contain any labels.")
-            if "default" not in cfg:
-                raise ValueError(f"Task '{task}' is missing a default entry.")
-
-            default = cfg["default"]
-            percentage = float(cfg.get("percentage", 0.5))
-            target_resolution = pd.to_timedelta(cfg["target_resolution"])
-            if target_resolution <= pd.Timedelta(0):
-                raise ValueError(f"Task '{task}' target_resolution must be positive.")
-            sequence_len = int(cfg["sequence_len"])
-            if sequence_len < 1:
-                raise ValueError(f"Task '{task}' sequence_len must be at least 1.")
-
-            for label in labels:
-                if label in used_classes:
-                    raise ValueError(f"Class '{label}' occurs in multiple tasks.")
-                used_classes.add(label)
-            if default is not None and default not in labels:
-                raise ValueError(f"Default label '{default}' is not part of task '{task}'.")
-            if not 0 < percentage <= 1:
-                raise ValueError(f"Task '{task}' has invalid percentage '{percentage}'.")
-
-            normalized[task] = {
-                "task": task,
-                "labels": labels,
-                "default": default,
-                "percentage": percentage,
-                "target_resolution": target_resolution,
-                "sequence_len": sequence_len,
-                "n_steps": sequence_len,
-                "target_span": target_resolution * sequence_len,
-                "soft_boundaries": bool(cfg.get("soft_boundaries", False)),
-                "step_mask": dict(cfg["step_mask"]) if cfg.get("step_mask") is not None else None,
-                "embeddings": cfg.get("embeddings", "EEG"),
-                "n_slices": cfg.get("n_slices", 50),
-                "loss_function": cfg.get("loss_function"),
-                "loss_mode": cfg.get("loss_mode", "none"),
-                "class_weights": dict(cfg.get("class_weights", {})),
-                "task_weight": float(cfg.get("task_weight", 1.0)),
-            }
-
-        common_target_span = max(cfg["target_span"] for cfg in normalized.values())
-        for cfg in normalized.values():
-            cfg["target_offset"] = (common_target_span - cfg["target_span"]) / 2
-        return normalized
-
-    @staticmethod
-    def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], raise_error=True):
-        """Build padded probability targets and per-step masks for all tasks."""
-        if targets is None:
-            return None
-        task_specs = list(task_config.values())
-        max_task_steps = max(cfg["n_steps"] for cfg in task_specs)
-        max_task_classes = max(len(cfg["labels"]) for cfg in task_specs)
-        out = torch.zeros((len(task_config), max_task_steps, max_task_classes), dtype=torch.float32)
-        out_mask = torch.zeros((len(task_config), max_task_steps), dtype=torch.bool)
-
-        frequency = targets.index.freq or pd.infer_freq(targets.index)
-        if frequency is None:
-            raise ValueError("Multitask targets require a regular time index.")
-        frequency = pd.to_timedelta(frequency)
-        common_target_span = max(cfg["target_span"] for cfg in task_specs)
-        expected_samples = int(round(common_target_span / frequency))
-        if len(targets) != expected_samples:
-            raise ValueError(f"Expected {expected_samples} target samples for target span {common_target_span}, got {len(targets)}.")
-
-        for task_idx, cfg in enumerate(task_specs):
-            task_samples = int(round(cfg["target_span"] / frequency))
-            start = (len(targets) - task_samples) // 2
-            task_targets = targets.iloc[start:start + task_samples]
-            target_values = task_targets.drop(columns=[cfg["default"]], errors="ignore") if cfg["default"] is not None else task_targets
-            try:
-                values = build_multiclass_sequence(
-                    target_values,
-                    target_classes=cfg["labels"],
-                    percentage=cfg["percentage"],
-                    sequence_len=cfg["n_steps"],
-                    soft_boundaries=cfg["soft_boundaries"],
-                )
-                if values is None:
-                    raise ValueError("target sequence is ambiguous")
-                mask = build_sequence_mask(task_targets, sequence_len=cfg["n_steps"], step_mask=cfg["step_mask"]) if cfg["step_mask"] is not None else torch.ones(cfg["n_steps"], dtype=torch.bool)
-            except ValueError as exc:
-                if raise_error:
-                    raise ValueError(f"Could not build target for task '{cfg['task']}': {exc}.") from exc
-                return None
-
-            out[task_idx, :cfg["n_steps"], :len(cfg["labels"])] = values
-            out_mask[task_idx, :cfg["n_steps"]] = mask
-
-        return out, out_mask
-
-    @staticmethod
-    def prepare_target(
-        target,
-        target_extra=None,
-        patient=None,
-        time=None,
-        class_cnts: Optional[dict[str, dict[str, float]]] = None,
-        task_config: Optional[dict[str, dict]] = None,
-    ):
-        """Prepare one dataset target payload for multitask training.
-
-        Args:
-            target: Primary target indicator DataFrame.
-            target_extra: Optional secondary target indicator DataFrame.
-            patient: Patient identifier, currently passed through for callback
-                compatibility.
-            time: Window timestamp, currently passed through for callback
-                compatibility.
-            class_cnts: Optional per-task class counts used for rejection-based
-                balancing.
-            task_config: Task configuration with explicit sequence lengths.
-
-        Returns:
-            A dictionary containing ``target`` and optionally ``target_extra``,
-            or ``None`` when the window should be rejected.
-        """
-        if task_config is None:
-            raise ValueError("task_config must not be None.")
-        if any("target_span" not in cfg for cfg in task_config.values()):
-            normalized = MultiLabelTrainer.normalize_task_config(task_config)
-            task_config.clear()
-            task_config.update(normalized)
-
-        built_target = MultiLabelTrainer.build_multitask_target(target, task_config, raise_error=False)
-        if built_target is None:
-            return None
-        target_values, target_mask = built_target
-        item = {"target": target_values, "target_mask": target_mask}
-
-        if class_cnts:
-            keep_probability = 1.0
-            for task_idx, cfg in enumerate(task_config.values()):
-                task = cfg["task"]
-                task_cnts = class_cnts.get(task)
-                if task_cnts is None:
-                    continue
-
-                total = sum(float(task_cnts.get(label, 0.0)) for label in cfg["labels"])
-                if total <= 0:
-                    continue
-
-                task_probas = {
-                    label_idx: max(float(task_cnts.get(label, 0.0)) / total, 1e-12)
-                    for label_idx, label in enumerate(cfg["labels"])
-                }
-                min_proba = min(task_probas.values())
-                cfg_mask = target_mask[task_idx, :cfg["n_steps"]]
-                target_indices = target_values[task_idx, :cfg["n_steps"], :len(cfg["labels"])].argmax(dim=-1)
-                for label_idx in target_indices[cfg_mask].tolist():
-                    keep_probability = min(keep_probability, min_proba / task_probas[int(label_idx)])
-
-            if random.random() > keep_probability:
-                return None
-
-        if target_extra is not None:
-            extra = MultiLabelTrainer.build_multitask_target(target_extra, task_config, raise_error=False)
-            if extra is not None:
-                item["target_extra"], item["target_extra_mask"] = extra
-
-        return item
 
     def _log_from_cms(self, cms: dict[str, np.ndarray], loss_value: float, mode: str, scope: str = "batch", step: int = 0):
         metrics = []
@@ -443,21 +272,23 @@ class MultiLabelTrainer(BaseTrainer):
             self.epoch_step = 0
 
         loss_sum = 0.0
+        loss_weight_sum = 0
         epoch_cms = {
             cfg["task"]: torch.zeros((len(cfg["labels"]), len(cfg["labels"])), dtype=torch.int64, device=self.device)
             for cfg in self.task_specs
         }
-        cnt = 0
         mode = "train" if "TRAIN" in prefix else "val" if "VAL" in prefix else "test"
         per_task_losses = [0.0 for _ in range(len(self.task_specs))]
-        per_task_loss_batches = [0 for _ in range(len(self.task_specs))]
+        per_task_loss_weights = [0 for _ in range(len(self.task_specs))]
         per_task_correct = [0 for _ in range(len(self.task_specs))]
         per_task_counts = [0 for _ in range(len(self.task_specs))]
         for batch in loader:
+            if batch is None:
+                continue
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 
-            x = batch["data"].to(self.device, non_blocking=True)
+            x = {key: value.to(self.device, non_blocking=True) for key, value in batch["data"].items()} if isinstance(batch["data"], dict) else batch["data"].to(self.device, non_blocking=True)
             logits = model(x)
             y = batch["target"].to(self.device, non_blocking=True)
             if "target_mask" not in batch:
@@ -509,8 +340,9 @@ class MultiLabelTrainer(BaseTrainer):
                 pred_flat = pred_selected.reshape(-1)
                 y_flat = y_selected.argmax(dim=-1).reshape(-1)
 
-                per_task_losses[task_idx] += float(loss_task.item())
-                per_task_loss_batches[task_idx] += 1
+                task_loss_weight = int(y_flat.numel())
+                per_task_losses[task_idx] += float(loss_task.item()) * task_loss_weight
+                per_task_loss_weights[task_idx] += task_loss_weight
                 per_task_correct[task_idx] += int((pred_flat == y_flat).sum().item())
                 per_task_counts[task_idx] += int(y_flat.numel())
                 losses.append(loss_task)
@@ -531,22 +363,23 @@ class MultiLabelTrainer(BaseTrainer):
                 loss.backward()
                 opt.step()
 
-            cnt += 1
-            loss_sum += float(loss.item())
+            batch_loss_weight = int(y.shape[0])
+            loss_sum += float(loss.item()) * batch_loss_weight
+            loss_weight_sum += batch_loss_weight
 
             if self.log_batches and batch_cms:
                 self._log_from_cms(batch_cms, float(loss.item()), mode=mode, scope="batch", step=self.steps[mode])
 
             task_desc_parts = []
             for task_idx, task in enumerate(self.task_specs):
-                if per_task_loss_batches[task_idx] == 0 or per_task_counts[task_idx] == 0:
+                if per_task_loss_weights[task_idx] == 0 or per_task_counts[task_idx] == 0:
                     task_desc_parts.append(f"{task['task'][:5]}: n/a")
                     continue
-                task_loss = per_task_losses[task_idx] / per_task_loss_batches[task_idx]
+                task_loss = per_task_losses[task_idx] / per_task_loss_weights[task_idx]
                 task_acc = per_task_correct[task_idx] / per_task_counts[task_idx] * 100.0
                 task_desc_parts.append(f"{task['task'][:5]}: {task_loss:2.4f} - {task_acc:2.2f}")
             task_desc = " ".join(task_desc_parts)
-            desc = f"{prefix:<12} loss {loss_sum/cnt:2.4f} {task_desc}"
+            desc = f"{prefix:<12} loss {loss_sum/loss_weight_sum:2.4f} {task_desc}"
 
             self.steps[mode] += 1
             logger.progress_status(desc)
@@ -555,7 +388,7 @@ class MultiLabelTrainer(BaseTrainer):
                 lr_scheduler.step()
 
         logger.progress_close()
-        epoch_loss = loss_sum / max(cnt, 1)
+        epoch_loss = loss_sum / max(loss_weight_sum, 1)
         epoch_cms_np = {
             task: cm.detach().cpu().numpy()
             for task, cm in epoch_cms.items()

@@ -28,6 +28,8 @@ class UnlabelledDataset(BaseDataset):
         prepare_sample: Optional final sample callback reused from
             `BaseDataset`.
         online_max_tries: Retry budget when `prepare_sample` rejects a window.
+        rejection_strategy: Candidate fallback policy after expected rejection.
+        n_views: Number of independently prepared views per accepted window.
         rereference: Optional rereferencing groups applied after loading.
         z_normalize: Whether to apply full-recording channel-wise z-score
             normalization as the final built-in signal transform.
@@ -43,6 +45,8 @@ class UnlabelledDataset(BaseDataset):
         stride: str | pd.Timedelta = "30s",
         prepare_sample: Callable = prepare_tensor_sample,
         online_max_tries: int = 128,
+        rejection_strategy: str = "patient_then_global",
+        n_views: int = 1,
         rereference=None,
         z_normalize: bool = False,
         group_sampling_strategy: str = "first",
@@ -58,6 +62,8 @@ class UnlabelledDataset(BaseDataset):
             "stride": stride,
             "prepare_sample": prepare_sample,
             "online_max_tries": online_max_tries,
+            "rejection_strategy": rejection_strategy,
+            "n_views": n_views,
             "rereference": rereference,
             "z_normalize": z_normalize,
             "group_sampling_strategy": group_sampling_strategy,
@@ -75,6 +81,8 @@ class UnlabelledDataset(BaseDataset):
             prepare_target=None,
             prepare_sample=prepare_sample,
             online_max_tries=online_max_tries,
+            rejection_strategy=rejection_strategy,
+            n_views=n_views,
             force_one_day=False,
             rereference=rereference,
             z_normalize=z_normalize,
@@ -97,6 +105,8 @@ class UnlabelledDataset(BaseDataset):
             stride=dataset.stride,
             prepare_sample=dataset.prepare_sample_callback,
             online_max_tries=dataset.online_max_tries,
+            rejection_strategy=dataset.rejection_strategy,
+            n_views=dataset.n_views,
             rereference=dataset.rereference,
             z_normalize=dataset.z_normalize,
             group_sampling_strategy="first",

@@ -30,12 +30,12 @@ load_dotenv()
 SAMPLE_FREQUENCY=float(os.environ.get('SAMPLE_FREQUENCY', 100.0))
 BATCH_SIZE=int(os.environ.get('BATCH_SIZE', 96))
 N_TRAIN_SAMPLES=int(os.environ.get('N_TRAIN_SAMPLES', 250_000))
-N_WARMUP_SAMPLES=int(os.environ.get('N_WARMUP_SAMPLES', 50_000))
+N_WARMUP_SAMPLES=int(os.environ.get('N_WARMUP_SAMPLES', 100_000))
 N_VAL_SAMPLES=int(os.environ.get('N_VAL_SAMPLES', 15_000))
 N_TEST_SAMPLES=int(os.environ.get('N_TEST_SAMPLES', 25_000))
 N_WORKERS_DATASET=int(os.environ.get('N_WORKERS_DATASET', 24))
 N_WORKERS_DATALOADER=int(os.environ.get('N_WORKERS_DATALOADER', 24))
-N_PATIENTS = 300
+N_PATIENTS = None
 SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
@@ -352,6 +352,12 @@ def main():
 
     model = MaskedAutoencoder(
         groups=train_ds.channel_groups,
+        enc_dim=512,
+        enc_heads=16,
+        enc_depth=12,
+        dec_dim=256,
+        dec_heads=8,
+        dec_depth=8,
     )
     print('Number of parameters:', count_parameters(model))
     model_hp = model.get_hyperparameters()
@@ -359,10 +365,10 @@ def main():
     print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
     sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-hsp', artifact_uri=None)
     logger.add_sink(sink)
-    logger.start_run(run_name='final-test', params=model_hp)
+    logger.start_run(run_name='test-lamarr', params=model_hp)
     setup_wandb_metrics(sink)
 
-    EPOCHS=1
+    EPOCHS=10
     steps_per_epoch = N_TRAIN_SAMPLES // BATCH_SIZE 
     num_training_steps = steps_per_epoch * EPOCHS
     num_warmup_steps = int(0.05 * num_training_steps) 
@@ -375,9 +381,9 @@ def main():
         #lr_scheduler = lambda optimizer: get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps),
         classes=train_ds.get_classes(),
         downstream_tasks=normalized_task_config,
-        save_every=30,
+        save_every=0,
         device=DEVICE,
-        warmup_device='cpu',
+        warmup_device=DEVICE,
     )
 
     trainer.fit(model, train_loader=train_dl, val_loader=val_dl, test_loader=test_dl, warmup_loader=warmup_dl)

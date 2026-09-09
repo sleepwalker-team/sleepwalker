@@ -598,13 +598,12 @@ def export_dataloader_to_numpy_dir(
         'sample_frequency': float(getattr(dataset, 'sample_frequency')),
         'resample_type': str(getattr(dataset, 'resample_type', 'cached')),
         'total_input': str(getattr(dataset, 'total_input')),
-        'target_resolution': str(getattr(dataset, 'target_resolution')),
         'classes': list(classes),
         'input_channels': list(input_channels),
         'all_patients': [str(p) for p in all_patients],
         'extra_keys': list(extras.keys()),
         'n_items': int(data_arr.shape[0]),
-        'stride': str(getattr(dataset, 'stride', getattr(dataset, 'target_resolution'))),
+        'stride': str(getattr(dataset, 'stride')),
     }
     with (out_path / 'meta.json').open('w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)

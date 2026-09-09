@@ -20,8 +20,8 @@ class MultiDataset(Dataset):
             definitions.
 
     Notes:
-        Current code enforces matching `sample_frequency`, `target_resolution`,
-        `total_input`, `stride`, and class sets across all parts.
+        Current code enforces matching `sample_frequency`, `total_input`,
+        `stride`, and class sets across all parts.
     """
     def __init__(self, 
             datasets: list[BaseDataset]
@@ -38,15 +38,11 @@ class MultiDataset(Dataset):
         if len(set(sample_frequency)) > 1:
             raise ValueError(f"All datasets must have the same sample_frequency")
 
-        target_resolution = [d.target_resolution for d in datasets]
-        if len(set(target_resolution)) > 1:
-            raise ValueError(f"All datasets must have the same target_resolution")
-        
         total_input = [d.total_input for d in datasets]
         if len(set(total_input)) > 1:
             raise ValueError(f"All datasets must have the same total_input")
 
-        strides = [getattr(d, "stride", d.target_resolution) for d in datasets]
+        strides = [d.stride for d in datasets]
         if len(set(strides)) > 1:
             raise ValueError(f"All datasets must have the same stride")
         
@@ -69,9 +65,8 @@ class MultiDataset(Dataset):
         self.len = sum([len(d) for d in datasets])
         self.extra_target = all([d.has_extra_target() for d in datasets])
         self.sample_frequency = datasets[0].sample_frequency
-        self.target_resolution = datasets[0].target_resolution
         self.total_input = datasets[0].total_input
-        self.stride = getattr(datasets[0], "stride", datasets[0].target_resolution)
+        self.stride = datasets[0].stride
         self.channels = datasets[0].channels
         input_channels = [dataset.get_input_channels() for dataset in datasets]
         if any(len(channels) != len(input_channels[0]) for channels in input_channels[1:]):
@@ -113,6 +108,10 @@ class MultiDataset(Dataset):
         for dataset in self.datasets:
             dataset.set_n_views(n_views)
         self.n_views = int(n_views)
+
+    def set_input_offsets(self, input_offsets) -> None:
+        for dataset in self.datasets:
+            dataset.set_input_offsets(input_offsets)
 
     def get_patient_ranges(self) -> list[tuple[int, int]]:
         """Return component patient ranges shifted into the combined index."""

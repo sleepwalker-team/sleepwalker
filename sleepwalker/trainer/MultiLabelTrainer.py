@@ -14,7 +14,7 @@ import torch
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.losses import build_multilabel_task_masks, class_weights_for_loss, estimate_multilabel_class_cnts
 from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
-from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.metrics import accuracy_from_confusion_matrix, cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 from sleepwalker.trainer.utils.targets import normalize_multitask_config
 from sleepwalker.utils import logger
 
@@ -213,7 +213,7 @@ class MultiLabelTrainer(BaseTrainer):
                 continue
 
             metrics.append({
-                "accuracy": cm.trace() / total * 100.0,
+                "accuracy": accuracy_from_confusion_matrix(cm),
                 "f1_micro": f1_score_from_confusion_matrix(cm, macro=False),
                 "f1_macro": f1_score_from_confusion_matrix(cm, macro=True),
                 "kappa": cohen_kappa_from_confusion_matrix(cm),
@@ -255,15 +255,6 @@ class MultiLabelTrainer(BaseTrainer):
             ValueError: If the model type, dataset resolution, logits, or
                 targets do not match the configured task layout.
         """
-        dataset_resolution = getattr(loader.dataset, "target_resolution", None)
-        if dataset_resolution is None:
-            raise ValueError("MultiLabelTrainer requires loader.dataset.target_resolution.")
-        dataset_resolution = pd.to_timedelta(dataset_resolution)
-        if dataset_resolution != self.target_resolution:
-            raise ValueError(
-                f"Dataset target_resolution={dataset_resolution} does not match the largest task target span {self.target_resolution}."
-            )
-
         logger.progress_start(total=len(loader) * loader.batch_size, desc=prefix, leave=True)
 
         if not hasattr(self, "steps"):

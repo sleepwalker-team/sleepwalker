@@ -1,6 +1,7 @@
 """Helpers for jsonl artifacts."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -53,3 +54,21 @@ def append_to_jsonl(filename: str, record: dict):
     """
     with open(f"{filename}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, cls=NumpyEncoder) + "\n")
+
+
+def write_json(path: str | Path, value: Any, *, overwrite: bool = False) -> Path:
+    """Atomically write one canonical JSON artifact."""
+    output = Path(path)
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, ensure_ascii=False, cls=NumpyEncoder)
+            handle.write("\n")
+        os.replace(temporary, output)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return output

@@ -592,15 +592,9 @@ class BaseDataset(Dataset, ABC):
         Length of the signal window returned for each item. Accepts values such
         as `"30s"`, `"5min"`, or a `pd.Timedelta`.
 
-    target_resolution
-        Length of the target interval associated with each item. In sleep
-        staging this is often `"30s"`.
-
     stride
-        Time between consecutive sampled windows. Defaults to
-        `target_resolution`, which preserves the previous behavior. Set
-        `stride < total_input` to sample overlapping windows while keeping the
-        target interval length unchanged.
+        Time between consecutive sampled windows. Defaults to `total_input`.
+        Set `stride < total_input` to sample overlapping windows.
 
     event_mapping
         Mapping from raw dataset-specific event labels to the labels used by
@@ -722,7 +716,6 @@ class BaseDataset(Dataset, ABC):
         sample_frequency: float,
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
-        target_resolution: str | pd.Timedelta = "30s",
         stride: Optional[str | pd.Timedelta] = None,
         event_mapping: Optional[Mapping[str, str]] = None, 
         remove_unmapped_events : bool = True, 
@@ -748,8 +741,9 @@ class BaseDataset(Dataset, ABC):
         self.sample_frequency = sample_frequency
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
-        self.target_resolution = pd.to_timedelta(target_resolution)
-        self.stride = pd.to_timedelta(stride) if stride is not None else self.target_resolution
+        if self.total_input <= pd.Timedelta(0):
+            raise ValueError("total_input must be positive.")
+        self.stride = pd.to_timedelta(stride) if stride is not None else self.total_input
         if self.stride <= pd.Timedelta(0):
             raise ValueError("stride must be positive.")
         if self.stride > self.total_input:
@@ -788,6 +782,7 @@ class BaseDataset(Dataset, ABC):
             for physical_name in cfg.physical_names:
                 physical_channels[physical_name].append(cfg)
             self.channel_configs_by_logical_name[cfg.logical_name] = cfg
+
         self.shared_physical_channels = {name for name, configs in physical_channels.items() if len(configs) > 1}
         for physical_name in self.shared_physical_channels:
             units = {None if cfg.unit is None else _normalize_unit(cfg.unit) for cfg in physical_channels[physical_name]}
@@ -795,8 +790,6 @@ class BaseDataset(Dataset, ABC):
                 raise ValueError(f"Shared physical channel '{physical_name}' has incompatible target units: {sorted(map(str, units))}.")
         if self.shared_physical_channels and self.rereference:
             raise ValueError("Shared physical channels cannot be combined with rereferencing.")
-        if self.shared_physical_channels and self.z_normalize:
-            raise ValueError("Shared physical channels cannot be combined with recording z-normalization.")
         self.group_sampling_strategy = group_sampling_strategy
 
         # Events/classes
@@ -938,14 +931,12 @@ class BaseDataset(Dataset, ABC):
     ) -> np.ndarray:
         """Convert one connected time segment into candidate stride offsets.
 
-        The filtered ``label_df`` defines where targets may be valid. We
-        therefore keep windows whose target interval can overlap the retained
-        segment, rather than requiring the full input context to fit inside the
-        segment as well.
+        The filtered ``label_df`` defines where annotations may be available.
+        Keep input windows that overlap a retained segment. The target callback
+        later decides which part of those raw annotations is supervised.
         """
-        target_offset = self.total_input // 2 - self.target_resolution // 2
-        earliest_valid_start = seg_start - target_offset - self.target_resolution
-        latest_valid_start = seg_end - target_offset
+        earliest_valid_start = seg_start - self.total_input
+        latest_valid_start = seg_end
         if latest_valid_start < earliest_valid_start:
             return np.empty(0, dtype=np.int64)
 
@@ -1152,15 +1143,18 @@ class BaseDataset(Dataset, ABC):
 
             label_df = artifacts["label_df"]
             label_extra_df = artifacts["label_extra_df"]
+            window_start = artifacts["start"]
             start_offsets = None
             if label_df is not None and len(label_df) > 0:
                 start_offsets = self._build_start_offsets(
-                    base_start=artifacts["start"],
+                    base_start=window_start,
                     label_df=label_df,
                 )
+                max_offset = int(np.floor((artifacts["end"] - self.total_input - window_start) / self.stride))
+                start_offsets = start_offsets[start_offsets <= max_offset]
                 n_items = len(start_offsets)
             else:
-                n_items = int((artifacts["end"] - self.total_input - artifacts["start"]) / self.stride)
+                n_items = int((artifacts["end"] - self.total_input - window_start) / self.stride)
 
             if n_items <= 0:
                 raise ValueError(
@@ -1176,7 +1170,7 @@ class BaseDataset(Dataset, ABC):
                 length=n_items,
                 labels=EventIndex(label_df) if label_df is not None else None,
                 labels_extra=EventIndex(label_extra_df) if label_extra_df is not None else None,
-                start_date=artifacts["start"],
+                start_date=window_start,
                 classes=artifacts["classes"].union(artifacts["extra_classes"]),
                 normalizers=artifacts["normalizers"],
                 unit_factors=artifacts["unit_factors"],
@@ -1418,6 +1412,27 @@ class BaseDataset(Dataset, ABC):
         """Build a sample from an already loaded window."""
         return self.run_build_sample(item, x_df)
 
+    def get_target_item(self, file: EDFFile, start_date: pd.Timestamp):
+        """Build target and timestamp fields without loading signals."""
+        end_date = start_date + self.total_input
+        item: Dict[str, Any] = {"patient": file.path, "time": start_date}
+
+        if file.labels:
+            item["target"] = file.get_y(start_date, end_date, self.sample_frequency, self.label_classes)
+            if file.labels_extra:
+                item["target_extra"] = file.get_y_extra(start_date, end_date, self.sample_frequency, self.label_classes)
+
+        if self.prepare_target_callback is not None:
+            prepared_target = self.prepare_target_callback(target=item.get("target"), target_extra=item.get("target_extra"), patient=item.get("patient"), time=item.get("time"))
+            if prepared_target is None:
+                return None
+            if not isinstance(prepared_target, dict):
+                raise ValueError(f"prepare_target must return dict or None, but received {type(prepared_target)}.")
+            item.pop("target", None)
+            item.pop("target_extra", None)
+            item.update(prepared_target)
+        return item
+
     def get_item(self, file: EDFFile, start_date: pd.Timestamp):
         """Build one candidate item from a prepared patient and start time.
 
@@ -1433,36 +1448,16 @@ class BaseDataset(Dataset, ABC):
             Label filtering happens before signal loading when possible, as
             confirmed by ``tests/test_datasets.py``.
         """
+        item = self.get_target_item(file, start_date)
+        if item is None:
+            return None
+
         end_date = start_date + self.total_input
-        target_start = start_date + (self.total_input // 2 - self.target_resolution // 2)
-        item: Dict[str, Any] = {"patient": file.path, "time": target_start}
-
-        if file.labels:
-            start_date_label = target_start
-            end_date_label = start_date_label + self.target_resolution
-
-            item["target"] = file.get_y(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
-            if file.labels_extra:
-                item["target_extra"] = file.get_y_extra(start_date_label, end_date_label, self.sample_frequency, self.label_classes) 
-
-        if self.prepare_target_callback is not None:
-            prepared_target = self.prepare_target_callback(
-                target=item.get("target"),
-                target_extra=item.get("target_extra"),
-                patient=item.get("patient"),
-                time=item.get("time"),
-            )
-            if prepared_target is None:
-                return None
-            if not isinstance(prepared_target, dict):
-                raise ValueError(f"prepare_target must return dict or None, but received {type(prepared_target)}.")
-            item.update(prepared_target)
-
         selected_channels = self.select_channels(file.channels)
         channels_to_load = self.channels_to_load(selected_channels, file.channels)
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type, channels=channels_to_load)
         self.apply_rereference(x_df)
-        file.apply_z_normalization(x_df, channels=[physical_name for cfg, physical_name in selected_channels])
+        file.apply_z_normalization(x_df, channels=list(dict.fromkeys(physical_name for cfg, physical_name in selected_channels)))
 
         # Make sure that x_df has exactly self.get_timeseries_len() entries. 
         # This can happen, when timestamps do not match exactly or there are inaccuracies for

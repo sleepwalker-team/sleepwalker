@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
@@ -12,8 +14,10 @@ from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel
+from sleepwalker import prediction_transforms
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
-from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier, pair_datasets
+from iclr2026.pipeline import pair_datasets
+from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +37,7 @@ class MeanClassifier(BaseModel, ClassifierModel):
 
 
 def load_test_tool():
-    spec = importlib.util.spec_from_file_location("sleepwalker_test_tool", REPO_ROOT / "tools" / "test.py")
+    spec = importlib.util.spec_from_file_location("sleepwalker_evaluate_tool", REPO_ROOT / "tools" / "evaluate.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -45,10 +49,9 @@ def make_package():
         channels=[ChannelConfig("EEG", ["source-eeg"], unit="uV")],
         sample_frequency=100,
         total_input="60s",
-        target_resolution="20s",
         stride="5s",
     )
-    return PackagedModel(name="package", task="event", model=MeanClassifier(2, ts_len=6000), dataset=dataset, classification_contract={"type": "single-head-multiclass", "classes": ["event", "no event"], "sequence_len": 2})
+    return PackagedModel(name="package", task="event", model=MeanClassifier(2, ts_len=6000), dataset=dataset, classification_contract={"type": "single-head-multiclass", "classes": ["event", "no event"], "sequence_len": 2, "target_resolution": "20s"})
 
 
 def write_unsplit_manifest(path: Path, files: list[str]) -> Path:
@@ -63,7 +66,6 @@ def test_paper_evaluation_configs_are_valid():
     expected = {
         *(f"{task}_{model}" for task in tasks for model in ("sleepwalker", "osf")),
         *(f"{task}_sleepfm" for task in tasks),
-        "multitask_sleepwalker",
     }
 
     assert {path.stem for path in paths} == expected
@@ -95,9 +97,9 @@ def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path
     assert isinstance(dataset, Stages)
     assert dataset.sample_frequency == 100
     assert dataset.total_input == pd.Timedelta("60s")
-    assert dataset.target_resolution == pd.Timedelta("20s")
     assert dataset.stride == pd.Timedelta("5s")
     assert dataset.channels == [ChannelConfig("EEG", ["external-eeg"], normalizer=None, unit="uV")]
+    assert dataset.rejection_strategy == "none"
     assert patients == ["patient.edf"]
     assert selected_fold is None
 
@@ -131,12 +133,12 @@ def test_annotation_and_patient_filters_compose():
         "annotation__sleep": [0.75, 0.25],
     })
     pipeline = [
-        lambda current, patient, signals: test_tool.filter_patient_signals(current, patient, signals, include_any=["Mask Pressure"]),
-        lambda current, patient, signals: test_tool.filter_annotation(current, patient, signals, labels=["sleep"], minimum_coverage=0.5),
+        lambda current, patient, signals: prediction_transforms.filter_patient_signals(current, patient, signals, include_any=["Mask Pressure"]),
+        lambda current, patient, signals: prediction_transforms.filter_annotation(current, patient, signals, labels=["sleep"], minimum_coverage=0.5),
     ]
 
-    selected = test_tool.apply_pipeline(frame, pipeline, patient="patient.edf", signals=["EEG", "Mask Pressure"])
-    excluded = test_tool.apply_pipeline(frame, pipeline, patient="patient.edf", signals=["EEG"])
+    selected = prediction_transforms.apply_pipeline(frame, pipeline, patient="patient.edf", signals=["EEG", "Mask Pressure"])
+    excluded = prediction_transforms.apply_pipeline(frame, pipeline, patient="patient.edf", signals=["EEG"])
 
     assert selected["target"].tolist() == [0]
     assert excluded.empty
@@ -149,7 +151,7 @@ def test_annotation_filter_uses_union_of_requested_labels():
         "annotation__n2": [0.3, 0.2],
     })
 
-    selected = test_tool.filter_annotation(frame, "patient.edf", [], labels=["n1", "n2"], minimum_coverage=0.5)
+    selected = prediction_transforms.filter_annotation(frame, "patient.edf", [], labels=["n1", "n2"], minimum_coverage=0.5)
 
     assert selected.index.tolist() == [0]
 
@@ -164,8 +166,8 @@ def test_overlap_resolution_smoothing_and_metrics():
         "annotation__sleep": [1.0, 1.0, 1.0],
     })
 
-    resolved = test_tool.resolve_overlaps(frame, "patient.edf", [], method="mean_probability")
-    smoothed = test_tool.smooth_probabilities(resolved, "patient.edf", [], window=1)
+    resolved = prediction_transforms.resolve_overlaps(frame, "patient.edf", [], method="mean_probability")
+    smoothed = prediction_transforms.smooth_probabilities(resolved, "patient.edf", [], window=1)
     metrics = test_tool.patient_classification_metrics(smoothed, ["negative", "positive"])
 
     assert len(resolved) == 2
@@ -175,45 +177,54 @@ def test_overlap_resolution_smoothing_and_metrics():
     assert metrics["per_class"]["positive"]["sensitivity"] == 1.0
 
 
-def test_accumulator_keeps_confusion_matrices_not_predictions():
-    test_tool = load_test_tool()
+def test_patient_confusion_matrices_can_be_aggregated_directly():
     classes = ["negative", "positive"]
     frame = pd.DataFrame({
         "target": [0, 0, 1, 1],
         "prob__negative": [0.9, 0.8, 0.2, 0.1],
         "prob__positive": [0.1, 0.2, 0.8, 0.9],
     })
-    patient_metrics = test_tool.patient_classification_metrics(frame, classes)
-    accumulator = test_tool.MetricAccumulator(classes)
+    patient_metrics = load_test_tool().patient_classification_metrics(frame, classes)
+    aggregate = load_test_tool().confusion_metrics(patient_metrics["confusion_matrix"], classes)
 
-    accumulator.update("patient.edf", patient_metrics)
-    aggregate = accumulator.finalize()
-
-    assert aggregate["patient_confusion_matrices"] == {"patient.edf": [[2, 0], [0, 2]]}
-    assert aggregate["metrics"]["accuracy"] == 1.0
-    assert "auroc_macro" not in aggregate["metrics"]
-    assert not hasattr(accumulator, "predictions")
+    assert patient_metrics["confusion_matrix"] == [[2, 0], [0, 2]]
+    assert aggregate["accuracy"] == 1.0
+    assert "auroc_macro" not in aggregate
 
 
-def test_empty_accumulator_reports_zero_evaluated_windows():
-    aggregate = load_test_tool().MetricAccumulator(["negative", "positive"]).finalize()
+def test_empty_confusion_matrix_reports_zero_windows():
+    metrics = load_test_tool().confusion_metrics([[0, 0], [0, 0]], ["negative", "positive"])
 
-    assert aggregate["n_patients_evaluated"] == 0
-    assert aggregate["metrics"]["n_windows"] == 0
-    assert aggregate["metrics"]["cohen_kappa"] is None
+    assert metrics["n_windows"] == 0
+    assert metrics["cohen_kappa"] == 0.0
 
 
-def test_packaged_model_evaluates_to_jsonl(tmp_path):
+def test_cli_overwrite_updates_test_config(monkeypatch):
     test_tool = load_test_tool()
+    config = {"test": {"package": "package", "overwrite": False}}
+    calls = []
+    monkeypatch.setattr(test_tool, "read_config", lambda path: config)
+    monkeypatch.setattr(test_tool, "execute", lambda package, parsed: calls.append((package, parsed)))
+    monkeypatch.setattr(sys, "argv", ["evaluate.py", "--overwrite", "config.yml"])
+
+    test_tool.main()
+
+    assert config["test"]["overwrite"] is True
+    assert calls == [("package", config)]
+
+
+def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
+    test_tool = load_test_tool()
+    progress_statuses = []
+    monkeypatch.setattr(test_tool.logger, "progress_status", progress_statuses.append)
     classes = ["wake", "n1", "n2", "n3", "rem"]
     dataset = UnlabelledDataset(
         channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
         sample_frequency=10,
         total_input="30s",
-        target_resolution="30s",
         stride="30s",
     )
-    package_path = PackagedModel(name="sleep", task="sleep", model=MeanClassifier(len(classes)), dataset=dataset, classification_contract={"type": "single-head-multiclass", "classes": classes, "sequence_len": 1}).save(tmp_path / "package")
+    package_path = PackagedModel(name="sleep", task="sleep", model=MeanClassifier(len(classes)), dataset=dataset, classification_contract={"type": "single-head-multiclass", "classes": classes, "sequence_len": 1, "target_resolution": "30s"}).save(tmp_path / "package")
     manifest = write_unsplit_manifest(tmp_path / "files.yml", [str(REPO_ROOT / "tests" / "data" / "signals_01.edf")])
     output = tmp_path / "metrics.jsonl"
     config = {
@@ -232,20 +243,23 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path):
         "test": {"device": "cpu", "batch_size": 64, "num_workers_dataloader": 0, "output": str(output)},
     }
 
-    records = test_tool.execute(package_path, config)
+    result = test_tool.execute(package_path, config)
+    records = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
 
     assert [record["record_type"] for record in records] == ["run", "patient", "aggregate"]
     assert records[2]["dataset"] == "synthetic"
     assert records[2]["n_patients_evaluated"] == 1
     assert records[2]["metrics"]["n_windows"] > 0
     assert len(output.read_text(encoding="utf-8").splitlines()) == 3
+    assert any("windows" in status and "failed batches" in status and "inference" not in status and "predictions" not in status for status in progress_statuses)
+    assert any("analysis | patient" in status and "kept" in status for status in progress_statuses)
 
 
 def test_paired_graph_package_uses_the_regular_labelled_evaluator(tmp_path):
     sleep_classes = ["wake", "n2", "n3", "rem", "other"]
     event_classes = ["event", "no event"]
-    slow = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=10, total_input="60s", target_resolution="60s", stride="30s")
-    fast = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=5, total_input="20s", target_resolution="20s", stride="20s")
+    slow = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=10, total_input="60s", stride="30s")
+    fast = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=5, total_input="20s", stride="20s")
     nodes = {
         "long": GraphNode(MeanClassifier(len(sleep_classes), ts_len=600), {"long": {"classes": sleep_classes, "sequence_len": 1}}),
         "short": GraphNode(MeanClassifier(len(event_classes), ts_len=100), {"short": {"classes": event_classes, "sequence_len": 1}}),
@@ -281,7 +295,8 @@ def test_paired_graph_package_uses_the_regular_labelled_evaluator(tmp_path):
         "test": {"device": "cpu", "batch_size": 32, "num_workers_dataloader": 0, "output": str(output)},
     }
 
-    records = load_test_tool().execute(package, config)
+    result = load_test_tool().execute(package, config)
+    records = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
 
     aggregates = [record for record in records if record["record_type"] == "aggregate"]
     assert {record["task"] for record in aggregates} == {"long", "short"}

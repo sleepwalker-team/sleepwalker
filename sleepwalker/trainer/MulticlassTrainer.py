@@ -21,7 +21,7 @@ from sleepwalker.trainer.losses import class_weights_for_loss
 from sleepwalker.utils import logger
 from sleepwalker.datasets.utils import estimate_class_cnts
 from sleepwalker.trainer.utils.display import format_confusion_table, render_confusion_table_grid
-from sleepwalker.trainer.utils.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.metrics import accuracy_from_confusion_matrix, cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
 
 class MulticlassTrainer(BaseTrainer):
@@ -33,6 +33,8 @@ class MulticlassTrainer(BaseTrainer):
         classes: Ordered output labels used for targets, confusion matrices,
             and prediction tables.
         loss_function: Base loss function, usually cross entropy.
+        target_resolution: Duration covered by all predictions from one input
+            window. Target selection itself remains in ``prepare_target``.
         device: Torch device used for training and inference.
         warmup_device: Device used during preprocessor warmup.
         save_every: Checkpoint cadence in epochs.
@@ -54,6 +56,8 @@ class MulticlassTrainer(BaseTrainer):
             previous behavior, values above ``1.0`` make balancing more
             aggressive, and values between ``0`` and ``1`` make it weaker.
         sequence_len: Number of categorical predictions emitted per window.
+        target_offset: Timestamp of the first prediction relative to the input
+            window start. Target selection itself remains in ``prepare_target``.
     """
 
     def __init__(
@@ -62,6 +66,7 @@ class MulticlassTrainer(BaseTrainer):
         optimizer: Callable[[torch.nn.Module], torch.optim.Optimizer],
         classes: list[str],
         loss_function: Callable,
+        target_resolution: str | pd.Timedelta,
         device: str = "cuda:0",
         warmup_device: str = "cpu",
         save_every: int = 10,
@@ -76,6 +81,7 @@ class MulticlassTrainer(BaseTrainer):
         balance_batches: bool = False,
         balance_gamma: float = 1.0,
         sequence_len: int = 1,
+        target_offset: str | pd.Timedelta = "0s",
     ):
         super().__init__(
             epochs=epochs,
@@ -107,13 +113,20 @@ class MulticlassTrainer(BaseTrainer):
         self.sequence_len = int(sequence_len)
         if self.sequence_len < 1:
             raise ValueError("sequence_len must be at least 1.")
-        self.target_resolution = None
+        self.target_resolution = pd.to_timedelta(target_resolution)
+        if self.target_resolution <= pd.Timedelta(0):
+            raise ValueError("target_resolution must be positive.")
+        self.target_offset = pd.to_timedelta(target_offset)
+        if self.target_offset < pd.Timedelta(0):
+            raise ValueError("target_offset must not be negative.")
 
     def classification_contract(self) -> dict:
         return {
             "type": "single-head-multiclass",
             "classes": list(self.classes),
             "sequence_len": self.sequence_len,
+            "target_resolution": str(self.target_resolution),
+            "target_offset": str(self.target_offset),
         }
 
     def _keep_balanced_target(self, target, class_cnts: list[float]) -> bool:
@@ -162,7 +175,6 @@ class MulticlassTrainer(BaseTrainer):
             balancing paths.
         """
         dataset = data_loader.dataset
-        self.target_resolution = pd.to_timedelta(dataset.target_resolution)
 
         class_cnts = self.class_counts
         if (self.balance_batches or self.loss_mode != "regular") and class_cnts is None:
@@ -218,7 +230,7 @@ class MulticlassTrainer(BaseTrainer):
         if total == 0:  
             return  
         
-        acc = cm.trace() / total  
+        acc = accuracy_from_confusion_matrix(cm)
         f1_micro = f1_score_from_confusion_matrix(cm, macro=False)  
         f1_macro = f1_score_from_confusion_matrix(cm, macro=True)  
         kappa = cohen_kappa_from_confusion_matrix(cm)  
@@ -250,7 +262,6 @@ class MulticlassTrainer(BaseTrainer):
         Returns:
             A tuple ``(epoch_loss, confusion_matrix)``.
         """
-        self.target_resolution = pd.to_timedelta(loader.dataset.target_resolution)
         target_step_resolution = self.target_resolution / self.sequence_len
         if hasattr(model, "epoch_len_s") and model.epoch_len_s is not None:
             model_step_resolution = pd.to_timedelta(model.epoch_len_s, unit="s")

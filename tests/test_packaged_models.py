@@ -6,6 +6,7 @@ from sleepwalker.deployment import PackagedModel
 from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.models.PackagedClassifierModel import PackagedClassifierModel
 from sleepwalker.models.PackagedEmbeddingModel import PackagedEmbeddingModel
+from sleepwalker.models.PackagedSequenceClassifierModel import PackagedSequenceClassifierModel
 from tools.foundation_models import SleepFMClinicalEncoder, trace_encoder
 
 
@@ -51,12 +52,25 @@ class MaskAwareBackbone(torch.nn.Module):
         return contextual_embeddings.mean(dim=1), contextual_embeddings
 
 
+class OrderedTokenEmbedding(BaseModel, EmbeddingModel):
+    def encode(self, x):
+        return torch.arange(24, device=x.device, dtype=x.dtype).unsqueeze(0).expand(x.shape[0], -1)
+
+    def compute(self, x):
+        return self.encode(x)
+
+    def feature_dim(self):
+        return 24
+
+    def input_spec(self):
+        return (1, 60, 1), {"layout": "BTC", "ts_len": 60, "n_channels": 1}
+
+
 def make_embedding_package():
     dataset = UnlabelledDataset(
         channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
         sample_frequency=2,
         total_input="30s",
-        target_resolution="30s",
         stride="10s",
     )
     return PackagedModel(name="embedding", model=WindowEmbedding(), dataset=dataset)
@@ -67,7 +81,6 @@ def test_dataset_sample_count_is_exact_at_256_hz():
         channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
         sample_frequency=256,
         total_input="150s",
-        target_resolution="30s",
     )
 
     assert dataset.get_timeseries_len() == 38400
@@ -103,6 +116,18 @@ def test_packaged_classifier_model_rejects_non_exact_outer_windows():
         assert "exact number" in str(error)
     else:
         raise AssertionError("Expected invalid outer geometry to fail.")
+
+
+def test_packaged_sequence_classifier_pools_tokens_without_losing_positions():
+    dataset = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=2, total_input="30s", stride="30s")
+    package = PackagedModel(name="tokens", model=OrderedTokenEmbedding(), dataset=dataset)
+    model = PackagedSequenceClassifierModel(package=package, classes=["a", "b"], ts_len=60, sequence_len=3, token_count=6, token_dim=2, modality_count=2)
+
+    steps = model.encode_steps(torch.zeros(2, 60, 1))
+
+    assert steps.shape == (2, 3, 4)
+    assert steps[0].tolist() == [[1.0, 2.0, 13.0, 14.0], [5.0, 6.0, 17.0, 18.0], [9.0, 10.0, 21.0, 22.0]]
+    assert model(torch.zeros(2, 60, 1)).shape == (2, 3, 2)
 
 
 def test_traced_imported_embedding_package_is_self_contained(tmp_path):

@@ -80,12 +80,9 @@ from __future__ import annotations
 
 import argparse
 import copy
-from functools import partial
-import importlib
 import inspect
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -93,13 +90,13 @@ from typing import Any, Mapping
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/sleepwalker-matplotlib")
 
 import torch
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
+from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_component, build_factory, build_value, import_name, read_yaml
+from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.utils import random_split
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
@@ -116,105 +113,7 @@ DATA_FIELDS = {
     "output_classes",
     "patient_filter",
 }
-CONTEXT_FIELDS = {"classes", "input_channels", "n_channels", "ts_len", "sampling_frequency", "sequence_len"}
 DRY_RUN_PATIENTS = {"train": 30, "validation": 10, "test": 10}
-
-
-class ScientificNotationLoader(yaml.SafeLoader):
-    """Safe YAML loader that recognizes exponent notation without a decimal point."""
-
-
-ScientificNotationLoader.add_implicit_resolver(
-    "tag:yaml.org,2002:float",
-    re.compile(r"^[-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)[eE][-+]?[0-9]+$"),
-    list("-+0123456789."),
-)
-
-
-def read_yaml(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return yaml.load(handle, Loader=ScientificNotationLoader) or {}
-
-
-def import_name(name: str) -> Any:
-    """Import a fully qualified module, class, method, or function name."""
-    parts = name.split(".")
-    for boundary in range(len(parts), 0, -1):
-        try:
-            value = importlib.import_module(".".join(parts[:boundary]))
-        except ModuleNotFoundError:
-            continue
-        for part in parts[boundary:]:
-            value = getattr(value, part)
-        return value
-    raise ImportError(name)
-
-
-def build_value(value: Any, context: Mapping[str, Any] | None = None) -> Any:
-    """Build nested named components and import qualified callable values."""
-    context = {} if context is None else context
-    if isinstance(value, list):
-        return [build_value(item, context) for item in value]
-    if isinstance(value, dict):
-        if isinstance(value.get("name"), str) and "." in value["name"]:
-            return build_component(value, context)
-        return {key: build_value(item, context) for key, item in value.items()}
-    if isinstance(value, str) and value.startswith(("sleepwalker.", "torch.")):
-        return import_name(value)
-    return value
-
-
-def build_component(spec: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> Any:
-    """Instantiate one ``name`` component, injecting standard dataset context."""
-    context = {} if context is None else dict(context)
-    symbol = import_name(str(spec["name"]))
-    raw_arguments = {key: value for key, value in spec.items() if key != "name"}
-
-    local_context = dict(context)
-    if isinstance(raw_arguments.get("input_channels"), list):
-        local_context["input_channels"] = raw_arguments["input_channels"]
-        local_context["n_channels"] = len(raw_arguments["input_channels"])
-    arguments = {
-        key: build_value(value, local_context)
-        for key, value in raw_arguments.items()
-    }
-
-    parameters = inspect.signature(symbol).parameters
-    for key in CONTEXT_FIELDS:
-        if key in {"classes", "sequence_len"} and "task_config" in arguments:
-            continue
-        if key in parameters and key in local_context and key not in arguments:
-            arguments[key] = local_context[key]
-    return symbol(**arguments)
-
-
-def build_callback(spec: str | Mapping[str, Any] | None) -> Any:
-    """Bind a dataset or RunCfg callback without calling it."""
-    if spec is None or callable(spec):
-        return spec
-    if isinstance(spec, str):
-        return import_name(spec)
-    symbol = import_name(str(spec["name"]))
-    arguments = {
-        key: build_value(value)
-        for key, value in spec.items()
-        if key != "name"
-    }
-    return partial(symbol, **arguments) if arguments else symbol
-
-def build_factory(spec: Mapping[str, Any], dependency: str) -> Any:
-    """Delay optimizer/scheduler construction until its dependency exists."""
-    symbol = import_name(str(spec["name"]))
-    arguments = { key: build_value(value) for key, value in spec.items() if key != "name"}
-    if dependency == "model":
-        return lambda model: symbol(model.parameters(), **arguments)
-    return partial(symbol, **arguments)
-
-def build_channel(spec: Mapping[str, Any]) -> ChannelConfig:
-    arguments = dict(spec)
-    if "normalizer" in arguments:
-        arguments["normalizer"] = build_value(arguments["normalizer"])
-    return ChannelConfig(**arguments)
 
 def build_dataset(entry: Mapping[str, Any]):
     """Build the dataset shown in one ``data`` entry."""
@@ -245,37 +144,6 @@ def select_patients(spec: Any, dataset) -> list[str]:
     return [str(path) for path in selector(**arguments)]
 
 
-def apply_patient_filter(
-    spec: str | Mapping[str, Any] | list,
-    patients: list[str],
-    dataset,
-    num_workers: int = 1,
-) -> list[str]:
-    """Apply configured filters in order to paths already assigned to a split."""
-    filters = spec if isinstance(spec, list) else [spec]
-    filtered = list(patients)
-    for filter_spec in filters:
-        if isinstance(filter_spec, str):
-            patient_filter = import_name(filter_spec)
-            arguments = {}
-        else:
-            patient_filter = import_name(str(filter_spec["name"]))
-            arguments = {key: build_value(value) for key, value in filter_spec.items() if key != "name"}
-        parameters = inspect.signature(patient_filter).parameters
-        if "dataset" in parameters:
-            arguments["dataset"] = dataset
-        if "num_workers" in parameters and "num_workers" not in arguments:
-            arguments["num_workers"] = num_workers
-        current = [str(path) for path in patient_filter(patients=filtered, **arguments)]
-        unexpected = sorted(set(current) - set(filtered))
-        if unexpected:
-            raise ValueError(f"A patient filter may only remove paths from its existing partition; it added {unexpected[:5]}.")
-        if len(current) != len(set(current)):
-            raise ValueError("A patient filter returned duplicate paths.")
-        filtered = current
-    return filtered
-
-
 def load_patient_split(files: str | Mapping[str, Any], dataset, seed: int, fold: str | None = None) -> dict[str, list[str]]:
     """Load an authoritative split or visibly create one from selectors."""
     if isinstance(files, str):
@@ -299,7 +167,7 @@ def load_patient_split(files: str | Mapping[str, Any], dataset, seed: int, fold:
     return patients
 
 
-def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None):
+def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: str | None = None, model=None):
     """Load patient paths and initialize every train/validation/test dataset."""
     entries = config["data"] if isinstance(config["data"], list) else [config["data"]]
     seed = int(config.get("seed", 17))
@@ -336,6 +204,8 @@ def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: 
                 patients = patients[: patients_per_entry[role]]
             if not patients:
                 continue
+            if hasattr(model, "pair_dataset"):
+                dataset = model.pair_dataset(dataset)
             dataset.initialize(patients, workers, strict=bool(entry.get("strict", False)))
             if role == "train":
                 train_datasets.append(dataset)
@@ -376,24 +246,30 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
     """Build a new model, trainer, datasets, and ``RunCfg`` from configuration."""
     selected_fold = fold if fold is not None else config.get("fold")
     seed_everything(int(config.get("seed", 17)))
-    train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold)
-    training_dataset = combine_datasets(train_datasets)
+    entries = config["data"] if isinstance(config["data"], list) else [config["data"]]
+    context_dataset = build_dataset(entries[0])
     sequence_len = int(config["trainer"].get("sequence_len", 1))
     context = {
-        "classes": training_dataset.get_classes(),
+        "classes": context_dataset.get_classes(),
         "sequence_len": sequence_len,
     }
-    input_channels = training_dataset.get_input_channels()
+    input_channels = context_dataset.get_input_channels()
     if not isinstance(input_channels, Mapping):
         context.update({
             "input_channels": input_channels,
             "n_channels": len(input_channels),
-            "ts_len": training_dataset.get_timeseries_len(),
-            "sampling_frequency": training_dataset.sample_frequency,
+            "ts_len": context_dataset.get_timeseries_len(),
+            "sampling_frequency": context_dataset.sample_frequency,
         })
 
     model = build_component(config["model"], context)
+    train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold, model=model)
+    training_dataset = combine_datasets(train_datasets)
     validate_model_input(model, training_dataset)
+    _, input_meta = model.input_spec()
+    for dataset in [*validation_datasets, *(dataset for _, dataset in test_datasets)]:
+        if "input_offsets" in input_meta and hasattr(dataset, "set_input_offsets"):
+            dataset.set_input_offsets(input_meta["input_offsets"])
     trainer_spec = copy.deepcopy(config["trainer"])
     trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
     if trainer_spec.get("lr_scheduler") is not None:
@@ -423,6 +299,8 @@ def validate_model_input(model, dataset) -> None:
 
     shape, meta = model.input_spec()
     if isinstance(shape, dict):
+        if "input_offsets" in meta and hasattr(dataset, "set_input_offsets"):
+            dataset.set_input_offsets(meta["input_offsets"])
         if not hasattr(dataset, "input_spec"):
             raise TypeError("A mapping-input model requires a dataset with input_spec().")
         expected_shape = dataset.input_spec()

@@ -106,7 +106,6 @@ def test_get_channels_grouped_keeps_candidates_but_exposes_grouped_inputs():
         channels=channels,
         sample_frequency=100,
         total_input="30s",
-        target_resolution="1s",
         event_mapping={},
         remove_unmapped_events=False,
     )

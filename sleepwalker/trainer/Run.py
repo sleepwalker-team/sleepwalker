@@ -2,8 +2,8 @@
 
 The training scripts in the repository prepare datasets, models, trainers, and
 experiment metadata, then hand the assembled configuration to ``run(...)``.
-This module centralizes loader construction, training invocation, and jsonl
-logging of test results.
+This module centralizes loader construction, training invocation, and canonical
+per-experiment test-result artifacts.
 """
 
 import os
@@ -18,7 +18,7 @@ from torchinfo import summary
 
 from sleepwalker.deployment import save_packaged_model
 from sleepwalker.models.ModelGraphClassifier import ModelGraphClassifier
-from sleepwalker.trainer.utils.disk import append_to_jsonl
+from sleepwalker.trainer.utils.disk import write_json
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
@@ -75,7 +75,7 @@ class RunResult:
         model: Model instance after training and optional checkpoint reload.
         trainer: Trainer used for fitting and evaluation.
         train_result: Raw dictionary returned by ``trainer.fit(...)``.
-        test_results: Jsonl-style test records generated during evaluation.
+        test_results: Test records generated during evaluation.
     """
 
     experiment_name: str
@@ -153,6 +153,9 @@ def run(cfg: RunCfg) -> RunResult:
 
     os.makedirs(cfg.log_path, exist_ok=True)
     local_artifact_path = os.path.join(cfg.log_path, cfg.experiment_name)
+    result_path = os.path.join(local_artifact_path, "results.json")
+    if os.path.exists(result_path):
+        raise FileExistsError(f"Training result already exists: {result_path}.")
     logger.add_sink(LocalArtifactSink(local_artifact_path))
 
     if cfg.use_mlflow:
@@ -174,7 +177,10 @@ def run(cfg: RunCfg) -> RunResult:
     summary_input, _ =  cfg.model.input_spec() 
     if isinstance(summary_input, dict):
         for input_name, input_shape in summary_input.items():
-            logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
+            if len(input_shape) == 4:
+                logger.info(f"Input '{input_name}' is {input_shape[1]} native call(s) of {input_shape[2]} x {input_shape[3]}")
+            else:
+                logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
     elif summary_input is not None:
         logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
         summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
@@ -245,9 +251,11 @@ def run(cfg: RunCfg) -> RunResult:
                 record["repeat"] = repeat
             if "best_model" in train_result:
                 record["best_model"] = train_result["best_model"]
-            append_to_jsonl(os.path.join(cfg.log_path, "results"), record)
             test_records.append(record)
             logger.uncontext()
+
+    result_value = test_records[0] if len(test_records) == 1 else test_records
+    write_json(result_path, result_value)
 
     logger.end_run()
     return RunResult(

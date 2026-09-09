@@ -336,7 +336,6 @@ def convert(model_name: str, model_root: str | Path, destination: str | Path):
         sample_frequency=sample_frequency,
         resample_type="polyphase" if model_name == "sleepfm" else "nearest",
         total_input=f"{window_seconds}s",
-        target_resolution=f"{window_seconds}s",
         stride=f"{window_seconds}s",
         z_normalize=model_name in {"osf", "sleepfm"},
         assume_units_if_missing=True,

@@ -41,8 +41,7 @@ class UnlabelledDataset(BaseDataset):
         sample_frequency: float,
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
-        target_resolution: str | pd.Timedelta,
-        stride: str | pd.Timedelta = "30s",
+        stride: str | pd.Timedelta | None = None,
         prepare_sample: Callable = prepare_tensor_sample,
         online_max_tries: int = 128,
         rejection_strategy: str = "patient_then_global",
@@ -58,7 +57,6 @@ class UnlabelledDataset(BaseDataset):
             "sample_frequency": sample_frequency,
             "resample_type": resample_type,
             "total_input": total_input,
-            "target_resolution": target_resolution,
             "stride": stride,
             "prepare_sample": prepare_sample,
             "online_max_tries": online_max_tries,
@@ -75,7 +73,6 @@ class UnlabelledDataset(BaseDataset):
             sample_frequency=sample_frequency,
             resample_type=resample_type,
             total_input=total_input,
-            target_resolution=target_resolution,
             stride=stride,
             event_mapping=None,
             prepare_target=None,
@@ -101,7 +98,6 @@ class UnlabelledDataset(BaseDataset):
             sample_frequency=dataset.sample_frequency,
             resample_type=dataset.resample_type,
             total_input=dataset.total_input,
-            target_resolution=dataset.target_resolution,
             stride=dataset.stride,
             prepare_sample=dataset.prepare_sample_callback,
             online_max_tries=dataset.online_max_tries,
@@ -153,8 +149,7 @@ class UnlabelledDataset(BaseDataset):
             `time`, or `None` when `prepare_sample` rejects the window.
         """
         end_date = start_date + self.total_input
-        target_start = start_date + (self.total_input // 2 - self.target_resolution // 2)
-        item = { "patient": file.path, "time": target_start }
+        item = { "patient": file.path, "time": start_date }
         x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
         self.apply_rereference(x_df)
         file.apply_z_normalization(x_df)

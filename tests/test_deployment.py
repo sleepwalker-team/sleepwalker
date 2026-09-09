@@ -16,7 +16,7 @@ from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
 
 
 DATA = Path(__file__).parent / "data"
-SINGLE_CONTRACT = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 1}
+SINGLE_CONTRACT = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 1, "target_resolution": "60s"}
 
 
 class MeanClassifier(BaseModel, ClassifierModel):
@@ -36,7 +36,6 @@ def make_dataset(*, unit: str | None = "uV", assume_units_if_missing: bool = Fal
         channels=[ChannelConfig("EEG", ["EEG"], unit=unit, normalizer=normalizer)],
         sample_frequency=10,
         total_input="60s",
-        target_resolution="60s",
         stride="60s",
         z_normalize=z_normalize,
         assume_units_if_missing=assume_units_if_missing,
@@ -121,8 +120,23 @@ def test_package_roundtrip_preserves_contract_manifest_and_weights(tmp_path):
     assert torch.allclose(loaded.model.linear.weight, package.model.linear.weight)
 
 
+def test_loading_legacy_package_moves_target_resolution_out_of_the_dataset(tmp_path):
+    package = make_package()
+    package.dataset.target_resolution = pd.Timedelta("20s")
+    package.dataset._init_kwargs["target_resolution"] = "20s"
+    package.classification_contract = dict(package.classification_contract)
+    package.classification_contract.pop("target_resolution")
+
+    loaded = PackagedModel.load(package.save(tmp_path / "legacy-package"))
+
+    assert loaded.classification_contract["target_resolution"] == "0 days 00:00:20"
+    assert loaded.classification_contract["target_offset"] == "0 days 00:00:20"
+    assert not hasattr(loaded.dataset, "target_resolution")
+    assert "target_resolution" not in loaded.dataset.dataset_kwargs()
+
+
 def test_packaging_discards_label_pipeline(tmp_path):
-    labelled = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
+    labelled = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
     packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=labelled)
 
     assert isinstance(packaged.dataset, UnlabelledDataset)
@@ -130,8 +144,8 @@ def test_packaging_discards_label_pipeline(tmp_path):
 
 
 def test_packaging_uses_first_component_of_multidataset(tmp_path):
-    first = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
-    second = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", target_resolution="60s", event_mapping={"desaturation": "desaturation"})
+    first = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    second = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
     first.initialized = True
     second.initialized = True
 
@@ -159,18 +173,42 @@ def test_package_rejects_changed_recording_z_normalization():
 
 def test_loaded_package_predicts_raw_edf(tmp_path):
     loaded = PackagedModel.load(make_package().save(tmp_path / "package"))
-    predictions = loaded.predict_edf(DATA / "signals_01.edf", batch_size=64)
+    predictions = loaded.predict_patient(DATA / "signals_01.edf", batch_size=64)
 
     assert not predictions.empty
     assert {"time", "prediction", "prob__negative", "prob__positive"}.issubset(predictions.columns)
     assert pd.to_datetime(predictions["time"]).is_monotonic_increasing
 
 
+def test_dataset_prediction_uses_the_requested_rejection_strategy():
+    dataset = make_dataset()
+    dataset.initialize([DATA / "signals_01.edf"], num_workers=0, strict=True)
+
+    predictions = make_package().predict_dataset(dataset, rejection_strategy="patient", progress=False)
+
+    assert not predictions.empty
+    assert dataset.rejection_strategy == "patient"
+
+
+def test_dataset_prediction_reports_received_input_windows():
+    dataset = make_dataset()
+    patient = DATA / "signals_01.edf"
+    dataset.initialize([patient], num_workers=0, strict=True)
+
+    predictions, received = make_package().predict_dataset(dataset, progress=False, return_received_windows=True)
+
+    assert not predictions.empty
+    assert received == {str(patient): len(dataset)}
+
+
 def test_sequence_predictions_use_target_start_timestamps():
-    contract = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 2}
+    contract = {"type": "single-head-multiclass", "task": "event", "classes": ["negative", "positive"], "sequence_len": 2, "target_resolution": "20s", "target_offset": "30s"}
     start = pd.Timestamp("2024-01-01T00:00:20")
-    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]), target_resolution="20s")
-    assert frame["time"].tolist() == [start, start + pd.Timedelta(seconds=10)]
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]))
+    assert frame["time"].tolist() == [start + pd.Timedelta(seconds=30), start + pd.Timedelta(seconds=40)]
+    assert frame["task"].tolist() == ["event", "event"]
+    assert frame["prediction_idx"].tolist() == [0, 1]
+    assert frame["prediction"].tolist() == ["negative", "positive"]
 
 
 def test_multitask_predictions_include_centered_task_offset():
@@ -182,9 +220,11 @@ def test_multitask_predictions_include_centered_task_offset():
         },
     }
     start = pd.Timestamp("2024-01-01T00:00:20")
-    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, {"sleep": torch.zeros(1, 1, 2), "arousal": torch.zeros(1, 40, 2)}, target_resolution="40s")
-    assert frame.loc[0, "sleep__time"] == start + pd.Timedelta("5s")
-    assert frame.loc[0, "arousal__step_39__time"] == start + pd.Timedelta("39s")
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, {"sleep": torch.zeros(1, 1, 2), "arousal": torch.zeros(1, 40, 2)})
+    assert len(frame) == 41
+    assert set(frame["task"]) == {"sleep", "arousal"}
+    assert frame.loc[frame["task"] == "sleep", "time"].tolist() == [start + pd.Timedelta("5s")]
+    assert frame.loc[frame["task"] == "arousal", "time"].iloc[-1] == start + pd.Timedelta("39s")
 
 
 def test_stored_missing_unit_policy_does_not_hide_conflicts(monkeypatch, tmp_path):
@@ -200,4 +240,4 @@ def test_stored_missing_unit_policy_does_not_hide_conflicts(monkeypatch, tmp_pat
     monkeypatch.setattr(basedataset_module, "read_edf_meta", conflicting_units)
     package = PackagedModel.load(make_package(make_dataset(assume_units_if_missing=True)).save(tmp_path / "package"))
     with pytest.raises(ValueError, match="Incompatible"):
-        package.predict_edf(DATA / "signals_01.edf")
+        package.predict_patient(DATA / "signals_01.edf")

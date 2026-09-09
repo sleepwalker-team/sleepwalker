@@ -31,7 +31,7 @@ from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.utils import export_batch_collate, export_dataloader_to_numpy_dir, get_edf_files_in_repo
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.trainer.utils.targets import normalize_multitask_config, prepare_multitask_target
+from sleepwalker.trainer.utils.targets import normalize_multitask_config, prepare_multitask_target, slice_target_interval
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 from dotenv import load_dotenv
@@ -122,7 +122,6 @@ def test_get_item_rejects_before_loading_signal():
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
-        target_resolution="30s",
         event_mapping={"wake": "wake"},
         prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
@@ -161,7 +160,6 @@ def test_get_item_loads_signal_after_label_precheck():
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
-        target_resolution="30s",
         event_mapping={"wake": "wake"},
         prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
@@ -187,12 +185,11 @@ def test_get_item_loads_signal_after_label_precheck():
     assert item["target_mask"].tolist() == [[True]]
 
 
-def test_get_item_timestamp_is_target_window_start():
+def test_get_item_timestamp_is_input_window_start():
     dataset = DummyDataset(
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="60s",
-        target_resolution="20s",
         event_mapping={"wake": "wake"},
     )
     file = create_dummy_file()
@@ -201,10 +198,34 @@ def test_get_item_timestamp_is_target_window_start():
         index=pd.date_range(file.start_date, periods=60, freq="1s"),
     )
     file.get_x = Mock(return_value=signal)
+    file.get_y = Mock(return_value=pd.DataFrame({"wake": np.ones(60)}, index=signal.index))
 
     item = dataset.get_item(file, file.start_date)
 
-    assert item["time"] == file.start_date + pd.Timedelta(seconds=20)
+    assert item["time"] == file.start_date
+    file.get_y.assert_called_once_with(file.start_date, file.start_date + pd.Timedelta("60s"), 1, ["wake"])
+
+
+def test_target_callback_selects_an_explicit_interval_from_input_annotations():
+    start = pd.Timestamp("2024-01-01")
+    target = pd.DataFrame({"wake": np.ones(60)}, index=pd.date_range(start, periods=60, freq="1s"))
+
+    selected = slice_target_interval(target, target_resolution="20s", target_offset="30s")
+
+    assert len(selected) == 20
+    assert selected.index[0] == start + pd.Timedelta("30s")
+    assert selected.index[-1] == start + pd.Timedelta("49s")
+
+
+def test_target_callback_selects_the_last_interval_from_input_annotations():
+    start = pd.Timestamp("2024-01-01")
+    target = pd.DataFrame({"wake": np.ones(60)}, index=pd.date_range(start, periods=60, freq="1s"))
+
+    selected = slice_target_interval(target, target_resolution="20s", target_position="last")
+
+    assert len(selected) == 20
+    assert selected.index[0] == start + pd.Timedelta("40s")
+    assert selected.index[-1] == start + pd.Timedelta("59s")
 
 
 def test_grouped_channel_selection_returns_one_channel_per_group():
@@ -214,7 +235,6 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
         ],
         sample_frequency=1,
         total_input="30s",
-        target_resolution="30s",
         event_mapping={},
         remove_unmapped_events=False,
     )
@@ -242,7 +262,6 @@ def test_get_item_reads_only_selected_physical_aliases_and_quality_channels():
         ],
         sample_frequency=1,
         total_input="3s",
-        target_resolution="1s",
         event_mapping=None,
         group_sampling_strategy="first",
     )
@@ -279,7 +298,6 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
         ],
         sample_frequency=1,
         total_input="3s",
-        target_resolution="3s",
         event_mapping=None,
     )
     signal = pd.DataFrame({"C3-M2": [0.0, 1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1s"))
@@ -289,7 +307,7 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
     assert built["data"].tolist() == [[1.0, 10.0], [2.0, 11.0], [3.0, 12.0]]
 
 
-def test_shared_physical_channel_requires_one_unit_and_simple_preprocessing():
+def test_shared_physical_channel_requires_one_unit_and_no_rereferencing():
     channels = [ChannelConfig("a", ["signal"], unit="uV"), ChannelConfig("b", ["signal"], unit="mV")]
     with pytest.raises(ValueError, match="incompatible target units"):
         DummyDataset(channels=channels, sample_frequency=1, event_mapping=None)
@@ -297,8 +315,47 @@ def test_shared_physical_channel_requires_one_unit_and_simple_preprocessing():
     channels = [ChannelConfig("a", ["signal"]), ChannelConfig("b", ["signal"])]
     with pytest.raises(ValueError, match="rereferencing"):
         DummyDataset(channels=channels, sample_frequency=1, event_mapping=None, rereference=[["signal", "reference"]])
-    with pytest.raises(ValueError, match="z-normalization"):
-        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None, z_normalize=True)
+
+
+def test_shared_physical_channel_is_z_normalized_once_before_duplication():
+    start = pd.Timestamp("2024-01-01")
+    dataset = DummyDataset(
+        channels=[ChannelConfig("a", ["signal"]), ChannelConfig("b", ["signal"])],
+        sample_frequency=1,
+        total_input="3s",
+        event_mapping=None,
+        z_normalize=True,
+    )
+    signal = pd.DataFrame({"signal": [0.0, 1.0, 2.0]}, index=pd.date_range(start, periods=3, freq="1s"))
+    file = EDFFile(channels=["signal"], path="patient.edf", start_date=start, length=1, z_statistics={"signal": (1.0, 1.0)})
+    file.get_x = lambda *args, **kwargs: signal.copy()
+
+    item = dataset.get_item(file, start)
+
+    assert item["data"].tolist() == [[-1.0, -1.0], [0.0, 0.0], [1.0, 1.0]]
+
+
+def test_target_callback_can_discard_an_unusable_extra_target():
+    dataset = DummyDataset(
+        channels=[ChannelConfig("signal", ["signal"])],
+        sample_frequency=1,
+        total_input="1s",
+        event_mapping=None,
+        prepare_target=lambda **kwargs: {"target": torch.tensor([1.0])},
+    )
+    raw_target = pd.DataFrame({"wake": [1.0]}, index=pd.date_range("2024-01-01", periods=1, freq="1s"))
+    file = Mock(
+        path="patient.edf",
+        labels=True,
+        labels_extra=True,
+        get_y=Mock(return_value=raw_target),
+        get_y_extra=Mock(return_value=raw_target),
+    )
+
+    item = dataset.get_target_item(file, pd.Timestamp("2024-01-01"))
+
+    assert torch.equal(item["target"], torch.tensor([1.0]))
+    assert "target_extra" not in item
 
 
 def test_channel_config_resolves_per_physical_normalizers_and_quality_channels():
@@ -374,7 +431,6 @@ def test_recording_z_normalization_runs_after_normalizers_and_rereferencing(monk
         channels=[ChannelConfig("A", ["A"], normalizer=OffsetNormalizer(10.0)), ChannelConfig("B", ["B"])],
         sample_frequency=1,
         total_input="2s",
-        target_resolution="1s",
         stride="1s",
         event_mapping=None,
         rereference=[["A", "B"]],
@@ -426,7 +482,6 @@ def test_basedataset_retries_patient_before_switching_global(monkeypatch):
                 channels=[ChannelConfig("EEG", ["EEG"])],
                 sample_frequency=1,
                 total_input="30s",
-                target_resolution="30s",
                 event_mapping={},
                 remove_unmapped_events=False,
                 online_max_tries=2,
@@ -467,7 +522,6 @@ def test_basedataset_propagates_item_exceptions():
                 channels=[ChannelConfig("EEG", ["EEG"])],
                 sample_frequency=1,
                 total_input="30s",
-                target_resolution="30s",
                 event_mapping={},
                 remove_unmapped_events=False,
                 online_max_tries=1,
@@ -587,7 +641,7 @@ def test_grouped_multiclass_trainer_averages_repeats():
     class Loader(list):
         batch_size = 2
         sampler = [0, 1]
-        dataset = type("Dataset", (), {"target_resolution": pd.Timedelta(seconds=30)})()
+        dataset = type("Dataset", (), {})()
 
     batch = {
         "data": torch.tensor(
@@ -603,6 +657,7 @@ def test_grouped_multiclass_trainer_averages_repeats():
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["wake", "rem"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         device="cpu",
     )
     trainer.steps = {"train": 0, "val": 0, "test": 0}
@@ -618,7 +673,7 @@ def test_grouped_multiclass_trainer_averages_repeats():
 def test_multiclass_training_allows_an_exhausted_loader():
     class Loader(list):
         batch_size = 2
-        dataset = type("Dataset", (), {"target_resolution": pd.Timedelta(seconds=30)})()
+        dataset = type("Dataset", (), {})()
 
     model = torch.nn.Linear(1, 1)
     trainer = MulticlassTrainer(
@@ -626,6 +681,7 @@ def test_multiclass_training_allows_an_exhausted_loader():
         optimizer=lambda current_model: torch.optim.SGD(current_model.parameters(), lr=0.1),
         classes=["wake", "rem"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         device="cpu",
     )
     trainer.steps = {"train": 0, "val": 0, "test": 0}
@@ -657,13 +713,14 @@ def test_multiclass_trainer_rejects_epoch_len_target_step_mismatch():
     class Loader(list):
         batch_size = 1
         sampler = torch.utils.data.SequentialSampler([0])
-        dataset = type("Dataset", (), {"target_resolution": pd.Timedelta("60s")})()
+        dataset = type("Dataset", (), {})()
 
     trainer = MulticlassTrainer(
         epochs=1,
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["no_arousal", "arousal"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="60s",
         device="cpu",
         sequence_len=40,
     )
@@ -680,7 +737,7 @@ def test_multiclass_trainer_excludes_masked_sequence_steps():
     class Loader(list):
         batch_size = 1
         sampler = torch.utils.data.SequentialSampler([0])
-        dataset = type("Dataset", (), {"target_resolution": pd.Timedelta("2s")})()
+        dataset = type("Dataset", (), {})()
 
     batch = {
         "data": torch.tensor([[[4.0, 0.0], [4.0, 0.0]]]),
@@ -692,6 +749,7 @@ def test_multiclass_trainer_excludes_masked_sequence_steps():
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["event", "no event"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="2s",
         device="cpu",
         sequence_len=2,
     )
@@ -713,8 +771,6 @@ def test_repeat_loader_and_model_wrapper_feed_regular_trainer():
             return x.unsqueeze(1)
 
     class FixedDataset(torch.utils.data.Dataset):
-        target_resolution = pd.Timedelta(seconds=30)
-
         def __init__(self):
             self.n_views = 1
 
@@ -746,6 +802,7 @@ def test_repeat_loader_and_model_wrapper_feed_regular_trainer():
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["wake", "rem"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         device="cpu",
     )
     trainer.steps = {"train": 0, "val": 0, "test": 0}
@@ -764,6 +821,7 @@ def test_multiclass_trainer_balance_gamma_changes_acceptance_strength(monkeypatc
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["majority", "minority"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         device="cpu",
         balance_batches=True,
         balance_gamma=1.0,
@@ -773,6 +831,7 @@ def test_multiclass_trainer_balance_gamma_changes_acceptance_strength(monkeypatc
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["majority", "minority"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         device="cpu",
         balance_batches=True,
         balance_gamma=2.0,
@@ -792,11 +851,12 @@ def test_multiclass_trainer_uses_configured_class_counts_without_loading_data(mo
         optimizer=lambda model: torch.optim.SGD(model.parameters(), lr=0.1),
         classes=["majority", "minority"],
         loss_function=torch.nn.functional.cross_entropy,
+        target_resolution="30s",
         loss_mode="inverse",
         class_counts={"majority": 9.0, "minority": 1.0},
         device="cpu",
     )
-    dataset = type("Dataset", (), {"target_resolution": "30s", "get_classes": lambda self: ["majority", "minority"]})()
+    dataset = type("Dataset", (), {"get_classes": lambda self: ["majority", "minority"]})()
     loader = type("Loader", (), {"dataset": dataset})()
     monkeypatch.setattr("sleepwalker.trainer.MulticlassTrainer.estimate_class_cnts", lambda current_loader: pytest.fail("configured counts must skip online estimation"))
 
@@ -1010,7 +1070,6 @@ class CacheReadyDataset(DummyDataset):
             channels=[ChannelConfig("eeg", ["eeg"]), ChannelConfig("emg", ["emg"])],
             sample_frequency=2,
             total_input="2s",
-            target_resolution="1s",
             event_mapping=None,
         )
         self.classes = ['wake', 'rem']
@@ -1076,7 +1135,6 @@ class GroupedCacheDataset(DummyDataset):
             ],
             sample_frequency=1,
             total_input="3s",
-            target_resolution="1s",
             event_mapping=None,
         )
         self.classes = ['wake']

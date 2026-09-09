@@ -313,6 +313,9 @@ def prepare_multiclass_target(
     time=None,
     *,
     target_classes: Sequence[str],
+    target_resolution: str | pd.Timedelta | None = None,
+    target_offset: str | pd.Timedelta | None = None,
+    target_position: str = "center",
     percentage: float = 0.5,
     filters=None,
     sequence_len: int = 1,
@@ -330,6 +333,12 @@ def prepare_multiclass_target(
         patient: Unused callback argument kept for dataset API compatibility.
         time: Unused callback argument kept for dataset API compatibility.
         target_classes: Output class order for the returned target vectors.
+        target_resolution: Duration selected from the raw input-window annotations.
+            ``None`` keeps the complete annotation interval.
+        target_offset: Optional explicit start of the selected target interval
+            relative to the input-window start.
+        target_position: ``"center"`` or ``"last"`` placement used when
+            ``target_offset`` is not provided.
         percentage: Minimum fraction of the window a class must cover to be
             considered active.
         filters: Optional filter specifications applied before target
@@ -352,6 +361,9 @@ def prepare_multiclass_target(
     """
     if target is None:
         return None
+    target = slice_target_interval(target, target_resolution=target_resolution, target_offset=target_offset, target_position=target_position)
+    if target_extra is not None:
+        target_extra = slice_target_interval(target_extra, target_resolution=target_resolution, target_offset=target_offset, target_position=target_position)
     if not passes_filters(target, filters):
         return None
 
@@ -382,25 +394,66 @@ def prepare_multiclass_target(
     return item
 
 
+def slice_target_interval(target: pd.DataFrame, *, target_resolution: str | pd.Timedelta | None, target_offset: str | pd.Timedelta | None = None, target_position: str = "center") -> pd.DataFrame:
+    """Select one exact interval from annotations covering an input window."""
+    if target_resolution is None:
+        return target
+    frequency = target.index.freq or pd.infer_freq(target.index)
+    if frequency is None:
+        raise ValueError("Target selection requires a regular time index.")
+    frequency = pd.to_timedelta(frequency)
+    resolution = pd.to_timedelta(target_resolution)
+    if target_position not in {"center", "last"}:
+        raise ValueError("target_position must be 'center' or 'last'.")
+    available_span = len(target) * frequency
+    if target_offset is None:
+        offset = available_span - resolution if target_position == "last" else (available_span - resolution) / 2
+    else:
+        offset = pd.to_timedelta(target_offset)
+    resolution_samples = resolution / frequency
+    offset_samples = offset / frequency
+    if resolution <= pd.Timedelta(0) or offset < pd.Timedelta(0):
+        raise ValueError("target_resolution must be positive and target_offset must not be negative.")
+    if not float(resolution_samples).is_integer() or not float(offset_samples).is_integer():
+        raise ValueError("target_resolution and target_offset must contain whole annotation samples.")
+    start = int(offset_samples)
+    end = start + int(resolution_samples)
+    if end > len(target):
+        raise ValueError(f"Target interval [{offset}, {offset + resolution}) exceeds the available annotation span.")
+    return target.iloc[start:end]
+
+
 def annotation_coverage(target: pd.DataFrame, sequence_len: int, labels: Sequence[str]) -> torch.Tensor:
     """Measure each annotation label's coverage in every output step."""
     if len(target) % sequence_len != 0:
         raise ValueError(f"Annotation length {len(target)} is not divisible by sequence_len={sequence_len}.")
     step_len = len(target) // sequence_len
-    return torch.tensor([[float(target.iloc[index * step_len:(index + 1) * step_len].reindex(columns=labels, fill_value=0)[label].mean()) for label in labels] for index in range(sequence_len)], dtype=torch.float32)
+    values = target.reindex(columns=labels, fill_value=0).to_numpy(dtype=np.float32)
+    return torch.from_numpy(values.reshape(sequence_len, step_len, len(labels)).mean(axis=1))
 
 
-def prepare_single_target(target, target_extra=None, patient=None, time=None, *, target_classes: Sequence[str], sequence_len: int, annotation_labels: Sequence[str], percentage: float = 0.5, soft_boundaries: bool = False, filters=None, step_mask=None):
+def prepare_single_target(target, target_extra=None, patient=None, time=None, *, target_classes: Sequence[str], sequence_len: int, annotation_labels: Sequence[str], target_resolution: str | pd.Timedelta | None = None, target_offset: str | pd.Timedelta | None = None, target_position: str = "center", percentage: float = 0.5, soft_boundaries: bool = False, filters=None, step_mask=None, allow_invalid: bool = False):
     """Prepare one multiclass target together with annotation coverage."""
-    prepared = prepare_multiclass_target(target, target_extra=target_extra, patient=patient, time=time, target_classes=target_classes, sequence_len=sequence_len, percentage=percentage, soft_boundaries=soft_boundaries, filters=filters, step_mask=step_mask)
-    if prepared is None:
+    if target is None:
         return None
-    prepared["annotation"] = annotation_coverage(target, sequence_len, annotation_labels)
+    selected_target = slice_target_interval(target, target_resolution=target_resolution, target_offset=target_offset, target_position=target_position)
+    selected_extra = None if target_extra is None else slice_target_interval(target_extra, target_resolution=target_resolution, target_offset=target_offset, target_position=target_position)
+    prepared = prepare_multiclass_target(selected_target, target_extra=selected_extra, patient=patient, time=time, target_classes=target_classes, sequence_len=sequence_len, percentage=percentage, soft_boundaries=soft_boundaries, filters=filters, step_mask=step_mask)
+    if prepared is None:
+        if not allow_invalid:
+            return None
+        prepared = {
+            "target": torch.zeros((sequence_len, len(target_classes)), dtype=torch.float32),
+            "target_mask": torch.zeros(sequence_len, dtype=torch.bool),
+        }
+    elif allow_invalid and "target_mask" not in prepared:
+        prepared["target_mask"] = torch.ones(sequence_len, dtype=torch.bool)
+    prepared["annotation"] = annotation_coverage(selected_target, sequence_len, annotation_labels)
     return prepared
 
 
 def normalize_multitask_config(task_config: dict[str, dict]):
-    """Validate multitask target settings and derive centered target spans."""
+    """Validate multitask target settings and derive target spans and offsets."""
     if len(task_config) == 0:
         raise ValueError("task_config must not be empty.")
     for task, config in task_config.items():
@@ -462,15 +515,20 @@ def normalize_multitask_config(task_config: dict[str, dict]):
             "class_weights": dict(config.get("class_weights", {})),
             "class_counts": class_counts,
             "task_weight": float(config.get("task_weight", 1.0)),
+            "configured_target_offset": pd.to_timedelta(config["target_offset"]) if config.get("target_offset") is not None else None,
         }
 
     common_target_span = max(config["target_span"] for config in normalized.values())
     for config in normalized.values():
-        config["target_offset"] = (common_target_span - config["target_span"]) / 2
+        centered_offset = (common_target_span - config["target_span"]) / 2
+        config["target_offset"] = centered_offset if config["configured_target_offset"] is None else config["configured_target_offset"]
+        if config["target_offset"] < pd.Timedelta(0):
+            raise ValueError(f"Task '{config['task']}' target_offset must not be negative.")
+        del config["configured_target_offset"]
     return normalized
 
 
-def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], raise_error: bool = True):
+def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], raise_error: bool = True, allow_partial: bool = False):
     """Build padded probability targets and per-step masks for all tasks."""
     if targets is None:
         return None
@@ -484,15 +542,13 @@ def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], 
     if frequency is None:
         raise ValueError("Multitask targets require a regular time index.")
     frequency = pd.to_timedelta(frequency)
-    common_target_span = max(config["target_span"] for config in task_specs)
-    expected_samples = int(round(common_target_span / frequency))
-    if len(targets) != expected_samples:
-        raise ValueError(f"Expected {expected_samples} target samples for target span {common_target_span}, got {len(targets)}.")
+    required_span = max(config["target_offset"] + config["target_span"] for config in task_specs)
+    required_samples = int(round(required_span / frequency))
+    if len(targets) < required_samples:
+        raise ValueError(f"Expected at least {required_samples} annotation samples for targets ending at {required_span}, got {len(targets)}.")
 
     for task_index, config in enumerate(task_specs):
-        task_samples = int(round(config["target_span"] / frequency))
-        start = (len(targets) - task_samples) // 2
-        task_targets = targets.iloc[start:start + task_samples]
+        task_targets = multitask_target_slice(targets, config, frequency=frequency)
         target_values = task_targets.drop(columns=[config["default"]], errors="ignore") if config["default"] is not None else task_targets
         try:
             values = build_multiclass_sequence(target_values, target_classes=config["labels"], percentage=config["percentage"], sequence_len=config["n_steps"], soft_boundaries=config["soft_boundaries"])
@@ -502,6 +558,8 @@ def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], 
         except ValueError as error:
             if raise_error:
                 raise ValueError(f"Could not build target for task '{config['task']}': {error}.") from error
+            if allow_partial:
+                continue
             return None
 
         output[task_index, :config["n_steps"], :len(config["labels"])] = values
@@ -510,7 +568,23 @@ def build_multitask_target(targets: pd.DataFrame, task_config: dict[str, dict], 
     return output, output_mask
 
 
-def prepare_multitask_target(target, target_extra=None, patient=None, time=None, class_cnts: Optional[dict[str, dict[str, float]]] = None, task_config: Optional[dict[str, dict]] = None):
+def multitask_target_slice(targets: pd.DataFrame, task_config: dict, frequency=None) -> pd.DataFrame:
+    """Select the configured annotation span belonging to one multitask head."""
+    if frequency is None:
+        frequency = targets.index.freq or pd.infer_freq(targets.index)
+        if frequency is None:
+            raise ValueError("Multitask targets require a regular time index.")
+        frequency = pd.to_timedelta(frequency)
+    task_sample_ratio = task_config["target_span"] / frequency
+    offset_sample_ratio = task_config["target_offset"] / frequency
+    if not float(task_sample_ratio).is_integer() or not float(offset_sample_ratio).is_integer():
+        raise ValueError(f"Task '{task_config['task']}' target span and offset must contain whole annotation samples.")
+    task_samples = int(task_sample_ratio)
+    start = int(offset_sample_ratio)
+    return targets.iloc[start:start + task_samples]
+
+
+def prepare_multitask_target(target, target_extra=None, patient=None, time=None, class_cnts: Optional[dict[str, dict[str, float]]] = None, task_config: Optional[dict[str, dict]] = None, annotation_labels: Optional[Sequence[str]] = None, allow_partial: bool = False):
     """Prepare one dataset target payload for multitask training."""
     if task_config is None:
         raise ValueError("task_config must not be None.")
@@ -519,11 +593,21 @@ def prepare_multitask_target(target, target_extra=None, patient=None, time=None,
         task_config.clear()
         task_config.update(normalized)
 
-    built_target = build_multitask_target(target, task_config, raise_error=False)
+    build_arguments = {"raise_error": False}
+    if allow_partial:
+        build_arguments["allow_partial"] = True
+    built_target = build_multitask_target(target, task_config, **build_arguments)
     if built_target is None:
         return None
     target_values, target_mask = built_target
     item = {"target": target_values, "target_mask": target_mask}
+
+    if annotation_labels is not None:
+        task_specs = list(task_config.values())
+        annotations = torch.zeros((len(task_specs), max(config["n_steps"] for config in task_specs), len(annotation_labels)), dtype=torch.float32)
+        for task_index, config in enumerate(task_specs):
+            annotations[task_index, :config["n_steps"]] = annotation_coverage(multitask_target_slice(target, config), config["n_steps"], annotation_labels)
+        item["annotation"] = annotations
 
     if class_cnts:
         keep_probability = 1.0

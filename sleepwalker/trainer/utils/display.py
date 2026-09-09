@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from .metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+from sleepwalker.metrics import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
 
 
 def format_confusion_table(labels, confusion_matrix, title: str | None = None) -> list[str]:

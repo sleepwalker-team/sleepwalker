@@ -136,6 +136,18 @@ def test_prepare_target_normalizes_raw_task_config():
     assert prepared["target_mask"].tolist() == [[True, False, False], [True, True, True]]
 
 
+def test_prepare_multitask_target_can_include_aligned_annotation_coverage():
+    trainer = build_trainer()
+    labels = list(make_target_df().columns)
+
+    prepared = prepare_multitask_target(make_target_df(), task_config=trainer.task_config, annotation_labels=labels)
+
+    assert prepared["annotation"].shape == (2, 3, len(labels))
+    assert prepared["annotation"][0, 0, labels.index("n2")] == 1.0
+    assert prepared["annotation"][0, 1:].count_nonzero() == 0
+    assert prepared["annotation"][1, :, labels.index("apnea")].tolist() == [1.0, 0.0, 0.0]
+
+
 def test_build_multitask_target_rejects_multiple_active_labels_within_step():
     trainer = build_trainer()
     target = make_target_df()
@@ -151,6 +163,18 @@ def test_build_multitask_target_returns_none_when_raise_error_is_false():
     target.loc[target.index[:10], "hypopnea"] = 1
 
     assert build_multitask_target(target, trainer.task_config, raise_error=False) is None
+
+
+def test_build_multitask_target_can_mask_only_an_invalid_task():
+    trainer = build_trainer()
+    target = make_target_df()
+    target.loc[target.index[:10], "hypopnea"] = 1
+
+    values, target_mask = build_multitask_target(target, trainer.task_config, raise_error=False, allow_partial=True)
+
+    assert values[0, :1, :5].argmax(dim=-1).tolist() == [2]
+    assert target_mask[0].tolist() == [True, False, False]
+    assert target_mask[1].tolist() == [False, False, False]
 
 
 def test_build_multitask_target_uses_task_specific_percentage():
@@ -271,7 +295,7 @@ def test_run_epoch_masks_conditioned_tasks_during_wake():
 def test_multilabel_training_allows_an_exhausted_loader():
     class Loader(list):
         batch_size = 2
-        dataset = type("Dataset", (), {"target_resolution": "30s"})()
+        dataset = type("Dataset", (), {})()
 
     model = torch.nn.Linear(1, 1)
     trainer = build_trainer()

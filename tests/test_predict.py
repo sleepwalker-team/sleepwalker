@@ -3,7 +3,7 @@ import pandas as pd
 from predict import prediction_frame_to_probability_records, probability_records_to_onehot
 
 
-MULTICLASS_CONTRACT = {"type": "single-head-multiclass", "classes": ["clean", "noisy"], "sequence_len": 1}
+MULTICLASS_CONTRACT = {"type": "single-head-multiclass", "classes": ["clean", "noisy"], "sequence_len": 1, "target_resolution": "30s"}
 MULTITASK_CONTRACT = {"type": "multitask", "tasks": {"arousal": {"classes": ["no_arousal", "arousal"], "n_steps": 1, "target_resolution": "10s", "target_offset": "0s"}}}
 
 

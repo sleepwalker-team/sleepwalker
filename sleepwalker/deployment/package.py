@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -23,6 +24,7 @@ from sleepwalker.models.BaseModel import ClassifierModel, EmbeddingModel
 from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
+from sleepwalker.utils import logger
 
 
 FORMAT_VERSION = "sleepwalker-packaged-model-v1"
@@ -80,7 +82,7 @@ def assert_single_dataset_compatible(expected_dataset: Any, actual_dataset: Any,
     actual_inputs = list(actual_dataset.get_input_channels())
     if actual_inputs != expected_inputs:
         raise ValueError(f"Expected logical input channels {expected_inputs}, got {actual_inputs}.")
-    for attribute in ["sample_frequency", "resample_type", "total_input", "target_resolution", "stride", "z_normalize"]:
+    for attribute in ["sample_frequency", "resample_type", "total_input", "stride", "z_normalize"]:
         expected = str(getattr(expected_dataset, attribute))
         actual = str(getattr(actual_dataset, attribute))
         if actual != expected:
@@ -119,6 +121,11 @@ class PackagedModel:
             raise ValueError("A packaged ClassifierModel requires classification_contract.")
         if self.classification_contract is not None and self.classification_contract.get("type") == "single-head-multiclass" and self.task is None:
             raise ValueError("A single-head classifier package requires task.")
+        if self.classification_contract is not None and self.classification_contract.get("type") == "single-head-multiclass":
+            if "target_resolution" not in self.classification_contract:
+                raise ValueError("A single-head classification contract requires target_resolution.")
+            if pd.to_timedelta(self.classification_contract["target_resolution"]) <= pd.Timedelta(0):
+                raise ValueError("Classification target_resolution must be positive.")
 
         shape, meta = self.model.input_spec()
         if isinstance(shape, dict):
@@ -155,18 +162,69 @@ class PackagedModel:
         if isinstance(expected_inputs, dict):
             if not isinstance(actual_inputs, dict) or set(actual_inputs) != set(expected_inputs):
                 raise ValueError(f"Expected paired dataset inputs {sorted(expected_inputs)}, got {actual_inputs}.")
-            if self.dataset.target_resolution != dataset.target_resolution or self.dataset.stride != dataset.stride:
-                raise ValueError("Paired datasets must use the same target_resolution and stride.")
+            if self.dataset.stride != dataset.stride:
+                raise ValueError("Paired datasets must use the same stride.")
             for name in expected_inputs:
                 assert_single_dataset_compatible(self.dataset.datasets[name], dataset.datasets[name], allow_preprocessing_override=allow_preprocessing_override)
             return
         assert_single_dataset_compatible(self.dataset, dataset, allow_preprocessing_override=allow_preprocessing_override)
 
-    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
-        return predict_dataset(self, dataset, batch_size=batch_size, num_workers=num_workers, n_repeat=n_repeat, device=device)
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", allow_preprocessing_override: bool = False, progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
+        """Run this classifier on an initialized compatible dataset."""
+        if self.classification_contract is None:
+            raise TypeError(f"Package '{self.name}' has no classification contract.")
+        self.assert_compatible(dataset, allow_preprocessing_override=allow_preprocessing_override)
+        if not hasattr(dataset, "set_rejection_strategy"):
+            raise TypeError(f"{dataset.__class__.__name__} does not support rejection strategies.")
+        dataset.set_rejection_strategy(rejection_strategy)
+        loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=seed, rejection_strategy=None, n_views=n_repeat)
+        execution_model = (RepeatedViewModel(self.model) if n_repeat > 1 else self.model).to(device)
+        execution_model.eval()
+        contract = self.classification_contract
+        if contract["type"] == "single-head-multiclass":
+            contract = {**contract, "task": self.task}
+        annotation_labels = list(dataset.label_classes) if hasattr(dataset, "label_classes") else None
+        label = progress_label or self.name
+        frames = []
+        rejected_batches = 0
+        received_windows = Counter()
+        if progress:
+            logger.progress_start(total=len(dataset), desc=label, leave=True)
+        try:
+            with torch.inference_mode():
+                for batch in loader:
+                    if batch is None:
+                        rejected_batches += 1
+                        patient_name = "no valid windows"
+                    else:
+                        received_windows.update(str(patient) for patient in batch["patient"])
+                        data = {key: value.to(device, non_blocking=True) for key, value in batch["data"].items()} if isinstance(batch["data"], dict) else batch["data"].to(device, non_blocking=True)
+                        outputs = execution_model(data)
+                        frame = format_prediction_batch(contract, batch, outputs, annotation_labels=annotation_labels)
+                        frames.append(frame)
+                        patient_name = Path(str(batch["patient"][-1])).name
+                    if progress:
+                        logger.progress_status(f"{sum(received_windows.values()):,}/{len(dataset):,} windows | {patient_name} | {rejected_batches} failed batches")
+                        logger.progress_advance(batch_size)
+        finally:
+            if progress:
+                logger.progress_close()
+        predictions = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if return_received_windows:
+            return predictions, dict(received_windows)
+        return predictions
 
-    def predict_edf(self, edf_path: str | os.PathLike, *, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
-        return predict_edf(self, edf_path, batch_size=batch_size, num_workers_dataset=num_workers_dataset, num_workers_loader=num_workers_loader, n_repeat=n_repeat, device=device)
+    def predict_patient(self, edf_path: str | os.PathLike, *, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", progress: bool = True) -> pd.DataFrame:
+        """Run this classifier on one complete EDF file."""
+        dataset = self.dataset.clone()
+        self.assert_compatible(dataset)
+        if not hasattr(dataset, "set_rejection_strategy"):
+            raise TypeError(f"{dataset.__class__.__name__} does not support rejection strategies.")
+        dataset.set_rejection_strategy(rejection_strategy)
+        dataset.initialize([str(edf_path)], num_workers=num_workers_dataset, strict=True)
+        if dataset.get_n_patients() != 1:
+            raise ValueError(f"Could not prepare EDF file {edf_path}.")
+        return self.predict_dataset(dataset, batch_size=batch_size, num_workers=num_workers_loader, n_repeat=n_repeat, device=device, seed=seed, rejection_strategy=rejection_strategy, progress=progress, progress_label=Path(edf_path).name)
 
     def save(self, path: str | os.PathLike) -> Path:
         root = Path(path)
@@ -208,6 +266,47 @@ class PackagedModel:
         package = torch.load(payload_path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
         if not isinstance(package, cls):
             raise TypeError(f"Expected a PackagedModel payload, got {type(package).__name__}.")
+        model_state = vars(package.model)
+        is_graph = package.model.__class__.__module__ == "sleepwalker.models.ModelGraphClassifier" and package.model.__class__.__name__ == "ModelGraphClassifier"
+        if is_graph:
+            legacy_graph = "input_offsets" not in model_state
+            model_state.setdefault("native_outputs", package.model.node_outputs)
+            plans = model_state.get("execution_plans", {})
+            model_state.setdefault("input_offsets", {name: None if plans.get(name) is None else list(plans[name]["input_offsets_ns"]) for name in package.model.node_names})
+            model_state.setdefault("prediction_indices", {name: None if plans.get(name) is None else {next(iter(package.model.native_outputs[name])): list(plans[name]["alignment"])} for name in package.model.node_names})
+            configured_tasks = package.config.get("trainer", {}).get("task_config", {})
+            if legacy_graph and package.classification_contract is not None and package.classification_contract.get("type") == "multitask" and set(configured_tasks) == set(package.classification_contract["tasks"]):
+                legacy_output_span = max(pd.to_timedelta(task["target_offset"]) + pd.to_timedelta(task["target_resolution"]) * int(task["n_steps"]) for task in package.classification_contract["tasks"].values())
+                centered_output_offset = (package.dataset.total_input - legacy_output_span) / 2
+                for task, task_contract in package.classification_contract["tasks"].items():
+                    configured = configured_tasks[task]
+                    if list(task_contract["classes"]) != list(configured["labels"]) or int(task_contract["n_steps"]) != int(configured["sequence_len"]):
+                        raise ValueError(f"Legacy graph package '{package.name}' has inconsistent configured output shape for task '{task}'.")
+                    task_contract["target_resolution"] = str(pd.to_timedelta(configured["target_resolution"]))
+                    configured_offset = configured.get("target_offset")
+                    task_contract["target_offset"] = str(centered_output_offset + pd.to_timedelta(task_contract["target_offset"]) if configured_offset is None else pd.to_timedelta(configured_offset))
+        dataset_state = vars(package.dataset)
+        if package.dataset.__class__.__module__ == "sleepwalker.models.ModelGraphClassifier" and package.dataset.__class__.__name__ == "PairedDataset":
+            plans = dataset_state.get("execution_plans", {})
+            dataset_state.setdefault("base", dataset_state.get("reference"))
+            dataset_state.setdefault("input_offsets", {name: list(plan["input_offsets_ns"]) for name, plan in plans.items()})
+            if is_graph:
+                model_state.setdefault("input_datasets", dict(package.dataset.datasets))
+        if package.classification_contract is not None and package.classification_contract.get("type") == "single-head-multiclass" and hasattr(package.dataset, "target_resolution"):
+            legacy_resolution = pd.to_timedelta(package.dataset.target_resolution)
+            package.classification_contract = {
+                **package.classification_contract,
+                "target_resolution": package.classification_contract.get("target_resolution", str(legacy_resolution)),
+                "target_offset": package.classification_contract.get("target_offset", str((package.dataset.total_input - legacy_resolution) / 2)),
+            }
+        if package.classification_contract is not None and package.classification_contract.get("type") == "single-head-multiclass" and "target_resolution" not in package.classification_contract:
+            raise ValueError(f"Legacy package '{package.name}' has no target_resolution in either its output contract or dataset.")
+        packaged_datasets = list(package.dataset.datasets.values()) if hasattr(package.dataset, "datasets") and isinstance(package.dataset.datasets, dict) else [package.dataset]
+        for dataset in packaged_datasets:
+            if hasattr(dataset, "target_resolution"):
+                del dataset.target_resolution
+            if isinstance(dataset, UnlabelledDataset):
+                dataset._init_kwargs.pop("target_resolution", None)
         package.model = package.model.to(map_location)
         return package
 
@@ -233,41 +332,3 @@ def save_packaged_model(path: str | os.PathLike, *, name: str, model: torch.nn.M
 
 def load_packaged_model(path: str | os.PathLike, *, map_location: str | torch.device = "cpu") -> PackagedModel:
     return PackagedModel.load(path, map_location=map_location)
-
-
-def predict_dataset(package: PackagedModel, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
-    """Run a packaged classifier on an initialized compatible dataset."""
-
-    if package.classification_contract is None:
-        raise TypeError(f"Package '{package.name}' has no classification contract.")
-    package.assert_compatible(dataset)
-    loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=0, rejection_strategy="none", n_views=n_repeat)
-    execution_model = (RepeatedViewModel(package.model) if n_repeat > 1 else package.model).to(device)
-    execution_model.eval()
-    frames = []
-    with torch.inference_mode():
-        for batch in loader:
-            if batch is None:
-                continue
-            data = {key: value.to(device, non_blocking=True) for key, value in batch["data"].items()} if isinstance(batch["data"], dict) else batch["data"].to(device, non_blocking=True)
-            outputs = execution_model(data)
-            frames.append(format_prediction_batch(package.classification_contract, batch, outputs, dataset.target_resolution))
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-
-def build_edf_dataset(package: PackagedModel, edf_path: str | os.PathLike, *, num_workers: int = 0):
-    """Build the package's exact stored dataset contract for one EDF file."""
-
-    dataset = package.dataset.clone()
-    package.assert_compatible(dataset)
-    dataset.initialize([str(edf_path)], num_workers=num_workers, strict=True)
-    if dataset.get_n_patients() != 1:
-        raise ValueError(f"Could not prepare EDF file {edf_path}.")
-    return dataset
-
-
-def predict_edf(package: PackagedModel, edf_path: str | os.PathLike, *, batch_size: int = 64, num_workers_dataset: int = 0, num_workers_loader: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu") -> pd.DataFrame:
-    """Run a packaged classifier on one complete EDF file."""
-
-    dataset = build_edf_dataset(package, edf_path, num_workers=num_workers_dataset)
-    return predict_dataset(package, dataset, batch_size=batch_size, num_workers=num_workers_loader, n_repeat=n_repeat, device=device)

@@ -75,7 +75,7 @@ def test_multitask_full_uses_expert_sequence_contracts():
     ]
 
     assert task_blocks[0] == task_blocks[1]
-    assert config["data"]["target_resolution"] == "80s"
+    assert "target_resolution" not in config["data"]
     assert {task: (cfg["sequence_len"], cfg["target_resolution"]) for task, cfg in task_blocks[0].items()} == {
         "sleep": (1, "30s"),
         "arousal": (40, "1s"),
@@ -303,7 +303,7 @@ def test_dry_run_changes_training_not_just_validation(monkeypatch):
     monkeypatch.setattr(
         train_tool,
         "initialize_datasets",
-        lambda _config, dry_run, fold=None: ([dataset], [], []),
+        lambda _config, dry_run, fold=None, model=None: ([dataset], [], []),
     )
 
     run_config = train_tool.runcfg_from_dict(config, dry_run=True, fold="fold_2")

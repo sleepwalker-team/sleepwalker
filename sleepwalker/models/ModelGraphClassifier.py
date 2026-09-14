@@ -293,6 +293,103 @@ class PairedDataset(Dataset):
         return None
 
 
+def first_linear(module: torch.nn.Module) -> torch.nn.Linear:
+    if isinstance(module, torch.nn.Linear):
+        return module
+    for child in module.children():
+        try:
+            return first_linear(child)
+        except TypeError:
+            continue
+    raise TypeError(f"Classification head {type(module).__name__} does not contain a Linear layer to expand.")
+
+
+def replace_module(module: torch.nn.Module, target: torch.nn.Module, replacement: torch.nn.Module) -> bool:
+    for name, child in module.named_children():
+        if child is target:
+            setattr(module, name, replacement)
+            return True
+        if replace_module(child, target, replacement):
+            return True
+    return False
+
+
+def model_classification_head(model: torch.nn.Module) -> torch.nn.Module:
+    if hasattr(model, "fc") and model.fc is not None:
+        return model.fc
+    if hasattr(model, "head") and model.head is not None:
+        return model.head
+    raise TypeError(f"Graph node model {type(model).__name__} must expose its native classification head as 'fc' or 'head'.")
+
+
+class ExpandedHead(torch.nn.Module):
+    """Copy a native classifier and extend its first linear layer with graph context."""
+
+    def __init__(self, native_head: torch.nn.Module, *, feature_dim: int, context_dim: int, native_output: Mapping[str, Any], graph_output: Mapping[str, Any], prediction_indices: list[int] | None, context_init_std: float):
+        super().__init__()
+        self.classifier = copy.deepcopy(native_head)
+        self.feature_dim = int(feature_dim)
+        self.context_dim = int(context_dim)
+        self.native_sequence_len = int(native_output["sequence_len"])
+        self.graph_sequence_len = int(graph_output["sequence_len"])
+        self.n_classes = len(graph_output["classes"])
+        self.prediction_indices = None if prediction_indices is None else list(prediction_indices)
+
+        native_first = first_linear(self.classifier)
+        if self.feature_dim == native_first.in_features:
+            self.feature_layout = "flat"
+        elif self.feature_dim == self.native_sequence_len * native_first.in_features:
+            self.feature_layout = "sequence"
+        else:
+            raise ValueError(f"Native head expects {native_first.in_features} features, but the model exposes {self.feature_dim} features over {self.native_sequence_len} output steps.")
+
+        expanded = torch.nn.Linear(native_first.in_features + self.context_dim, native_first.out_features, bias=native_first.bias is not None, device=native_first.weight.device, dtype=native_first.weight.dtype)
+        with torch.no_grad():
+            expanded.weight[:, :native_first.in_features].copy_(native_first.weight)
+            if self.context_dim:
+                torch.nn.init.normal_(expanded.weight[:, native_first.in_features:], mean=0.0, std=float(context_init_std))
+            if native_first.bias is not None:
+                expanded.bias.copy_(native_first.bias)
+        if self.classifier is native_first:
+            self.classifier = expanded
+        elif not replace_module(self.classifier, native_first, expanded):
+            raise RuntimeError("Could not replace the copied classification head's first Linear layer.")
+        self.classifier.requires_grad_(True)
+
+    @property
+    def in_features(self) -> int:
+        return first_linear(self.classifier).in_features
+
+    @property
+    def weight(self) -> torch.nn.Parameter:
+        return first_linear(self.classifier).weight
+
+    @property
+    def bias(self) -> torch.nn.Parameter | None:
+        return first_linear(self.classifier).bias
+
+    def forward(self, features: torch.Tensor, context: torch.Tensor, batch_size: int, calls: int) -> torch.Tensor:
+        if tuple(features.shape) != (batch_size * calls, self.feature_dim):
+            raise ValueError(f"Expected native features shaped {(batch_size * calls, self.feature_dim)}, got {tuple(features.shape)}.")
+        if tuple(context.shape) != (batch_size, self.context_dim):
+            raise ValueError(f"Expected graph context shaped {(batch_size, self.context_dim)}, got {tuple(context.shape)}.")
+        repeated_context = context.repeat_interleave(calls, dim=0)
+        if self.feature_layout == "sequence":
+            step_features = features.view(batch_size * calls, self.native_sequence_len, -1)
+            head_input = torch.cat([step_features, repeated_context.unsqueeze(1).expand(-1, self.native_sequence_len, -1)], dim=-1)
+            logits = self.classifier(head_input)
+        else:
+            logits = self.classifier(torch.cat([features, repeated_context], dim=-1))
+        logits = logits.view(batch_size, calls * self.native_sequence_len, self.n_classes)
+        if self.prediction_indices is not None:
+            indices = torch.as_tensor(self.prediction_indices, device=logits.device)
+            logits = logits.index_select(1, indices)
+        expected = (batch_size, self.graph_sequence_len, self.n_classes)
+        if tuple(logits.shape) != expected:
+            raise ValueError(f"Expanded native head produced logits shaped {tuple(logits.shape)}, expected {expected}.")
+        return logits
+
+
 class ModelGraphClassifier(BaseModel, ClassifierModel):
     """Compose node models from either one shared tensor or paired native inputs."""
 
@@ -303,14 +400,17 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
         method: str,
         edges: list[tuple[str, str]] | None = None,
         message_dim: int = 8,
+        context_init_std: float = 0.005,
         preprocessors: list[torch.nn.Module] | None = None,
     ):
         super().__init__(preprocessors=preprocessors)
         if method not in {"probability", "latent", "sei"}:
             raise ValueError("method must be 'probability', 'latent', or 'sei'.")
-
         self.method = method
         self.message_dim = int(message_dim)
+        self.context_init_std = float(context_init_std)
+        if self.context_init_std < 0:
+            raise ValueError("context_init_std must be non-negative.")
         self.node_names = list(nodes)
         self.models = torch.nn.ModuleDict({name: node.model for name, node in nodes.items()})
         self.node_outputs = {name: node.outputs for name, node in nodes.items()}
@@ -330,6 +430,10 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
             if isinstance(node.model, EmbeddingModel):
                 calls = len(offsets) if offsets is not None else 1
                 self.feature_dims[name] = int(node.model.feature_dim()) * calls
+            else:
+                raise TypeError(f"Graph node '{name}' must implement EmbeddingModel so its native head can be reused.")
+            if len(node.outputs) != 1 or set(node.outputs) != set(node.native_outputs):
+                raise ValueError(f"Graph node '{name}' must own exactly one matching native and graph task.")
             for task in node.outputs:
                 if task in task_owners:
                     raise ValueError(f"Output task '{task}' is owned by both '{task_owners[task]}' and '{name}'.")
@@ -344,7 +448,7 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
             self.parents[target].append(source)
         self.node_order = topological_order(self.node_names, self.edges)
 
-        self.state_dims, head_dims = self.build_dimensions()
+        self.state_dims, context_dims = self.build_dimensions()
         self.interfaces = torch.nn.ModuleDict()
         if self.method == "sei":
             for source, target in self.edges:
@@ -356,8 +460,12 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
 
         self.heads = torch.nn.ModuleDict()
         for task, owner in self.task_owners.items():
-            config = self.node_outputs[owner][task]
-            self.heads[task] = torch.nn.Linear(head_dims[owner], config["sequence_len"] * len(config["classes"]))
+            native = self.native_outputs[owner][task]
+            graph = self.node_outputs[owner][task]
+            if native["classes"] != graph["classes"]:
+                raise ValueError(f"Native and graph class order differs for node '{owner}'.")
+            indices = None if self.prediction_indices[owner] is None else self.prediction_indices[owner][task]
+            self.heads[task] = ExpandedHead(model_classification_head(self.models[owner]), feature_dim=int(self.models[owner].feature_dim()), context_dim=context_dims[owner], native_output=native, graph_output=graph, prediction_indices=indices, context_init_std=self.context_init_std)
 
         self.train(self.training)
 
@@ -371,24 +479,19 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
             name: sum(config["sequence_len"] * len(config["classes"]) for config in outputs.values())
             for name, outputs in self.node_outputs.items()
         }
-        native_output_dims = {
-            name: sum(config["sequence_len"] * len(config["classes"]) for config in outputs.values())
-            for name, outputs in self.native_outputs.items()
-        }
         state_dims = {}
-        head_dims = {}
+        context_dims = {}
         for name in self.node_order:
             if self.method == "probability":
-                local_dim = graph_output_dims[name] if self.prediction_indices[name] is not None else native_output_dims[name]
-                head_dims[name] = local_dim + sum(graph_output_dims[parent] for parent in self.parents[name])
+                context_dims[name] = sum(graph_output_dims[parent] for parent in self.parents[name])
                 state_dims[name] = graph_output_dims[name]
             elif self.method == "latent":
+                context_dims[name] = sum(state_dims[parent] for parent in self.parents[name])
                 state_dims[name] = self.feature_dims[name] + sum(state_dims[parent] for parent in self.parents[name])
-                head_dims[name] = state_dims[name]
             else:
+                context_dims[name] = self.message_dim * len(self.parents[name])
                 state_dims[name] = self.feature_dims[name] + self.message_dim * len(self.parents[name])
-                head_dims[name] = state_dims[name]
-        return state_dims, head_dims
+        return state_dims, context_dims
 
     def communication_scalars(self) -> int:
         """Return the number of scalar values transmitted across all graph edges per window."""
@@ -425,40 +528,47 @@ class ModelGraphClassifier(BaseModel, ClassifierModel):
             parts.append(torch.softmax(value, dim=-1).flatten(start_dim=1))
         return torch.cat(parts, dim=1)
 
-    def task_logits(self, name: str, state: torch.Tensor) -> dict[str, torch.Tensor]:
+    def task_logits(self, name: str, features: torch.Tensor, context: torch.Tensor, batch_size: int, calls: int) -> dict[str, torch.Tensor]:
         outputs = {}
-        for task, config in self.node_outputs[name].items():
-            logits = self.heads[task](state)
-            outputs[task] = logits.view(state.shape[0], config["sequence_len"], len(config["classes"]))
+        for task in self.node_outputs[name]:
+            outputs[task] = self.heads[task](features, context, batch_size, calls)
         return outputs
 
     def compute(self, x: torch.Tensor | Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         base_states = {}
+        features_by_node = {}
+        shapes_by_node = {}
         for name in self.node_names:
             value = x[name] if isinstance(x, Mapping) else x
-            if self.method == "probability":
-                base_states[name] = self.aligned_probabilities(name, value) if self.prediction_indices[name] is not None else self.probabilities(self.models[name](value), self.native_outputs[name])
+            if self.input_offsets[name] is None:
+                batch_size, calls = value.shape[0], 1
+                features = self.models[name].features(value)
             else:
-                if self.input_offsets[name] is None:
-                    base_states[name] = self.models[name].features(value).flatten(start_dim=1)
-                else:
-                    batch_size, calls = value.shape[:2]
-                    base_states[name] = self.models[name].features(value.flatten(0, 1)).reshape(batch_size, calls, -1).flatten(start_dim=1)
+                batch_size, calls = value.shape[:2]
+                features = self.models[name].features(value.flatten(0, 1))
+            features_by_node[name] = features
+            shapes_by_node[name] = (batch_size, calls)
+            base_states[name] = features.reshape(batch_size, calls, -1).flatten(start_dim=1)
 
         states = {}
         outputs = {}
         for name in self.node_order:
             if self.method == "probability":
-                head_state = torch.cat([base_states[name], *(states[parent] for parent in self.parents[name])], dim=1)
-                node_logits = self.task_logits(name, head_state)
+                context = torch.cat([states[parent] for parent in self.parents[name]], dim=1) if self.parents[name] else base_states[name].new_empty((base_states[name].shape[0], 0))
+                batch_size, calls = shapes_by_node[name]
+                node_logits = self.task_logits(name, features_by_node[name], context, batch_size, calls)
                 states[name] = self.probabilities(node_logits, self.node_outputs[name])
             elif self.method == "latent":
-                states[name] = torch.cat([base_states[name], *(states[parent] for parent in self.parents[name])], dim=1)
-                node_logits = self.task_logits(name, states[name])
+                context = torch.cat([states[parent] for parent in self.parents[name]], dim=1) if self.parents[name] else base_states[name].new_empty((base_states[name].shape[0], 0))
+                states[name] = torch.cat([base_states[name], context], dim=1)
+                batch_size, calls = shapes_by_node[name]
+                node_logits = self.task_logits(name, features_by_node[name], context, batch_size, calls)
             else:
                 messages = [self.interfaces[edge_name(parent, name)](states[parent]) for parent in self.parents[name]]
-                states[name] = torch.cat([base_states[name], *messages], dim=1)
-                node_logits = self.task_logits(name, states[name])
+                context = torch.cat(messages, dim=1) if messages else base_states[name].new_empty((base_states[name].shape[0], 0))
+                states[name] = torch.cat([base_states[name], context], dim=1)
+                batch_size, calls = shapes_by_node[name]
+                node_logits = self.task_logits(name, features_by_node[name], context, batch_size, calls)
             outputs.update(node_logits)
         return outputs
 

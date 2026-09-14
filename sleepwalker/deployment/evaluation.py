@@ -3,6 +3,7 @@
 import copy
 from functools import partial
 import json
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
@@ -17,6 +18,32 @@ from sleepwalker.trainer.utils.disk import NumpyEncoder
 from sleepwalker.trainer.utils.splits import fold_names, load_files
 from sleepwalker.trainer.utils.targets import normalize_multitask_config, prepare_multitask_target, prepare_single_target
 from sleepwalker.utils import logger
+
+
+def write_prediction_feather(path: str | Path, predictions: pd.DataFrame) -> None:
+    """Write one raw prediction table to Feather."""
+    required = {"patient", "task", "time"}
+    missing = sorted(required - set(predictions.columns))
+    if missing:
+        raise ValueError(f"Prediction table is missing Feather columns {missing}.")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Writing {len(predictions):,} prediction rows to {path}.")
+    predictions.to_feather(path, compression="zstd")
+    logger.info(f"Wrote prediction file {path} ({path.stat().st_size / 1024**3:.2f} GiB).")
+
+
+def read_prediction_feather(path: str | Path, patients: list[str] | None = None) -> pd.DataFrame:
+    """Read a raw prediction table, optionally retaining selected patients."""
+    predictions = pd.read_feather(path)
+    if patients is None:
+        return predictions
+    selected = set(map(str, patients))
+    available = set(predictions["patient"].astype(str))
+    missing = sorted(selected - available)
+    if missing:
+        raise KeyError(f"Prediction table is missing patients {missing[:5]}.")
+    return predictions.loc[predictions["patient"].astype(str).isin(selected)].reset_index(drop=True)
 
 
 def package_fold(package: PackagedModel) -> str | None:
@@ -186,13 +213,15 @@ def expected_windows_by_patient(dataset) -> dict[str, int]:
     return {str(file.path): int(upper - lower) for file, lower, upper in zip(dataset.edf_files, dataset.lower_bounds, dataset.upper_bounds)}
 
 
-def predict_package(package: PackagedModel, data: Mapping[str, Any], test: Mapping[str, Any], *, device: str, seed: int, progress_label: str) -> tuple[pd.DataFrame, dict[str, dict], dict[str, pd.Timedelta], list[str]]:
+def predict_package(package: PackagedModel, data: Mapping[str, Any], test: Mapping[str, Any], *, device: str, seed: int, progress_label: str, prediction_output: str | Path | None = None) -> tuple[pd.DataFrame, dict[str, dict], dict[str, pd.Timedelta], list[str]]:
     dataset, patients, _ = prepare_dataset(package, data)
     dataset.initialize(patients, num_workers=int(data.get("num_workers", 4)), strict=bool(data.get("strict", False)))
     if dataset.get_n_patients() == 0 or len(dataset) == 0:
         raise ValueError(f"Package '{package.name}' produced no evaluable windows.")
     expected = expected_windows_by_patient(dataset)
     predictions, received = package.predict_dataset(dataset, batch_size=int(test.get("batch_size", 64)), num_workers=int(test.get("num_workers_dataloader", 0)), n_repeat=1, device=device, seed=seed, rejection_strategy="none", allow_preprocessing_override=True, progress=True, progress_label=progress_label, return_received_windows=True)
+    if prediction_output is not None:
+        write_prediction_feather(prediction_output, predictions)
     coverage = {}
     for patient in patients:
         patient = str(patient)

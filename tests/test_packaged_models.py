@@ -7,7 +7,7 @@ from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.models.PackagedClassifierModel import PackagedClassifierModel
 from sleepwalker.models.PackagedEmbeddingModel import PackagedEmbeddingModel
 from sleepwalker.models.PackagedSequenceClassifierModel import PackagedSequenceClassifierModel
-from tools.foundation_models import SleepFMClinicalEncoder, trace_encoder
+from sleepwalker.cli.foundation_models import SleepFMClinicalEncoder, trace_encoder
 
 
 class WindowEmbedding(BaseModel, EmbeddingModel):

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from sleepwalker.datasets import Ruhrlandklinik
+from sleepwalker.datasets.Ruhrlandklinik import Ruhrlandklinik
 from sleepwalker.datasets.Ruhrlandklinik import get_channels
 
 

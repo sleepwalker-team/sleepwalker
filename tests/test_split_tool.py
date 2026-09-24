@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 import sys
 
 import pytest
 import yaml
 
+import sleepwalker.cli.split as split_tool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_split_tool():
-    spec = importlib.util.spec_from_file_location("sleepwalker_split_tool", REPO_ROOT / "tools" / "split.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return split_tool
 
 
 def test_holdout_keeps_subject_sessions_together():

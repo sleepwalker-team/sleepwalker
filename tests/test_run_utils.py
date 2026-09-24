@@ -1,9 +1,4 @@
-from pathlib import Path
-import sys
-
 import pandas as pd
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sleepwalker.trainer.utils.filtering import filter_patients_by_sleep_time
 from sleepwalker.trainer.utils.splits import combine_datasets, load_split

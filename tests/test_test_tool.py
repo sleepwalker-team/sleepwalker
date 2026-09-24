@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -10,14 +9,14 @@ import pytest
 import torch
 import yaml
 
+import sleepwalker.cli.evaluate as evaluate_tool
 from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel
 from sleepwalker import prediction_transforms
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
-from iclr2026.pipeline import pair_datasets
-from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier
+from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier, pair_datasets
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,11 +36,7 @@ class MeanClassifier(BaseModel, ClassifierModel):
 
 
 def load_test_tool():
-    spec = importlib.util.spec_from_file_location("sleepwalker_evaluate_tool", REPO_ROOT / "tools" / "evaluate.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return evaluate_tool
 
 
 def make_package():
@@ -57,25 +52,6 @@ def make_package():
 def write_unsplit_manifest(path: Path, files: list[str]) -> Path:
     path.write_text(yaml.safe_dump({"files": files}), encoding="utf-8")
     return path
-
-
-def test_paper_evaluation_configs_are_valid():
-    test_tool = load_test_tool()
-    paths = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml"))
-    tasks = {"sleep", "arousal", "breathing", "desaturation"}
-    expected = {
-        *(f"{task}_{model}" for task in tasks for model in ("sleepwalker", "osf")),
-        *(f"{task}_sleepfm" for task in tasks),
-    }
-
-    assert {path.stem for path in paths} == expected
-    for path in paths:
-        config = test_tool.read_config(path)
-        assert isinstance(config["data"], dict)
-        assert config["data"]["label"] == "HSP-test"
-        assert "channel_catalog" not in str(config)
-        assert "source" not in str(config)
-        assert test_tool.build_analyses(config["analyses"])
 
 
 def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path):

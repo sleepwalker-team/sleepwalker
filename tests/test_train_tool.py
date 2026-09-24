@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +9,7 @@ import torch
 import yaml
 
 import sleepwalker.datasets.HSP as hsp_dataset
+import sleepwalker.cli.train as train_tool
 from sleepwalker.datasets import ChannelConfig
 from sleepwalker.training.callbacks import prepare_patient_events
 from sleepwalker.training import files as training_files
@@ -19,14 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_train_tool():
-    spec = importlib.util.spec_from_file_location(
-        "sleepwalker_train_tool",
-        REPO_ROOT / "tools" / "train.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return train_tool
 
 
 def dataset_context(dataset):
@@ -64,25 +57,6 @@ def test_active_training_component_graphs_construct():
         context = dataset_context(datasets[0])
         train_tool.build_component(config["model"], context)
         build_trainer(train_tool, config["trainer"], context)
-
-
-def test_multitask_full_uses_expert_sequence_contracts():
-    train_tool = load_train_tool()
-    config = train_tool.read_yaml(REPO_ROOT / "iclr2026" / "configs" / "experts" / "train" / "multitask_sleepwalker.yml")
-    task_blocks = [
-        config["data"]["prepare_target"]["task_config"],
-        config["trainer"]["task_config"],
-    ]
-
-    assert task_blocks[0] == task_blocks[1]
-    assert "target_resolution" not in config["data"]
-    assert {task: (cfg["sequence_len"], cfg["target_resolution"]) for task, cfg in task_blocks[0].items()} == {
-        "sleep": (1, "30s"),
-        "arousal": (40, "1s"),
-        "breathing": (8, "5s"),
-        "desaturation": (8, "10s"),
-    }
-    assert "condition_task" not in config["trainer"]
 
 
 def test_read_yaml_parses_scientific_notation_without_decimal_point(tmp_path):

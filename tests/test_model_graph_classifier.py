@@ -1,3 +1,4 @@
+import pickle
 from pathlib import Path
 
 import pandas as pd
@@ -9,8 +10,7 @@ from sleepwalker.datasets.SyntheticDataset import SyntheticDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel, load_packaged_model
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
-from iclr2026.pipeline import pair_datasets
-from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier, PairedDataset, load_graph_node
+from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier, PairedDataset, load_graph_node, pair_datasets
 
 
 DATA = Path(__file__).parent / "data"
@@ -26,8 +26,10 @@ class DummyExpert(BaseModel, EmbeddingModel, ClassifierModel):
         self.projection = torch.nn.Linear(n_channels, feature_dim)
         self.head = torch.nn.Linear(feature_dim, sequence_len * len(classes))
         self.last_input = None
+        self.encode_calls = 0
 
     def encode(self, x):
+        self.encode_calls += 1
         self.last_input = x.detach().clone()
         return self.projection(x.mean(dim=1))
 
@@ -90,6 +92,37 @@ def test_graph_classifier_routes_native_windows_and_returns_all_tasks(method):
     model.train()
     assert not model.models["sleep"].training
     assert not model.models["arousal"].training
+
+
+def test_residual_sei_starts_as_exact_native_experts_with_one_encode_call():
+    nodes = make_nodes()
+    residual = ModelGraphClassifier(nodes=nodes, method="sei", edges=[("sleep", "arousal")], message_dim=2, residual_on=True)
+    x = {"sleep": torch.randn(3, 4, 2), "arousal": torch.randn(3, 2, 1)}
+    expected = {"sleep": nodes["sleep"].model(x["sleep"]), "arousal": nodes["arousal"].model(x["arousal"])}
+    for node in nodes.values():
+        node.model.encode_calls = 0
+
+    actual = residual(x)
+
+    assert all(torch.equal(actual[task], expected[task]) for task in expected)
+    assert all(torch.count_nonzero(parameter) == 0 for parameter in residual.heads.parameters())
+    assert all(node.model.encode_calls == 1 for node in nodes.values())
+    assert residual.communication_scalars() == 2
+
+
+def test_residual_on_requires_sei():
+    with pytest.raises(ValueError, match="only for method='sei'"):
+        ModelGraphClassifier(nodes=make_nodes(), method="probability", edges=[("sleep", "arousal")], residual_on=True)
+
+
+def test_graphs_saved_before_residual_option_load_with_residual_disabled():
+    model = ModelGraphClassifier(nodes=make_nodes(), method="sei", edges=[("sleep", "arousal")])
+    del model.residual_on
+
+    restored = pickle.loads(pickle.dumps(model))
+
+    assert restored.residual_on is False
+    assert set(restored({"sleep": torch.randn(2, 4, 2), "arousal": torch.randn(2, 2, 1)})) == {"sleep", "arousal"}
 
 
 def test_graph_is_acyclic_and_unknown_nodes_fail_naturally():

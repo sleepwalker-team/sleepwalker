@@ -1,0 +1,67 @@
+# Pipeline tutorial, not a benchmark configuration.
+seed: 17
+
+data:
+  name: sleepwalker.datasets.SleepEDFx.SleepEDFx
+  channels:
+    - logical_name: EEG Fpz-Cz
+      physical_names: [EEG Fpz-Cz]
+      normalizer:
+        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+        fs: 100
+      unit: uV
+  sample_frequency: 100
+  event_mapping:
+    sleep stage w: wake
+    sleep stage 1: n1
+    sleep stage 2: n2
+    sleep stage 3: n3
+    sleep stage 4: n3
+    sleep stage r: rem
+  total_input: 30s
+  stride: 30s
+  assume_units_if_missing: false
+  output_classes: &classes [wake, n1, n2, n3, rem]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [n1, n2, n3, rem]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 30s
+    target_classes: *classes
+  patient_filter:
+    name: sleepwalker.training.files.filter_edf_files
+  files:
+    train:
+      name: sleepwalker.datasets.utils.get_edf_files_in_repo
+      root: /path/to/sleep-edfx/SC
+    validation_fraction: 0.1
+    test_fraction: 0.2
+  label: sleep-edfx
+  num_workers: 2
+
+model:
+  name: sleepwalker.models.AttnSleep.AttnSleep
+
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  target_resolution: 30s
+  epochs: 5
+  optimizer:
+    name: torch.optim.Adam
+    lr: 0.001
+  loss_function: torch.nn.functional.cross_entropy
+  early_stopping: 3
+
+run:
+  experiment_name: sleep-edfx-attnsleep
+  model_name: attnsleep
+  batch_size: 32
+  n_samples: 4096
+  n_samples_test: 1024
+  num_workers_dataloader: 2
+  test_repeats: [1]
+  use_mlflow: false
+  log_path: results/tutorial
+  expert_task: sleep
+  package_path: artifacts/sleep-edfx-attnsleep

@@ -29,28 +29,34 @@ data:
     n3: n3
     rem: rem
   total_input: 300s
-  target_resolution: 150s
-  stride: 30s
+  stride: 300s
   assume_units_if_missing: true
   output_classes: &classes [wake, n1, n2, n3, rem]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 300s
+    target_offset: 0s
     target_classes: *classes
-    sequence_len: 5
+    sequence_len: 10
   files: iclr2026/configs/hsp.yml
   label: HSP
   num_workers: 16
 
 model:
-  name: sleepwalker.models.PackagedClassifierModel.PackagedClassifierModel
+  name: sleepwalker.models.PackagedSequenceClassifierModel.PackagedSequenceClassifierModel
   package: /path/to/packages/sleepfm
+  token_count: 60
+  token_dim: 128
+  modality_count: 4
   head: linear
   freeze_encoder: true
 
 trainer:
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  target_resolution: 300s
   epochs: 30
-  sequence_len: 5
+  sequence_len: 10
+  target_offset: 0s
   optimizer:
     name: torch.optim.AdamW
     lr: 1e-3

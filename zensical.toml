@@ -1,0 +1,88 @@
+[project]
+site_name = "Sleepwalker"
+site_url = "https://sleepwalker-team.github.io/sleepwalker/"
+site_description = "Train, package, and run sleep models on EDF recordings"
+site_author = "Sleepwalker contributors"
+repo_url = "https://github.com/sleepwalker-team/sleepwalker"
+docs_dir = "docs"
+site_dir = "site"
+extra_css = ["stylesheets/extra.css"]
+extra_javascript = [
+  "javascripts/mathjax.js",
+  "javascripts/mermaid-zoom.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js",
+]
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started/index.md" },
+  { "How to" = [
+    "how-to/index.md",
+    { "Load and prepare data" = "how-to/data.md" },
+    { "Models: classification and embeddings" = "how-to/models.md" },
+    { "Train and export a sleep-staging model" = "how-to/train-sleep-staging.md" },
+    { "Train a multiclass model" = "how-to/train-multiclass.md" },
+    { "Train with multiple labels" = "how-to/multilabel.md" },
+    { "Train from the CLI" = "how-to/train-from-cli.md" },
+    { "RunCfg and the CLI" = "how-to/runcfg-cli.md" },
+    { "Model packages" = "how-to/packaged-model.md" },
+    { "Import and export model packages" = "how-to/package-import-export.md" },
+    { "Predict sleep stages" = "how-to/predict-patient.md" },
+    { "Extract embeddings" = "how-to/extract-embeddings.md" },
+    { "Inspect a model package" = "how-to/inspect-package.md" },
+    { "Tune data loading performance" = "how-to/performance.md" },
+    { "How Sleepwalker works" = "how-to/overview.md" },
+    { "Troubleshoot EDF and package errors" = "how-to/troubleshoot.md" },
+  ] },
+  { "Reference" = [
+    { "Python API" = "reference/api.md" },
+    { "Datasets" = "reference/datasets.md" },
+    { "Models" = "reference/models.md" },
+    { "Trainers" = "reference/trainers.md" },
+    { "Data pipeline" = "reference/pipeline.md" },
+    { "Package manifest" = "reference/package-manifest.md" },
+    { "Dataset internals" = "reference/loading.md" },
+  ] },
+  { "About" = [
+    { "People" = "about/people.md" },
+    { "Cite us" = "about/cite.md" },
+    { "Contributing" = "about/contributing.md" },
+  ] },
+]
+
+[project.theme]
+logo = "assets/images/logo.png"
+favicon = "assets/images/logo.png"
+palette = { scheme = "slate", primary = "custom", accent = "custom" }
+features = [
+  "content.action.edit",
+  "content.action.view",
+  "content.code.annotate",
+  "navigation.indexes",
+  "navigation.path",
+  "navigation.top",
+  "search.highlight",
+  "toc.follow",
+]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+docstring_section_style = "spacy"
+merge_init_into_class = false
+show_root_heading = true
+show_root_full_path = false
+show_source = true
+show_signature_annotations = true
+signature_crossrefs = true
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+pymdownx.details = {}
+pymdownx.highlight = { anchor_linenums = true }
+pymdownx.arithmatex = { generic = true }
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]

@@ -1,3 +1,5 @@
+"""LEGACY RESEARCH SCRIPT: retained for extraction or removal review; not part of the public Sleepwalker API."""
+
 import os 
 import torch
 import tqdm

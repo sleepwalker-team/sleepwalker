@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sleepwalker"
+version = "0.1.0"
+description = "Research-first building blocks for training and deploying sleep models on EDF recordings"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Sebastian Buschjäger" },
+  { name = "Matthias Jakobs" },
+]
+dependencies = [
+  "cloudpickle",
+  "einops",
+  "pyarrow",
+  "matplotlib",
+  "mne",
+  "numpy",
+  "pandas",
+  "pyedflib",
+  "PyYAML",
+  "requests",
+  "scikit-learn",
+  "scipy",
+  "torch",
+  "torchinfo",
+  "tqdm",
+  "xmltodict",
+]
+
+[project.optional-dependencies]
+datasets = ["openpyxl", "rarfile", "xlrd"]
+foundation = ["lightning", "timm", "torchvision", "transformers"]
+tracking = ["mlflow", "wandb"]
+docs = ["zensical==0.0.60", "mkdocstrings-python==2.0.8"]
+dev = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/sleepwalker-team/sleepwalker"
+Documentation = "https://sleepwalker-team.github.io/sleepwalker/"
+
+[project.scripts]
+sleepwalker = "sleepwalker.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

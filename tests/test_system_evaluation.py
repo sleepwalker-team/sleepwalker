@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from sleepwalker.deployment.evaluation import condition_endpoint, read_prediction_feather, validate_dependencies, write_prediction_feather
-from tools.evaluate_system import analyze_patient
+from sleepwalker.cli.evaluate_system import analyze_patient
 
 
 TASKS = ("sleep", "arousal", "breathing", "desaturation")

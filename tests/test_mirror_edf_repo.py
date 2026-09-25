@@ -9,7 +9,7 @@ import numpy as np
 import pyedflib
 import pytest
 
-from tools import mirror_edf_repo
+from sleepwalker.cli import mirror_edf_repo
 
 
 def channel_config() -> list[mirror_edf_repo.ChannelConfig]:

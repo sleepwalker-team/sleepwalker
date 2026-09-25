@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +9,7 @@ import torch
 import yaml
 
 import sleepwalker.datasets.HSP as hsp_dataset
+import sleepwalker.cli.train as train_tool
 from sleepwalker.datasets import ChannelConfig
 from sleepwalker.training.callbacks import prepare_patient_events
 from sleepwalker.training import files as training_files
@@ -19,14 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_train_tool():
-    spec = importlib.util.spec_from_file_location(
-        "sleepwalker_train_tool",
-        REPO_ROOT / "tools" / "train.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return train_tool
 
 
 def dataset_context(dataset):

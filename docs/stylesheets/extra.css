@@ -1,0 +1,271 @@
+:root {
+  --sleepwalker-bg: #1a2b3d;
+  --sleepwalker-bg-darker: #0c172f;
+  --sleepwalker-panel: #1e3a5f;
+  --sleepwalker-header: #253544;
+  --sleepwalker-accent: #64aaff;
+  --sleepwalker-text: #f0f4ff;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--sleepwalker-header);
+  --md-primary-fg-color--light: #354b5d;
+  --md-primary-fg-color--dark: var(--sleepwalker-bg-darker);
+  --md-primary-bg-color: var(--sleepwalker-text);
+  --md-accent-fg-color: var(--sleepwalker-accent);
+  --md-accent-fg-color--transparent: rgba(100, 170, 255, 0.14);
+  --md-default-bg-color: var(--sleepwalker-bg);
+  --md-default-bg-color--light: rgba(26, 43, 61, 0.72);
+  --md-default-bg-color--lighter: rgba(26, 43, 61, 0.38);
+  --md-default-bg-color--lightest: rgba(26, 43, 61, 0.16);
+  --md-default-fg-color: var(--sleepwalker-text);
+  --md-default-fg-color--light: rgba(240, 244, 255, 0.72);
+  --md-default-fg-color--lighter: rgba(240, 244, 255, 0.42);
+  --md-default-fg-color--lightest: rgba(240, 244, 255, 0.14);
+  --md-code-bg-color: var(--sleepwalker-bg-darker);
+  --md-code-fg-color: var(--sleepwalker-text);
+  --md-typeset-a-color: var(--sleepwalker-accent);
+}
+
+.md-header,
+.md-tabs,
+.md-footer {
+  background-color: var(--sleepwalker-header);
+}
+
+.md-header__button.md-logo img,
+.md-nav__button.md-logo img {
+  width: 2rem;
+  height: 2rem;
+  padding: 0.08rem;
+  background: white;
+  border-radius: 0.45rem;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: var(--sleepwalker-text);
+  font-weight: 700;
+}
+
+.md-typeset table:not([class]) {
+  background-color: var(--sleepwalker-bg-darker);
+}
+
+.md-typeset img[src*="assets/figures"] {
+  display: block;
+  margin: 1.5rem auto 0.5rem;
+  border-radius: 0.8rem;
+  box-shadow: 0 0.6rem 1.4rem rgba(0, 0, 0, 0.2);
+}
+
+.people-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2.5rem;
+}
+
+.person-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.2rem;
+  color: var(--sleepwalker-text) !important;
+  text-align: center;
+  background: var(--sleepwalker-panel);
+  border-radius: 1rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.person-card:hover {
+  color: var(--sleepwalker-text) !important;
+  transform: translateY(-4px);
+  box-shadow: 0 0.7rem 1.4rem rgba(0, 0, 0, 0.24);
+}
+
+.person-card img {
+  width: 7rem;
+  height: 7rem;
+  margin-bottom: 0.8rem;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.person-card strong,
+.person-card span {
+  display: block;
+}
+
+.person-card span {
+  margin-top: 0.3rem;
+  color: rgba(240, 244, 255, 0.7);
+  font-size: 0.78rem;
+}
+
+.sponsor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+  align-items: center;
+  margin: 1.5rem 0;
+}
+
+.sponsor-card {
+  display: flex;
+  min-height: 7rem;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: white;
+  border-radius: 1rem;
+}
+
+.sponsor-card img {
+  width: auto;
+  max-width: 100%;
+  max-height: 5rem;
+}
+
+@media screen and (max-width: 44.984375em) {
+  .people-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Mermaid diagrams: fill the content width and allow click-to-fullscreen zoom.
+   The SVG lives in a closed shadow root, so we style the host `div.mermaid`. */
+.mermaid-zoom {
+  position: relative;
+  margin: 1.5rem 0;
+}
+
+.mermaid-zoom > .mermaid {
+  width: 100%;
+  cursor: zoom-in;
+}
+
+.mermaid-zoom__btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--sleepwalker-text);
+  background: rgba(12, 23, 47, 0.72);
+  border: 1px solid rgba(100, 170, 255, 0.35);
+  border-radius: 0.5rem;
+  cursor: zoom-in;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.mermaid-zoom:hover .mermaid-zoom__btn,
+.mermaid-zoom__btn:focus-visible {
+  opacity: 1;
+}
+
+.mermaid-zoom__btn:hover {
+  background: rgba(100, 170, 255, 0.28);
+}
+
+.mermaid-zoom:fullscreen {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem;
+  background: var(--sleepwalker-bg-darker);
+  overflow: auto;
+}
+
+.mermaid-zoom:fullscreen > .mermaid {
+  cursor: zoom-out;
+}
+
+.mermaid-zoom:fullscreen .mermaid-zoom__btn {
+  position: fixed;
+  opacity: 1;
+}
+
+/* Landing page hero and feature cards. */
+.sw-hero {
+  text-align: center;
+  padding: 2.5rem 1rem 1.5rem;
+  background: linear-gradient(160deg, var(--sleepwalker-panel) 0%, var(--sleepwalker-bg) 100%);
+  border-radius: 1.2rem;
+  margin-bottom: 2rem;
+}
+
+.sw-hero__title {
+  font-size: 2.2rem;
+  font-weight: 800;
+  margin: 0 0 0.75rem;
+  letter-spacing: -0.01em;
+}
+
+.sw-hero__subtitle {
+  max-width: 46rem;
+  margin: 0 auto 1.5rem;
+  font-size: 1.1rem;
+  color: var(--md-default-fg-color--light);
+}
+
+.sw-hero__cta {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.sw-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2rem;
+}
+
+.sw-card {
+  display: block;
+  padding: 1.4rem;
+  color: var(--sleepwalker-text) !important;
+  background: var(--sleepwalker-panel);
+  border: 1px solid rgba(100, 170, 255, 0.12);
+  border-radius: 1rem;
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.sw-card * {
+  text-decoration: none;
+}
+
+.sw-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(100, 170, 255, 0.4);
+  box-shadow: 0 0.7rem 1.4rem rgba(0, 0, 0, 0.24);
+}
+
+.sw-card:hover h3 {
+  text-decoration: underline;
+}
+
+.sw-card__icon {
+  font-size: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.sw-card h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1.15rem;
+}
+
+.sw-card p {
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.9rem;
+}

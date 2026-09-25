@@ -1,4 +1,4 @@
-"""Prediction-table normalization used by analysis and deployment scripts."""
+"""LEGACY TRANSFORM: retained for test migration; not the PackagedModel prediction API."""
 
 from __future__ import annotations
 

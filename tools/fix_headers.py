@@ -1,5 +1,7 @@
 #!/bin/env python3
 
+"""LAB-LOCAL SCRIPT: hard-coded Ruhrland paths; retained for extraction or removal review."""
+
 import multiprocessing as mp
 from sleepwalker.utils import logger, suppress_stdout_logging
 from sleepwalker.core.signal import fix_edf_header

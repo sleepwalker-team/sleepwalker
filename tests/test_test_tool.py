@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -10,6 +9,7 @@ import pytest
 import torch
 import yaml
 
+import sleepwalker.cli.evaluate as evaluate_tool
 from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
@@ -42,11 +42,7 @@ class MeanClassifier(BaseModel, EmbeddingModel, ClassifierModel):
 
 
 def load_test_tool():
-    spec = importlib.util.spec_from_file_location("sleepwalker_evaluate_tool", REPO_ROOT / "tools" / "evaluate.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return evaluate_tool
 
 
 def make_package():

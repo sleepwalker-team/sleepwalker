@@ -2,13 +2,11 @@
 
 import os 
 import torch
-import tqdm
 import hashlib
 
 from dotenv import load_dotenv
 from os.path import join
 from functools import partial
-from pyedflib import EdfReader
 
 from sleepwalker.models.MaskedAutoencoder import MaskedAutoencoder
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
@@ -21,7 +19,7 @@ from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config
-from sleepwalker.utils import logger, MlflowSink, count_parameters
+from sleepwalker.utils import logger, WandbSink, count_parameters
 
 os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
@@ -262,6 +260,22 @@ def get_dataloader(train_ds, val_ds, test_ds):
 
     return train_loader, val_loader, test_loader
 
+def setup_wandb_metrics(sink):
+    sink.wandb.define_metric('batch_train_step')
+    sink.wandb.define_metric('batch_val_step')
+    sink.wandb.define_metric('batch/loss/train', step_metric='batch_train_step')
+    sink.wandb.define_metric('batch/loss/val', step_metric='batch_val_step')
+
+    sink.wandb.define_metric('epoch_step')
+    sink.wandb.define_metric('epoch/train/*', step_metric='epoch_step')
+    sink.wandb.define_metric('epoch/val/*', step_metric='epoch_step')
+
+    for task_name in task_config:
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_micro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_macro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/accuracy', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/coehns_kappa', step_metric='epoch_step')
+
 def main():
 
     train_ds, val_ds, test_ds = get_datasets()
@@ -269,14 +283,15 @@ def main():
 
     model = MaskedAutoencoder(
         groups=train_ds.channel_groups,
-        normalize=False,
     )
     print('Number of parameters:', count_parameters(model))
     model_hp = model.get_hyperparameters()
 
-    print('Tracking to MLFLOW instance', os.environ['MLFLOW_URL'])
-    logger.add_sink(MlflowSink(tracking_uri=os.environ['MLFLOW_URL'], experiment='debug', artifact_uri=None))
-    logger.start_run(run_name='testrun-full-nonormalize-10pPatients', params=model_hp)
+    print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
+    sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-ruhrland', artifact_uri=None)
+    logger.add_sink(sink)
+    logger.start_run(run_name='testrun', params=model_hp)
+    setup_wandb_metrics(sink)
 
     EPOCHS=31
     trainer = MaskedAutoencoderTrainer(

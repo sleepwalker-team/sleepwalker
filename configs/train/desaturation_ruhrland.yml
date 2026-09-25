@@ -32,7 +32,7 @@ data:
     rem: sleep
     entsättigung: desaturation
   total_input: 100s
-  target_resolution: 10s
+
   stride: 2s
   output_classes: [desaturation, no desaturation]
   prepare_patient:
@@ -40,6 +40,7 @@ data:
     keep_events: [sleep]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 10s
     target_classes: [desaturation, no desaturation]
     filters:
       - columns: [sleep]
@@ -76,6 +77,7 @@ model:
   norm: channel
   mlp_size: 256
 trainer:
+  target_resolution: 10s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 50
   optimizer:

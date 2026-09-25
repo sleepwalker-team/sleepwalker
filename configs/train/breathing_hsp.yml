@@ -34,7 +34,7 @@ data:
     mixed-apnea: apnea
     hypopnea: hypopnea
   total_input: 60s
-  target_resolution: 5s
+
   stride: 1s
   output_classes: [apnea, hypopnea, regular breathing]
   prepare_patient:
@@ -42,6 +42,7 @@ data:
     keep_events: [sleep]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 5s
     target_classes: [apnea, hypopnea, regular breathing]
     filters:
       - columns: [sleep]
@@ -75,6 +76,7 @@ model:
       lower_quantile: 0.1
       upper_quantile: 0.9
 trainer:
+  target_resolution: 5s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 20
   optimizer:

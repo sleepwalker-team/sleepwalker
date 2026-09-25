@@ -17,7 +17,7 @@ data:
       sleep stage 4: n3
       sleep stage r: rem
     total_input: 900s
-    target_resolution: 30s
+
     stride: 30s
     assume_units_if_missing: false
     output_classes: [wake, n1, n2, n3, rem]
@@ -26,6 +26,7 @@ data:
       keep_events: [n1, n2, n3, rem]
     prepare_target:
       name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+      target_resolution: 30s
       target_classes: [wake, n1, n2, n3, rem]
     patient_filter:
       name: sleepwalker.training.files.filter_edf_files
@@ -40,6 +41,7 @@ data:
 model:
   name: sleepwalker.models.SeqSleepNet.SeqSleepNet
 trainer:
+  target_resolution: 30s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 100
   optimizer:

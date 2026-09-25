@@ -25,7 +25,7 @@ data:
     n3: sleep
     rem: sleep
   total_input: 60s
-  target_resolution: 1s
+
   stride: 1s
   output_classes: [no_arousal, arousal]
   prepare_patient:
@@ -33,6 +33,7 @@ data:
     keep_events: [sleep]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 1s
     target_classes: [no_arousal, arousal]
   patient_filter:
     name: sleepwalker.training.files.filter_edf_files
@@ -61,6 +62,7 @@ model:
     - name: sleepwalker.training.callbacks.robust_scaler
       skip_first: 1
 trainer:
+  target_resolution: 1s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 35
   optimizer:

@@ -19,7 +19,7 @@ data:
       rem: sleep
       desaturation: desaturation
     total_input: 100s
-    target_resolution: 10s
+
     stride: 2s
     assume_units_if_missing: false
     output_classes: [desaturation, no desaturation]
@@ -28,6 +28,7 @@ data:
       keep_events: [sleep]
     prepare_target:
       name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+      target_resolution: 10s
       target_classes: [desaturation, no desaturation]
       percentage: 0.5
       filters:
@@ -67,6 +68,7 @@ model:
       lower_quantile: 0.1
       upper_quantile: 0.9
 trainer:
+  target_resolution: 10s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 20
   optimizer:

@@ -21,7 +21,7 @@ dependencies = [
   "matplotlib",
   "mne",
   "numpy",
-  "pandas",
+  "pandas>=2.2,<3",
   "pyedflib",
   "PyYAML",
   "requests",
@@ -38,7 +38,7 @@ datasets = ["openpyxl", "rarfile", "xlrd"]
 foundation = ["lightning", "timm", "torchvision", "transformers"]
 tracking = ["mlflow", "wandb"]
 docs = ["zensical==0.0.60", "mkdocstrings-python==2.0.8"]
-dev = ["pytest"]
+dev = ["pytest", "python-dotenv"]
 
 [project.urls]
 Repository = "https://github.com/sleepwalker-team/sleepwalker"

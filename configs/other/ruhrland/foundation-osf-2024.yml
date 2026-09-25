@@ -1,0 +1,41 @@
+label: Ruhrland-2024
+split:
+  file: results/iclr2026/other/manifests/ruhrland-2024.yml
+  fold: holdout
+  partition: test
+num_workers: 32
+strict: false
+dataset:
+  name: sleepwalker.datasets.Ruhrlandklinik.Ruhrlandklinik
+  return_nox: false
+  channels:
+  - {logical_name: ECG, physical_names: [ECG]}
+  - {logical_name: EMG_Chin, physical_names: [1-2, 1-F, 2-F]}
+  - {logical_name: EMG_LLeg, physical_names: [Left Leg]}
+  - {logical_name: EMG_RLeg, physical_names: [Right Leg]}
+  - {logical_name: ABD, physical_names: [Abdomen]}
+  - {logical_name: THX, physical_names: [Chest, Inductance Thora]}
+  - {logical_name: NP, physical_names: [Nasal Pressure, Airflow, RIP Flow]}
+  - {logical_name: SN, physical_names: [Snoring, Audio Volume, Audio Volume dB]}
+  - {logical_name: EOG_E1_A2, physical_names: [E1-M2, E1]}
+  - {logical_name: EOG_E2_A1, physical_names: [E2-M1, E2]}
+  - {logical_name: EEG_C3_A2, physical_names: [C3-M2, C3]}
+  - {logical_name: EEG_C4_A1, physical_names: [C4-M1, C4]}
+  group_sampling_strategy: first
+  event_mapping:
+    wach: wake
+    n1: n1
+    n2: n2
+    n3: n3
+    rem: rem
+    arousal: arousal
+    a. gemischt: apnea
+    a. obstruktiv: apnea
+    a. zentral: apnea
+    apnoe: apnea
+    h. obstruktiv: hypopnea
+    h. zentral: hypopnea
+    hypopnea-gemischt: hypopnea
+    hypopnoe: hypopnea
+    entsättigung: desaturation
+  remove_unmapped_events: true

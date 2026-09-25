@@ -136,37 +136,3 @@ class UnlabelledDataset(BaseDataset):
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Signal that unlabelled datasets do not provide event annotations."""
         raise ValueError("UnlabelledDataset does not provide labels.")
-
-    def get_item(self, file, start_date: pd.Timestamp):
-        """Build one inference sample without any target fields.
-
-        Args:
-            file: Prepared EDF descriptor from `BaseDataset.initialize`.
-            start_date: Window start timestamp.
-
-        Returns:
-            A sample dictionary containing at least `data`, `patient`, and
-            `time`, or `None` when `prepare_sample` rejects the window.
-        """
-        end_date = start_date + self.total_input
-        item = { "patient": file.path, "time": start_date }
-        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type)
-        self.apply_rereference(x_df)
-        file.apply_z_normalization(x_df)
-
-        if len(x_df) < self.get_timeseries_len():
-            freq = x_df.index.freq or pd.infer_freq(x_df.index)
-            n = self.get_timeseries_len() - len(x_df)
-            pad_idx = pd.date_range(start=x_df.index[-1] + freq, periods=n, freq=freq)
-            pad_df = pd.DataFrame([x_df.iloc[-1].values] * n, columns=x_df.columns, index=pad_idx)
-            x_df = pd.concat([x_df, pad_df])
-        elif len(x_df) > self.get_timeseries_len():
-            x_df = x_df.head(n=self.get_timeseries_len())
-
-        transformed_item = self.run_build_sample(item, x_df)
-        if transformed_item is None:
-            return None
-        item.update(transformed_item)
-        item.pop("target", None)
-        item.pop("target_extra", None)
-        return item

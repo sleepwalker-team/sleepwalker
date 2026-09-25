@@ -21,7 +21,6 @@ from functools import partial
 import multiprocessing
 import numbers
 import os
-import random
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, cast
 
@@ -32,7 +31,8 @@ import torch
 from torch.utils.data import Dataset, default_collate
 
 from sleepwalker.utils import logger
-from sleepwalker.core.signal import edf_to_df, read_edf_meta
+from sleepwalker.core.signal import edf_to_df, read_edf_meta, read_edf_native, resample_native_signals
+from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.normalizer import Normalizer
 
 
@@ -203,6 +203,7 @@ class EDFFile:
     channels: List[str]
     path: str
     start_date: pd.Timestamp
+    end_date: Optional[pd.Timestamp] = None
     start_offsets: Optional[np.ndarray] = None
     handle: Optional[pyedflib.EdfReader] = None
     length: int = 0
@@ -214,49 +215,78 @@ class EDFFile:
     unit_factors: Optional[dict[str, float]] = None
     z_statistics: Optional[dict[str, tuple[float, float]]] = None
 
-    def get_x(self, start_date:pd.Timestamp, end_date:pd.Timestamp, sample_frequency, resample_type, channels: Optional[Sequence[str]] = None):
-        """Load one signal window for the prepared patient.
+    def get_x(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency: float, resample_type: str, channels: Optional[Sequence[str]] = None, cache: Optional[EDFCache] = None) -> pd.DataFrame:
+        """Load and resample signals for one contiguous patient interval.
 
         Args:
-            start_date: Inclusive window start.
-            end_date: Inclusive or near-inclusive window end as passed to
-                ``edf_to_df``.
-            sample_frequency: Requested resampling frequency in Hz.
-            resample_type: Resampling mode forwarded to ``edf_to_df``.
+            start_date: Inclusive interval start.
+            end_date: Exclusive interval end.
+            channels: Prepared physical channels to load. Defaults to all
+                channels prepared for this file.
 
-        Returns:
-            A DataFrame indexed by timestamps and containing the configured
-            signal columns. Fixed dataset normalizers are applied column-wise
-            before returning.
+            sample_frequency: Target sampling frequency in Hz.
+            resample_type: Resampling method understood by
+                :func:`resample_native_signals`.
+            cache: Optional process-shared complete-recording cache.
         """
         requested_channels = self.channels if channels is None else list(channels)
         unknown_channels = sorted(set(requested_channels) - set(self.channels))
         if unknown_channels:
             raise ValueError(f"Requested channels not prepared for {self.path}: {unknown_channels}.")
-        if self.X is None:
-            x_df = edf_to_df(self.path, requested_channels, start_date, end_date, sample_frequency, resample_type, True)
-            if self.unit_factors:
-                for col, factor in self.unit_factors.items():
-                    if col in x_df.columns and factor != 1.0:
-                        x_df[col] = x_df[col] * factor
-            # TODO allow normalization after augmentation?  
-            return apply_normalizers(x_df, self.normalizers)
-        else:
-            return self.X.loc[start_date:end_date, requested_channels]
+        def load(interval_start, interval_end):
+            if self.X is None:
+                native = read_edf_native(self.path, requested_channels, interval_start, interval_end, verbose=True)
+            else:
+                if len(self.X.index) < 2:
+                    raise ValueError("A preloaded EDFFile requires at least two samples to infer its native frequency.")
+                periods = np.diff(self.X.index.asi8)
+                if not np.all(periods == periods[0]):
+                    raise ValueError("A preloaded EDFFile must have a uniform sampling frequency.")
+                frequency = 1e9 / float(periods[0])
+                native = {frequency: self.X.loc[interval_start:interval_end, requested_channels].copy()}
+            return resample_native_signals(native, requested_channels, interval_start, interval_end, sample_frequency, resample_type)
+
+        if cache is None:
+            return load(start_date, end_date)
+        if self.end_date is None:
+            raise ValueError(f"Cached EDF access requires an end timestamp for {self.path}.")
+        key = (str(self.path), tuple(requested_channels), int(self.start_date.value), int(self.end_date.value), float(sample_frequency), str(resample_type))
+        with cache.acquire(key, str(self.path), lambda: load(self.start_date, self.end_date)) as entry:
+            return entry.copy_window(start_date, end_date, requested_channels)
+
+    def apply_unit_conversion(self, data_df: pd.DataFrame) -> pd.DataFrame:
+        """Convert loaded physical channels to their configured units in place."""
+        for column, factor in dict(self.unit_factors or {}).items():
+            if column in data_df.columns and factor != 1.0:
+                data_df[column] = data_df[column] * factor
+        return data_df
 
     def apply_z_normalization(self, data_df: pd.DataFrame, channels: Optional[Sequence[str]] = None) -> pd.DataFrame:
         """Apply fixed full-recording z-score statistics in place."""
         if self.z_statistics is None:
             return data_df
         required_channels = list(self.z_statistics) if channels is None else list(channels)
+        if not required_channels:
+            return data_df
         missing = sorted(set(required_channels) - set(data_df.columns))
         if missing:
             raise ValueError(f"Missing channels required for recording z-normalization: {missing}.")
-        for col in required_channels:
-            if col not in self.z_statistics:
-                raise ValueError(f"Missing recording z-normalization statistics for channel '{col}'.")
-            mean, standard_deviation = self.z_statistics[col]
-            data_df[col] = (data_df[col] - mean) / standard_deviation
+        missing_statistics = sorted(set(required_channels) - set(self.z_statistics))
+        if missing_statistics:
+            raise ValueError(f"Missing recording z-normalization statistics for channels {missing_statistics}.")
+        means = np.asarray([self.z_statistics[channel][0] for channel in required_channels])
+        standard_deviations = np.asarray([self.z_statistics[channel][1] for channel in required_channels])
+        column_indices = [int(data_df.columns.get_loc(channel)) for channel in required_channels]
+        values = data_df.to_numpy(copy=False)
+        contiguous = column_indices == list(range(column_indices[0], column_indices[0] + len(column_indices)))
+        shares_data = np.shares_memory(values, data_df[required_channels[0]].to_numpy(copy=False))
+        if contiguous and shares_data:
+            selected = values[:, column_indices[0]:column_indices[0] + len(column_indices)]
+            selected -= means
+            selected /= standard_deviations
+        else:
+            for channel, mean, standard_deviation in zip(required_channels, means, standard_deviations):
+                data_df[channel] = (data_df[channel] - mean) / standard_deviation
         return data_df
     
     def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
@@ -791,6 +821,7 @@ class BaseDataset(Dataset, ABC):
         if self.shared_physical_channels and self.rereference:
             raise ValueError("Shared physical channels cannot be combined with rereferencing.")
         self.group_sampling_strategy = group_sampling_strategy
+        self.edf_cache: Optional[EDFCache] = None
 
         # Events/classes
         if event_mapping is not None:
@@ -846,6 +877,10 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         """Return the number of prepared patient recordings."""
         return len(self.edf_files)
+
+    def set_edf_cache(self, cache: Optional[EDFCache]) -> None:
+        """Use one loading-session cache for complete resampled recordings."""
+        self.edf_cache = cache
 
     def set_rejection_strategy(self, strategy: str) -> None:
         strategy = str(strategy)
@@ -1166,6 +1201,7 @@ class BaseDataset(Dataset, ABC):
                 path=edf_path,
                 X=None,
                 channels=artifacts["channels"],
+                end_date=artifacts["end"],
                 start_offsets=start_offsets,
                 length=n_items,
                 labels=EventIndex(label_df) if label_df is not None else None,
@@ -1261,6 +1297,7 @@ class BaseDataset(Dataset, ABC):
         num_workers: int = 4,
         *,
         strict: bool = False,
+        multiprocessing_start_method: Optional[str] = None,
     ) -> None:
         """Prepare patient metadata and build the sliding-window index.
 
@@ -1268,6 +1305,9 @@ class BaseDataset(Dataset, ABC):
             patients: EDF paths to include in the dataset.
             num_workers: Worker count used while calling
                 :meth:`prepare_patient`.
+            multiprocessing_start_method: Optional multiprocessing start
+                method. ``PairedDataset`` uses ``forkserver`` so workers do
+                not inherit previously initialized datasets from the parent.
 
         Notes:
             Initialization is intentionally explicit because it can be
@@ -1278,6 +1318,9 @@ class BaseDataset(Dataset, ABC):
         """
         self.all_patients = list(patients)
         self.initialized = False
+        self.edf_files = []
+        self.lower_bounds = []
+        self.upper_bounds = []
         total_n_patients = len(patients)
         file_handles, lower_bounds, upper_bounds = [], [], []
         all_classes = set()
@@ -1285,32 +1328,31 @@ class BaseDataset(Dataset, ABC):
 
         logger.progress_start(len(patients), desc="Preparing labels and sliding windows", leave=True)
 
+        def collect(iter_objects, prepare_inline):
+            nonlocal lower, n_windows, all_classes
+            for edf in iter_objects:
+                if prepare_inline:
+                    edf = self.prepare_patient(edf, raise_errors=strict)
+
+                if edf:
+                    edf = cast(EDFFile, edf)
+                    file_handles.append(edf)
+                    lower_bounds.append(lower)
+                    upper_bounds.append(lower + edf.length)
+                    lower += edf.length
+                    n_windows += edf.length
+
+                    if edf.classes is not None:
+                        all_classes |= set(edf.classes)
+
+                logger.progress_advance(1)
+
         if num_workers > 1:
-            pool = multiprocessing.Pool(num_workers)
-            iter_objects = pool.imap_unordered(
-                partial(self.prepare_patient, raise_errors=strict),
-                patients,
-            )
+            context = multiprocessing if multiprocessing_start_method is None else multiprocessing.get_context(multiprocessing_start_method)
+            with context.Pool(num_workers) as pool:
+                collect(pool.imap_unordered(partial(self.prepare_patient, raise_errors=strict), patients), prepare_inline=False)
         else:
-            iter_objects = patients
-
-        lower = 0
-        for edf in iter_objects: 
-            if num_workers <= 1:
-                edf = self.prepare_patient(edf, raise_errors=strict)
-
-            if edf:
-                edf = cast(EDFFile, edf)
-                file_handles.append(edf)
-                lower_bounds.append(lower)
-                upper_bounds.append(lower + edf.length)
-                lower += edf.length
-                n_windows += edf.length
-
-                if edf.classes is not None:
-                    all_classes |= set(edf.classes)
-            
-            logger.progress_advance(1)
+            collect(patients, prepare_inline=True)
 
         logger.progress_close()
 
@@ -1404,14 +1446,6 @@ class BaseDataset(Dataset, ABC):
             **{k: v for k, v in item.items() if k not in {"data", "target", "target_extra", "patient", "time"}},
         )
 
-    def build_sample_from_window_df(
-        self,
-        item: Dict[str, Any],
-        x_df: pd.DataFrame,
-    ) -> Optional[Dict[str, Any]]:
-        """Build a sample from an already loaded window."""
-        return self.run_build_sample(item, x_df)
-
     def get_target_item(self, file: EDFFile, start_date: pd.Timestamp):
         """Build target and timestamp fields without loading signals."""
         end_date = start_date + self.total_input
@@ -1433,54 +1467,89 @@ class BaseDataset(Dataset, ABC):
             item.update(prepared_target)
         return item
 
-    def get_item(self, file: EDFFile, start_date: pd.Timestamp):
-        """Build one candidate item from a prepared patient and start time.
+    def ensure_timeseries_length(self, data_df: pd.DataFrame, start_date: pd.Timestamp) -> pd.DataFrame:
+        """Pad or truncate a resampled window to the dataset input length."""
+        expected = self.get_timeseries_len()
+        if data_df.empty:
+            raise ValueError(f"EDF read returned no samples for window starting at {start_date}.")
+        if len(data_df) < expected:
+            missing = expected - len(data_df)
+            period = pd.to_timedelta(1.0 / self.sample_frequency, unit="s")
+            padding = pd.DataFrame([data_df.iloc[-1].values] * missing, columns=data_df.columns, index=pd.date_range(data_df.index[-1] + period, periods=missing, freq=period))
+            return pd.concat([data_df, padding])
+        if len(data_df) > expected:
+            return data_df.head(expected)
+        return data_df
+
+    def get_items(self, file: EDFFile, start_dates: Sequence[pd.Timestamp]) -> list[Optional[Dict[str, Any]]]:
+        """Build several model windows through the canonical EDF access path.
 
         Args:
-            file: Prepared patient descriptor.
-            start_date: Signal-window start timestamp.
+            file: Prepared patient descriptor returned by :meth:`initialize`.
+            start_dates: Logical model-window starts. Every window has this
+                dataset's ``total_input`` duration and is returned in the same
+                order as the supplied timestamps.
 
         Returns:
-            A sample dictionary or ``None`` when ``prepare_target`` or
-            ``prepare_sample`` rejects the candidate.
+            One prepared sample dictionary per requested timestamp. An entry
+            is ``None`` when ``prepare_target`` or ``prepare_sample`` rejects
+            that particular window.
 
         Notes:
-            Label filtering happens before signal loading when possible, as
-            confirmed by ``tests/test_datasets.py``.
+            Target preparation and channel selection happen separately for
+            each request and before signal I/O. ``EDFFile.get_x`` performs
+            resampling and optionally serves the requested interval from a
+            complete-recording cache.
+
+            ``PairedDataset`` uses this method to load the native calls needed
+            by one or more compatible packaged experts. Ordinary datasets use
+            the same implementation because :meth:`get_item` is a one-window
+            wrapper around this method.
         """
-        item = self.get_target_item(file, start_date)
-        if item is None:
-            return None
+        start_dates = [pd.Timestamp(start_date) for start_date in start_dates]
+        if not start_dates:
+            raise ValueError("start_dates must not be empty.")
 
-        end_date = start_date + self.total_input
-        selected_channels = self.select_channels(file.channels)
-        channels_to_load = self.channels_to_load(selected_channels, file.channels)
-        x_df = file.get_x(start_date, end_date, self.sample_frequency, self.resample_type, channels=channels_to_load)
-        self.apply_rereference(x_df)
-        file.apply_z_normalization(x_df, channels=list(dict.fromkeys(physical_name for cfg, physical_name in selected_channels)))
+        plans = []
+        for start_date in start_dates:
+            item = self.get_target_item(file, start_date)
+            if item is None:
+                plans.append(None)
+                continue
+            selected_channels = self.select_channels(file.channels)
+            channels_to_load = self.channels_to_load(selected_channels, file.channels)
+            plans.append((item, start_date, selected_channels, channels_to_load))
 
-        # Make sure that x_df has exactly self.get_timeseries_len() entries. 
-        # This can happen, when timestamps do not match exactly or there are inaccuracies for
-        # very high sample rates.
-        #   - if not enough entries: pad the last value at the end
-        #   - if too many entries: take the first self.get_timeseries_len() entries
-        if len(x_df) < self.get_timeseries_len():
-            freq = pd.to_timedelta(1.0/self.sample_frequency, unit="s")
-            freq = x_df.index.freq or pd.infer_freq(x_df.index)
-            # Pad at end
-            n = self.get_timeseries_len() - len(x_df)
-            pad_idx = pd.date_range(start=x_df.index[-1] + freq, periods=n, freq=freq)
-            pad_df = pd.DataFrame([x_df.iloc[-1].values] * n, columns=x_df.columns, index=pad_idx)
-            x_df = pd.concat([x_df, pad_df])
-        elif len(x_df) > self.get_timeseries_len():
-            x_df = x_df.head(n = self.get_timeseries_len())
+        if not any(plan is not None for plan in plans):
+            return [None] * len(plans)
 
-        transformed_item = self.run_build_sample(item, x_df, selected_channels=selected_channels)
-        if transformed_item is None:
-            return None
-        item.update(transformed_item)
+        results = []
+        for plan in plans:
+            if plan is None:
+                results.append(None)
+                continue
+            item, start_date, selected_channels, channels_to_load = plan
+            data_df = file.get_x(start_date, start_date + self.total_input, self.sample_frequency, self.resample_type, channels=channels_to_load, cache=self.edf_cache)
+            missing_channels = sorted(set(channels_to_load) - set(data_df.columns))
+            if missing_channels:
+                raise ValueError(f"EDF read for {file.path} is missing required channels {missing_channels} at {start_date}.")
+            file.apply_unit_conversion(data_df)
+            apply_normalizers(data_df, file.normalizers)
+            self.apply_rereference(data_df)
+            file.apply_z_normalization(data_df, channels=list(dict.fromkeys(physical_name for cfg, physical_name in selected_channels)))
+            data_df = self.ensure_timeseries_length(data_df, start_date)
 
-        return item
+            transformed_item = self.run_build_sample(item, data_df, selected_channels=selected_channels)
+            if transformed_item is None:
+                results.append(None)
+                continue
+            item.update(transformed_item)
+            results.append(item)
+        return results
+
+    def get_item(self, file: EDFFile, start_date: pd.Timestamp):
+        """Build one candidate item through the canonical multi-window path."""
+        return self.get_items(file, [start_date])[0]
 
     def candidate_indices(self, original_idx: int):
         """Yield the requested candidate followed by configured rejection fallbacks."""

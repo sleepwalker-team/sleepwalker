@@ -20,11 +20,15 @@ def test_paper_config_layout_is_small_and_explicit():
 
     assert {path.stem for path in train} == expected
     assert {path.stem for path in test} == expected
-    assert {path.name for path in (CONFIG_ROOT / "main" / "train").glob("*.yml")} == {
-        "probability_sleepwalker.yml", "latent_sleepwalker.yml", "refit_heads_sleepwalker.yml", "sei_k8_sleepwalker.yml", "sei_k32_sleepwalker.yml", "sei_k8_sleepfm.yml", "sei_k8_osf.yml",
-        "probability_sleepwalker_seed23.yml", "probability_sleepwalker_seed42.yml", "sei_k8_sleepwalker_seed23.yml", "sei_k8_sleepwalker_seed42.yml",
+    assert {path.name for path in (CONFIG_ROOT / "main" / "train").glob("*.yml")} == {"end_to_end_sleepwalker.yml"}
+    assert {path.name for path in (CONFIG_ROOT / "main" / "eval").glob("*.yml")} == {
+        "end_to_end_sleepwalker.yml",
+        "independent_osf.yml",
+        "independent_sleepfm.yml",
+        "independent_sleepwalker.yml",
     }
-    assert len(list((CONFIG_ROOT / "main" / "eval").glob("*.yml"))) == 26
+    assert {path.name for path in (CONFIG_ROOT / "main" / "train").iterdir() if path.is_dir()} == {"stacking"}
+    assert {path.name for path in (CONFIG_ROOT / "main" / "eval").iterdir() if path.is_dir()} == {"stacking"}
     assert not (CONFIG_ROOT / "generate_configs.py").exists()
     assert (CONFIG_ROOT / "hsp.yml").is_file()
     assert (CONFIG_ROOT / "split.yml").is_file()
@@ -84,42 +88,119 @@ def test_osf_experts_use_one_epoch_level_embedding():
         assert config["model"]["freeze_encoder"] is True
 
 
-def test_graphs_use_explicit_family_independent_output_sequences():
-    expected = {
-        "sleep": ("30s", 1, "25s"),
-        "arousal": ("1s", 40, "20s"),
-        "breathing": ("5s", 8, "20s"),
-        "desaturation": ("10s", 8, "0s"),
-    }
-    for path in (CONFIG_ROOT / "main" / "train").glob("*.yml"):
-        config = read_config(path)
-        task_config = config["trainer"]["task_config"]
-        assert {task: (values["target_resolution"], values["sequence_len"], values["target_offset"]) for task, values in task_config.items()} == expected
-        assert config["data"]["total_input"] == "80s"
-        assert config["data"]["stride"] == "30s"
-        assert "graph_outputs" not in config["data"]
-        assert config["model"]["nodes"]["graph_outputs"] == task_config
-        assert "graph_total_input" not in config["model"]["nodes"]
+def test_next_stacking_and_end_to_end_configs_are_matched():
+    stacking_train = CONFIG_ROOT / "main" / "train" / "stacking"
+    stacking_eval = CONFIG_ROOT / "main" / "eval" / "stacking"
+    for family in ("sleepwalker", "sleepfm"):
+        for regime in ("frozen", "task_local", "joint"):
+            train = read_config(stacking_train / f"{regime}_{family}.yml")
+            evaluation = read_config(stacking_eval / f"{regime}_{family}.yml")
+            assert train["trainer"]["epochs"] == 2
+            assert train["model"]["regime"] == regime.replace("_", "-")
+            assert evaluation["system"]["package"] == train["run"]["package_path"]
+            assert evaluation["test"]["prediction_output"].endswith(".feather")
 
-def test_main_configs_share_data_targets_and_training_options():
-    names = ("probability_sleepwalker", "latent_sleepwalker", "sei_k8_sleepwalker", "sei_k32_sleepwalker", "refit_heads_sleepwalker")
-    configs = [read_config(CONFIG_ROOT / "main" / "train" / f"{name}.yml") for name in names]
-    reference = configs[0]["trainer"]["task_config"]
-    for config in configs:
-        assert config["run"]["patients_per_epoch"] == 512
-        assert config["run"]["package_path"].startswith("iclr2026/models/")
-        assert config["run"]["test_repeats"] == []
-        assert config["trainer"]["eval_every"] == 0
-        assert config["trainer"]["return_best"] is False
-        assert "patient_group_size" not in config["run"]
-        assert config["data"]["prepare_patient"]["keep_events"] == ["wake", "n1", "n2", "n3", "rem"]
-        assert config["data"]["name"] == "sleepwalker.datasets.HSP.HSP"
-        assert config["data"]["channels"] == []
-        assert config["data"]["sample_frequency"] == 1
-        assert set(config["model"]["nodes"]["packages"]) == set(TASKS)
-        assert "packages" not in config["data"]
-        assert config["trainer"]["task_config"] == reference
-        assert all(task["class_counts"] for task in config["trainer"]["task_config"].values())
+    end_to_end = read_config(CONFIG_ROOT / "main" / "train" / "end_to_end_sleepwalker.yml")
+    end_to_end_eval = read_config(CONFIG_ROOT / "main" / "eval" / "end_to_end_sleepwalker.yml")
+    assert end_to_end["model"]["name"] == "sleepwalker.models.MultiTaskClassifierModel.MultiTaskClassifierModel"
+    assert end_to_end["trainer"]["epochs"] == 100
+    assert end_to_end["trainer"]["eval_every"] == 0
+    assert end_to_end["run"]["test_repeats"] == []
+    assert end_to_end_eval["system"]["package"] == end_to_end["run"]["package_path"]
+
+
+def test_validation_protocol_configs_use_the_adaptation_split_and_full_test():
+    stacking_train = CONFIG_ROOT / "main" / "train" / "stacking"
+    stacking_eval = CONFIG_ROOT / "main" / "eval" / "stacking"
+    pairs = {
+        "frozen_sleepfm_validation": "frozen_sleepfm_validation",
+        "exchange_sleep_sleepwalker_in_sleepfm_validation": "exchange_sleep_sleepwalker_in_sleepfm_validation",
+        "exchange_breathing_sleepwalker_in_sleepfm_validation": "exchange_breathing_sleepwalker_in_sleepfm_validation",
+        "joint_sleepfm_validation": "joint_sleepfm_validation",
+        "rate_only_sleepfm_validation": "rate_only_sleepfm_validation",
+        "frozen_sleepwalker_validation": "frozen_sleepwalker_validation",
+        "joint_sleepwalker_validation": "joint_sleepwalker_validation",
+        "frozen_osf_validation": "frozen_osf_validation",
+        "joint_osf_validation": "joint_osf_validation",
+        "rate_only_osf_validation": "rate_only_osf_validation",
+        "exchange_sleep_sleepwalker_in_osf_validation": "exchange_sleep_sleepwalker_in_osf_validation",
+        "exchange_breathing_sleepwalker_in_osf_validation": "exchange_breathing_sleepwalker_in_osf_validation",
+    }
+    for train_stem, eval_stem in pairs.items():
+        train = read_config(stacking_train / f"{train_stem}.yml")
+        evaluation = read_config(stacking_eval / f"{eval_stem}.yml")
+        assert train["data"]["files"] == "results/iclr2026/main/adaptation_split.yml"
+        assert train["trainer"]["epochs"] == 10
+        assert train["run"]["tags"]["adaptation_split"] == "validation"
+        assert evaluation["system"]["package"] == train["run"]["package_path"]
+        assert evaluation["data"]["split"]["partition"] == "test"
+
+    derived = (
+        "aligned_independent_sleepwalker_validation",
+        "aligned_independent_sleepfm_validation",
+        "zero_shot_sw_sleep_in_sleepfm_validation",
+        "zero_shot_sw_breathing_in_sleepfm_validation",
+        "rate_only_zero_shot_sw_sleep_in_sleepfm_validation",
+        "rate_only_zero_shot_sw_breathing_in_sleepfm_validation",
+        "aligned_independent_osf_validation",
+        "zero_shot_sw_sleep_in_osf_validation",
+        "zero_shot_sw_breathing_in_osf_validation",
+        "rate_only_zero_shot_sw_sleep_in_osf_validation",
+        "rate_only_zero_shot_sw_breathing_in_osf_validation",
+    )
+    for stem in derived:
+        evaluation = read_config(stacking_eval / f"{stem}.yml")
+        assert evaluation["data"]["split"]["partition"] == "test"
+        assert evaluation["test"]["prediction_output"].endswith(".feather")
+
+    assert read_config(stacking_train / "rate_only_sleepfm_validation.yml")["model"]["alignment"] == "rate-only"
+    assert read_config(stacking_train / "rate_only_osf_validation.yml")["model"]["alignment"] == "rate-only"
+
+
+def test_trained_naive_zero_shot_configs_keep_the_host_evaluation_protocol():
+    stacking_eval = CONFIG_ROOT / "main" / "eval" / "stacking"
+    for family in ("sleepfm", "osf"):
+        host = read_config(stacking_eval / f"naive_trained_{family}_validation.yml")
+        for task in ("sleep", "breathing"):
+            stem = f"naive_trained_zero_shot_sw_{task}_in_{family}_validation"
+            swap = read_config(stacking_eval / f"{stem}.yml")
+            assert swap["seed"] == host["seed"]
+            assert swap["pipeline"] == host["pipeline"]
+            assert swap["dependencies"] == host["dependencies"]
+            assert swap["data"] == host["data"]
+            assert swap["test"]["batch_size"] == host["test"]["batch_size"]
+            assert swap["test"]["num_workers_dataloader"] == host["test"]["num_workers_dataloader"]
+            assert swap["system"]["package"] == f"iclr2026/models/stacking/naive-trained-zero-shot-sw-{task}-in-{family}-validation"
+            assert swap["test"]["output"].endswith(f"{stem}.jsonl")
+            assert swap["test"]["prediction_output"].endswith(f"{stem}.feather")
+
+
+def test_trained_naive_adaptation_matches_contract_refit_protocol():
+    stacking_train = CONFIG_ROOT / "main" / "train" / "stacking"
+    stacking_eval = CONFIG_ROOT / "main" / "eval" / "stacking"
+    for family in ("sleepfm", "osf"):
+        for task in ("sleep", "breathing"):
+            stem = f"exchange_{task}_sleepwalker_in_{family}_validation"
+            naive_stem = f"naive_trained_{stem}"
+            contract_train = read_config(stacking_train / f"{stem}.yml")
+            naive_train = read_config(stacking_train / f"{naive_stem}.yml")
+            contract_eval = read_config(stacking_eval / f"{stem}.yml")
+            naive_eval = read_config(stacking_eval / f"{naive_stem}.yml")
+
+            assert naive_train["data"] == contract_train["data"]
+            assert naive_train["trainer"] == contract_train["trainer"]
+            assert naive_train["model"]["alignment"] == "naive"
+            assert {key: value for key, value in naive_train["model"].items() if key != "alignment"} == contract_train["model"]
+            assert naive_train["run"]["batch_size"] == contract_train["run"]["batch_size"]
+            assert naive_train["run"]["n_samples"] == contract_train["run"]["n_samples"]
+            assert naive_train["run"]["package_path"] == naive_eval["system"]["package"]
+            assert naive_eval["pipeline"] == contract_eval["pipeline"]
+            assert naive_eval["dependencies"] == contract_eval["dependencies"]
+            assert naive_eval["data"] == contract_eval["data"]
+            assert naive_eval["test"]["batch_size"] == contract_eval["test"]["batch_size"]
+            assert naive_eval["test"]["num_workers_dataloader"] == contract_eval["test"]["num_workers_dataloader"]
+            assert naive_eval["test"]["output"].endswith(f"{naive_stem}.jsonl")
+            assert naive_eval["test"]["prediction_output"].endswith(f"{naive_stem}.feather")
 
 
 def test_test_configs_inherit_channels_and_preprocessing_from_packages():

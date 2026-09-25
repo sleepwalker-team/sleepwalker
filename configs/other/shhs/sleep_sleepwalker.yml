@@ -1,0 +1,44 @@
+# Generated from iclr2026/configs/experts/test/sleep_sleepwalker.yml by replace_yaml_block.py.
+seed: 17
+data:
+  label: SHHS
+  split:
+    file: results/iclr2026/other/manifests/shhs.yml
+    fold: holdout
+    partition: test
+  num_workers: 32
+  strict: false
+  dataset:
+    name: sleepwalker.datasets.SHHS.SHHS
+    channels:
+    - logical_name: eeg
+      physical_names: [EEG, EEG(sec)]
+      normalizer:
+        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+        fs: 100
+        highcut: 40
+        notch_freq: null
+        normalize: false
+      unit: uV
+    group_sampling_strategy: first
+    annotator: nsrr
+    event_mapping:
+      wake|0: wake
+      stage 1 sleep|1: n1
+      stage 2 sleep|2: n2
+      stage 3 sleep|3: n3
+      stage 4 sleep|4: n3
+      rem sleep|5: rem
+    remove_unmapped_events: true
+analyses:
+- name: resolved
+  pipeline:
+  - name: sleepwalker.prediction_transforms.resolve_overlaps
+    method: mean_probability
+test:
+  batch_size: 64
+  num_workers_dataloader: 8
+  n_repeat: 1
+  overwrite: false
+  output: results/iclr2026/other/shhs/sleep_sleepwalker.jsonl
+  package: iclr2026/models/sw-sleep

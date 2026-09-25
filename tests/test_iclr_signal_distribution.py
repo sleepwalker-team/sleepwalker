@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_estimator():
-    path = REPO_ROOT / "iclr2026" / "estimate_signal_distribution.py"
+    path = REPO_ROOT / "iclr2026" / "scripts" / "estimate_signal_distribution.py"
     spec = importlib.util.spec_from_file_location("iclr_signal_distribution", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

@@ -8,6 +8,8 @@ import torch
 
 from sleepwalker.deployment import PackagedModel, load_packaged_model
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
+# Keep these names importable for stacking packages serialized before alignment moved to StackedClassifierModel.
+from sleepwalker.models.StackedClassifierModel import AlignedPackagedClassifier, TimeSeriesResampler
 
 
 class PackagedClassifierModel(BaseModel, EmbeddingModel, ClassifierModel):

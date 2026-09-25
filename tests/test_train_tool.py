@@ -66,25 +66,6 @@ def test_active_training_component_graphs_construct():
         build_trainer(train_tool, config["trainer"], context)
 
 
-def test_multitask_full_uses_expert_sequence_contracts():
-    train_tool = load_train_tool()
-    config = train_tool.read_yaml(REPO_ROOT / "iclr2026" / "configs" / "experts" / "train" / "multitask_sleepwalker.yml")
-    task_blocks = [
-        config["data"]["prepare_target"]["task_config"],
-        config["trainer"]["task_config"],
-    ]
-
-    assert task_blocks[0] == task_blocks[1]
-    assert "target_resolution" not in config["data"]
-    assert {task: (cfg["sequence_len"], cfg["target_resolution"]) for task, cfg in task_blocks[0].items()} == {
-        "sleep": (1, "30s"),
-        "arousal": (40, "1s"),
-        "breathing": (8, "5s"),
-        "desaturation": (8, "10s"),
-    }
-    assert "condition_task" not in config["trainer"]
-
-
 def test_read_yaml_parses_scientific_notation_without_decimal_point(tmp_path):
     train_tool = load_train_tool()
     path = tmp_path / "scientific.yml"

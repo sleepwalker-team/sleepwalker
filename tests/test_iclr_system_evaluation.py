@@ -1,43 +1,13 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
 import pytest
-import torch
 
-from iclr2026.scripts.plots_and_tables import aggregate_systems, common_cohort, patient_is_complete, write_outputs
-from iclr2026.replacement import build_zero_shot_package
-from sleepwalker.datasets.Basedataset import ChannelConfig
-from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-from sleepwalker.deployment import PackagedModel
-from sleepwalker.deployment.evaluation import condition_endpoint, validate_dependencies
-from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
-from sleepwalker.models.ModelGraphClassifier import ModelGraphClassifier, PairedDataset, load_graph_node
-from tools.evaluate_system import analyze_patient, read_config
-from tools.train import read_yaml
+from sleepwalker.deployment.evaluation import condition_endpoint, read_prediction_feather, validate_dependencies, write_prediction_feather
+from tools.evaluate_system import analyze_patient
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TRAIN_DIR = REPO_ROOT / "iclr2026" / "configs" / "main" / "train"
-EVAL_DIR = REPO_ROOT / "iclr2026" / "configs" / "main" / "eval"
 TASKS = ("sleep", "arousal", "breathing", "desaturation")
-
-
-class ConstantClassifier(BaseModel, ClassifierModel):
-    def __init__(self, ts_len, classes, sequence_len=1):
-        super().__init__()
-        self.ts_len = ts_len
-        self.classes = classes
-        self.value = torch.nn.Parameter(torch.zeros(1, sequence_len, len(classes)))
-
-    def compute(self, inputs):
-        return self.value.expand(inputs.shape[0], -1, -1)
-
-    def input_spec(self):
-        return (1, self.ts_len, 1), {"layout": "BTC", "ts_len": self.ts_len, "n_channels": 1}
 
 
 def prediction_frame(times, classes, predictions, targets=None, annotations=None):
@@ -52,57 +22,23 @@ def prediction_frame(times, classes, predictions, targets=None, annotations=None
     return pd.DataFrame(rows)
 
 
-def test_training_configs_moved_and_evaluations_cover_every_system():
-    assert not (TRAIN_DIR.parent / "test.yml").exists()
-    train_paths = sorted(TRAIN_DIR.glob("*.yml"))
-    assert len(train_paths) == 11
-    for path in train_paths:
-        config = read_yaml(path)
-        assert config["model"]["name"] == "sleepwalker.models.ModelGraphClassifier.ModelGraphClassifier"
-        packages = config["model"]["nodes"]["packages"]
-        assert set(packages) == set(TASKS)
-        assert "packages" not in config["data"]
-        assert config["trainer"]["eval_every"] == 0
-        assert config["trainer"]["return_best"] is False
-        assert config["run"]["test_repeats"] == []
+def test_prediction_feather_roundtrip_can_select_one_patient(tmp_path):
+    first = prediction_frame(["2020-01-01 00:00:00"], ["no", "yes"], ["no"])
+    first.insert(0, "task", "arousal")
+    first.insert(0, "patient", "first.edf")
+    second = prediction_frame(["2020-01-01 00:00:01"], ["no", "yes"], ["yes"])
+    second.insert(0, "task", "arousal")
+    second.insert(0, "patient", "second.edf")
+    path = tmp_path / "predictions.feather"
 
-    configs = [read_config(path) for path in sorted(EVAL_DIR.glob("*.yml"))]
-    assert len(configs) == 26
-    assert len({config["system"]["name"] for config in configs}) == 26
-    assert {config["system"]["type"] for config in configs} == {"independent", "package", "factory"}
-    assert all(len(config["dependencies"]) == 3 for config in configs)
-    assert all(config["data"]["dataset"]["group_sampling_strategy"] == "first" for config in configs)
+    write_prediction_feather(path, pd.concat([first, second], ignore_index=True))
+    restored = read_prediction_feather(path, patients=["second.edf"])
 
-
-def test_zero_shot_system_is_an_ordinary_paired_graph():
-    sleep_classes = ["wake", "n1"]
-    event_classes = ["no_arousal", "arousal"]
-    sleep_dataset = UnlabelledDataset(channels=[ChannelConfig("sleep", ["EEG"])], sample_frequency=10, total_input="60s", stride="30s")
-    event_dataset = UnlabelledDataset(channels=[ChannelConfig("arousal", ["EMG"])], sample_frequency=10, total_input="20s", stride="20s")
-    experts = {
-        "sleep": PackagedModel(name="sleep", task="sleep", model=ConstantClassifier(600, sleep_classes), dataset=sleep_dataset, classification_contract={"type": "single-head-multiclass", "classes": sleep_classes, "sequence_len": 1, "target_resolution": "60s"}),
-        "arousal": PackagedModel(name="arousal", task="arousal", model=ConstantClassifier(200, event_classes), dataset=event_dataset, classification_contract={"type": "single-head-multiclass", "classes": event_classes, "sequence_len": 1, "target_resolution": "20s"}),
-    }
-    for task in ("breathing", "desaturation"):
-        classes = ["event", "none"]
-        experts[task] = PackagedModel(name=task, task=task, model=ConstantClassifier(200, classes), dataset=event_dataset, classification_contract={"type": "single-head-multiclass", "classes": classes, "sequence_len": 1, "target_resolution": "20s"})
-    task_contracts = {
-        task: {"classes": package.classification_contract["classes"], "n_steps": 1, "target_resolution": "20s", "target_offset": "20s"}
-        for task, package in experts.items()
-    }
-    nodes = {task: load_graph_node(package, graph_outputs={task: task_contracts[task]}) for task, package in experts.items()}
-    graph = ModelGraphClassifier(nodes=nodes, method="probability", edges=[["sleep", "arousal"]])
-    reference = UnlabelledDataset(channels=[ChannelConfig("sleep", ["EEG"])], sample_frequency=10, total_input="60s", stride="30s")
-    shared_dataset = PairedDataset({task: package.dataset for task, package in experts.items()}, base=reference, input_offsets={task: node.input_offsets for task, node in nodes.items()})
-    base = PackagedModel(name="probability", task="multitask", model=graph, dataset=shared_dataset, classification_contract={"type": "multitask", "tasks": task_contracts})
-    replacement = PackagedModel(name="replacement", task="arousal", model=ConstantClassifier(100, event_classes, sequence_len=2), dataset=UnlabelledDataset(channels=[ChannelConfig("arousal", ["EEG"])], sample_frequency=5, total_input="20s", stride="20s"), classification_contract={"type": "single-head-multiclass", "classes": event_classes, "sequence_len": 2, "target_resolution": "20s"})
-
-    result = build_zero_shot_package(base_package=base, experts=experts, replacement={"task": "arousal", "package": replacement}, name="zero-shot")
-
-    assert isinstance(result.model, ModelGraphClassifier)
-    assert result.model.input_spec()[1]["layout"] == "mapping"
-    assert result.dataset.datasets["arousal"].sample_frequency == 5
-    assert torch.equal(result.model.heads["arousal"].weight, graph.heads["arousal"].weight)
+    assert restored["patient"].unique().tolist() == ["second.edf"]
+    assert restored["task"].tolist() == second["task"].tolist()
+    assert restored["time"].tolist() == second["time"].tolist()
+    assert restored["target"].tolist() == second["target"].tolist()
+    assert restored[["prob__no", "prob__yes"]].to_numpy().tolist() == second[["prob__no", "prob__yes"]].to_numpy().tolist()
 
 
 def test_condition_endpoint_uses_fifty_percent_interval_coverage():
@@ -163,61 +99,3 @@ def test_patient_analysis_propagates_sleep_and_breathing_errors():
     assert result["arousal"]["metrics"]["confusion_matrix"] == [[0, 0], [1, 1]]
     assert result["breathing"]["metrics"]["confusion_matrix"][0] == [0, 0, 2]
     assert result["desaturation"]["metrics"]["confusion_matrix"] == [[0, 2], [0, 0]]
-
-
-def patient_record(system, matrices, missing_fraction=0.0):
-    return {
-        "record_type": "patient",
-        "system": system,
-        "patient": "patient",
-        "coverage": {"model": {"initialized": True, "missing_fraction": missing_fraction}},
-        "tasks": {
-            task: {"classes": ["negative", "positive"], "metrics": {"confusion_matrix": matrix}}
-            for task, matrix in zip(TASKS, matrices)
-        },
-    }
-
-
-def test_common_cohort_uses_global_one_percent_threshold_and_aggregates():
-    matrix = [[1, 0], [0, 1]]
-    evaluations = {
-        "first": {
-            "a": {**patient_record("first", [matrix] * 4), "patient": "a"},
-            "b": {**patient_record("first", [matrix] * 4, missing_fraction=0.02), "patient": "b"},
-        },
-        "second": {
-            "a": {**patient_record("second", [matrix] * 4), "patient": "a"},
-            "b": {**patient_record("second", [matrix] * 4), "patient": "b"},
-        },
-    }
-
-    common, qualified = common_cohort(["first", "second"], evaluations, 0.01)
-    aggregates = aggregate_systems(["first", "second"], evaluations, common)
-
-    assert common == {"a"}
-    assert qualified["first"] == {"a"}
-    assert len(aggregates) == 8
-    assert all(record["n_patients"] == 1 for record in aggregates)
-
-
-def test_patient_completeness_rejects_missing_tasks():
-    record = patient_record("system", [[[1, 0], [0, 1]]] * 4)
-    assert patient_is_complete(record, 0.01)
-    del record["tasks"]["sleep"]
-    assert not patient_is_complete(record, 0.01)
-
-
-def test_reporting_writes_main_and_independent_tables(tmp_path):
-    matrix = [[1, 0], [0, 1]]
-    systems = ["independent_sleepwalker", "probability"]
-    evaluations = {
-        system: {"patient": patient_record(system, [matrix] * 4)}
-        for system in systems
-    }
-    aggregates = aggregate_systems(systems, evaluations, {"patient"})
-
-    write_outputs(tmp_path, systems, evaluations, {"patient"}, {system: {"patient"} for system in systems}, aggregates, 0.01, False)
-
-    assert "Independent Sleepwalker experts" in (tmp_path / "independent_results.tex").read_text(encoding="utf-8")
-    assert "Probability graph (Sleepwalker)" in (tmp_path / "main_results.tex").read_text(encoding="utf-8")
-    assert (tmp_path / "main_results.pdf").stat().st_size > 0

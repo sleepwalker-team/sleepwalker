@@ -42,7 +42,8 @@ fully qualified ``name`` and put constructor arguments directly beside it::
       num_workers_dataloader: 8
 
 ``data`` may be a list for multi-dataset training. Nested components such as
-``ModelGraphClassifier`` nodes use the same fully qualified ``name`` syntax.
+the expert loader inside ``StackedClassifierModel`` use the same fully
+qualified ``name`` syntax.
 
 ``files`` either names selectors for a newly generated split, as above, or is
 the path to a precomputed YAML split.  ``tools/split.py`` creates holdout and

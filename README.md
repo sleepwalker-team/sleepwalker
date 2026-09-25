@@ -11,7 +11,7 @@ Confirmed from code and tests:
 - Models live under `sleepwalker/models/`.
 - Training logic lives under `sleepwalker/trainer/`.
 - Trained models can be exported as manifest-backed `PackagedModel` directories and later loaded for inference through `sleepwalker/deployment/`.
-- `predict.py` contains shared prediction-table normalization helpers.
+- `tools/predict.py` contains shared prediction-table normalization helpers.
 
 Probable but not fully stabilized:
 
@@ -27,7 +27,7 @@ Probable but not fully stabilized:
 - `sleepwalker/deployment/`: prediction-package export and loading.
 - `tests/`: unit tests and small EDF/text fixtures.
 - top-level `train_*.py`: task-specific experiment scripts.
-- `predict.py`: prediction-table normalization helpers used by analysis scripts.
+- `tools/predict.py`: prediction-table normalization helpers used by analysis scripts.
 
 ## Main Workflow
 
@@ -55,10 +55,10 @@ channels, incompatible units, and changed model geometry fail before model
 execution. Dataset-specific corrections for known bad header labels, such as
 HSP saturation channels labelled `uV`, are stored explicitly.
 
-`ModelGraphClassifier` is the corresponding composition API. It accepts named
-`GraphNode` objects and DAG edges, routes one shared tensor to each node's
-native channels and window, and returns a dictionary of task logits. The helper
-`load_graph_node(...)` converts a classifier package into a frozen graph node.
+`StackedClassifierModel` composes packaged task experts. It preserves each
+expert's native input contract, aligns their prediction timelines, and adds
+task-specific probability correction heads. `PairedDataset` coalesces the
+aligned native input windows without moving signal loading into the model.
 
 ## Current Constraints
 
@@ -68,7 +68,7 @@ native channels and window, and returns a dictionary of task logits. The helper
 - Raw-EDF inference is exposed through `PackagedModel.predict_edf(...)`; the artifact
   format and deployment behavior remain lab-internal and evolving.
 
-Dataset manifests are created explicitly with `python tools/split.py ...`; use `--folds N` for cross-validation. A trained classifier can be evaluated with `python tools/test.py CONFIG`, where `test.package` names its package directory. The missing SEI package can be recreated once with `python iclr2026/scripts/migrate_expert_package.py`.
+Dataset manifests are created explicitly with `python tools/split.py ...`; use `--folds N` for cross-validation. A trained classifier can be evaluated with `python tools/evaluate.py CONFIG`, where `test.package` names its package directory. Complete systems are evaluated with `python tools/evaluate_system.py CONFIG`; these configs define packaged classifiers together with a dependency policy that conditions downstream predictions on upstream predicted classes. The reproducible paper pipeline is defined in `iclr2026/scripts/run.sh`, the current stacking work queue is in `iclr2026/scripts/run_next.sh`, and SHHS/Ruhrland hand-off evaluations are kept in `iclr2026/scripts/run_other.sh`.
 
 Pinned SleepFM, SleepGPT, and OSF sources can be downloaded and converted into embedding-only packages with `tools/foundation_models.py`. A regular `tools/train.py train CONFIG` run can then fit `PackagedClassifierModel`; see `configs/examples/foundation_sleep_head.yml`.
 - The repository contains generated artifacts, notebooks, logs, and likely experimental files alongside maintained source.

@@ -24,7 +24,7 @@ import pyedflib
 import pytest
 from pyedflib import DO_NOT_CHECK_FILE_SIZE, DO_NOT_READ_ANNOTATIONS
 
-from sleepwalker.core.signal import edf_to_df, polyphase_resample_frame
+from sleepwalker.core.signal import edf_to_df, polyphase_resample_frame, read_edf_native, resample_native_signals
 
 DATA_DIR = Path(__file__).parent / "data"
 SYNTH_PATHS: List[Path] = sorted(DATA_DIR.glob("signals_*.edf"))
@@ -211,3 +211,17 @@ def test_polyphase_resampling_has_exact_target_grid():
     assert result.index[0] == index[0]
     assert result.index[1] - result.index[0] == pd.Timedelta(milliseconds=20)
     assert np.isfinite(result.to_numpy()).all()
+
+
+@pytest.mark.parametrize("how", ["nearest", "polyphase"])
+def test_one_native_envelope_matches_separate_window_reads(synth_edf, how):
+    with pyedflib.EdfReader(synth_edf, annotations_mode=DO_NOT_READ_ANNOTATIONS, check_file_size=DO_NOT_CHECK_FILE_SIZE) as reader:
+        file_start = pd.Timestamp(reader.getStartdatetime()).tz_localize(None)
+    starts = [file_start + pd.Timedelta("10s"), file_start + pd.Timedelta("12s"), file_start + pd.Timedelta("16s")]
+    duration = pd.Timedelta("4s")
+    native = read_edf_native(synth_edf, ALL_CHANNELS, min(starts), max(starts) + duration)
+
+    for start in starts:
+        expected = edf_to_df(synth_edf, ALL_CHANNELS, start, start + duration, frequency=37.0, how=how)
+        actual = resample_native_signals(native, ALL_CHANNELS, start, start + duration, frequency=37.0, how=how)
+        _assert_frames_equivalent(expected, actual, how)

@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 from sleepwalker.config import build_callback, read_yaml
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.deployment import PackagedModel, load_packaged_model
-from sleepwalker.deployment.evaluation import confusion_metrics, mean_patient_metrics, package_fold, patient_classification_metrics, prepare_dataset, resolve_entry_files, task_classes, write_record
+from sleepwalker.deployment.evaluation import confusion_metrics, mean_patient_metrics, package_fold, patient_classification_metrics, prepare_dataset, task_classes, write_record
 from sleepwalker.prediction_transforms import apply_pipeline
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import json_ready

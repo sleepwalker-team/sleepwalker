@@ -42,7 +42,7 @@ def configure_dataset_execution(dataset, *, rejection_strategy: str | None, n_vi
         raise TypeError(f"{dataset.__class__.__name__} does not support repeated views.")
 
 
-def build_loader(dataset, *, batch_size: int, num_workers: int, n_samples: int | None, collate_fn, sampling: str, seed: int, patients_per_epoch: int | None = None, patient_group_size: int | None = None, rejection_strategy: str | None = None, n_views: int = 1, drop_last: bool = False):
+def build_loader(dataset, *, batch_size: int, num_workers: int, n_samples: int | None, collate_fn, sampling: str, seed: int, patients_per_epoch: int | None = None, patient_group_size: int | None = None, rejection_strategy: str | None = None, n_views: int = 1, drop_last: bool = False, pin_memory: bool = True, persistent_workers: bool = True):
     """Build a loader with explicit index sampling and dataset execution policies.
 
     ``n_samples`` controls how many candidate indices are requested. Expected
@@ -93,10 +93,10 @@ def build_loader(dataset, *, batch_size: int, num_workers: int, n_samples: int |
         "num_workers": num_workers,
         "collate_fn": partial(collate_valid_samples, collate_fn=collate_fn, drop_incomplete=drop_last),
         "drop_last": drop_last,
-        "pin_memory": True,
+        "pin_memory": bool(pin_memory),
         "generator": generator,
     }
     if num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     return DataLoader(**loader_kwargs)

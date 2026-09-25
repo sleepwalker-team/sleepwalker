@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import hashlib
 import os
@@ -5,12 +7,8 @@ import os
 import requests
 from tqdm import tqdm
 
-from __future__ import annotations
-
-import os
-from sleepwalker.utils import logger
-
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.utils import logger
 
 
 files = {

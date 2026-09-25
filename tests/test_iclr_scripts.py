@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from iclr2026.scripts.replace_yaml_block import materialize_configs
+from iclr2026.scripts.make_adaptation_split import adaptation_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,13 +35,45 @@ def test_shell_expansions_cover_all_expert_configs():
 def test_run_script_orders_required_tables_external_work_and_seeds():
     script_path = REPO_ROOT / "iclr2026" / "scripts" / "run.sh"
     script = script_path.read_text(encoding="utf-8")
+    next_path = REPO_ROOT / "iclr2026" / "scripts" / "run_next.sh"
+    next_script = next_path.read_text(encoding="utf-8")
+    other_path = REPO_ROOT / "iclr2026" / "scripts" / "run_other.sh"
+    other = other_path.read_text(encoding="utf-8")
 
     assert script_path.stat().st_mode & 0o111
-    assert "job shhs-sw evaluate" in script
-    assert script.index("job shhs-table summary") < script.index("job train-probability-sw train") < script.index("job required-complete barrier") < script.index('job "train-probability-sw-seed$seed"')
+    assert next_path.stat().st_mode & 0o111
+    assert other_path.stat().st_mode & 0o111
+    assert "job shhs-sw evaluate" not in script
+    assert "job shhs-sw evaluate" in other
+    assert 'bash "$SCRIPT_DIR/run_next.sh"' in script
+    assert "residual" not in script
+    assert "residual" not in next_script
+    assert "package_aligned_independent.py" in next_script
+    assert "make_adaptation_split.py" in next_script
+    assert "package_exchange.py" in next_script
+    assert next_script.count("|train|") == 13
+    assert next_script.count("|system|") == 27
+    assert "train-end-to-end-sleepwalker|train|" in next_script
+    assert "eval-end-to-end-sleepwalker|system|" in next_script
+    assert "eval-adapted-sleep-sleepfm|system|" in next_script
+    assert "eval-adapted-breathing-sleepfm|system|" in next_script
+    assert "eval-rate-only-sleep-sleepfm|system|" in next_script
+    assert "eval-validation-frozen-sleepwalker|system|" in next_script
+    assert next_script.count("analyze_stacking.py") == 2
     assert 'GPUS=${SLEEPWALKER_ICLR2026_GPUS:-0,1,2}' in script
+    assert 'GPUS=${SLEEPWALKER_ICLR2026_GPUS:-0,1,2}' in next_script
     assert not (REPO_ROOT / "iclr2026" / "scripts" / "prepare.sh").exists()
     assert "multitask_sleepwalker" not in script
+
+
+def test_adaptation_split_uses_only_the_original_validation_partition(tmp_path):
+    source = tmp_path / "source.yml"
+    source.write_text(yaml.safe_dump({"seed": "test", "folds": {"holdout": {"train": ["train.edf"], "validation": ["adapt.edf"], "test": ["test.edf"]}}}), encoding="utf-8")
+
+    manifest = adaptation_manifest(source)
+
+    assert manifest["source"] == str(source)
+    assert manifest["folds"]["holdout"] == {"train": ["adapt.edf"], "validation": [], "test": []}
 
 
 def test_jobs_are_small_explicit_records_and_barrier_depends_on_previous_jobs():
@@ -68,6 +101,15 @@ def test_completed_training_and_evaluation_jobs_are_recognized(tmp_path, monkeyp
     assert run_script.job_is_complete(run_script.Job("train", "train", str(train), []))
     assert run_script.job_is_complete(run_script.Job("eval", "evaluate", str(evaluation), []))
 
+    predictions = tmp_path / "predictions.feather"
+    evaluation.write_text(yaml.safe_dump({"test": {"output": str(output), "prediction_output": str(predictions)}}), encoding="utf-8")
+    assert not run_script.job_is_complete(run_script.Job("eval", "system", str(evaluation), []))
+    predictions.write_bytes(b"predictions")
+    output.write_text('{"record_type":"run"}\n{"record_type":"patient"}\n', encoding="utf-8")
+    assert run_script.job_is_complete(run_script.Job("eval", "system", str(evaluation), []))
+    output.write_text('{"record_type":"run","n_patients_requested":2}\n{"record_type":"patient"}\n', encoding="utf-8")
+    assert not run_script.job_is_complete(run_script.Job("eval", "system", str(evaluation), []))
+
 
 def test_gpu_and_session_names_are_validated():
     run_script = load_run_script()
@@ -78,12 +120,110 @@ def test_gpu_and_session_names_are_validated():
         run_script.parse_gpus("0,0")
 
 
+def test_gpu_release_requires_a_known_gpu_and_evaluation_config(tmp_path):
+    run_script = load_run_script()
+    config = tmp_path / "evaluation.yml"
+    config.write_text("test: {}\n", encoding="utf-8")
+
+    releases = run_script.parse_gpu_releases([f"0|old-evaluation|{config}"], ["2", "0"])
+
+    assert releases["0"].session == "old-evaluation"
+    with pytest.raises(ValueError, match="Invalid GPU release"):
+        run_script.parse_gpu_releases([f"1|old-evaluation|{config}"], ["2", "0"])
+    with pytest.raises(ValueError, match="Invalid GPU release"):
+        run_script.parse_gpu_releases([f"0|old-evaluation|{config}", f"0|another|{config}"], ["2", "0"])
+
+
 def test_queue_waits_until_tmux_reports_the_dead_pane_status(monkeypatch):
     run_script = load_run_script()
     responses = [SimpleNamespace(returncode=0), SimpleNamespace(returncode=0, stdout="1\t\n")]
     monkeypatch.setattr(run_script.subprocess, "run", lambda *args, **kwargs: responses.pop(0))
 
     assert run_script.pane_state("session") == (True, None)
+
+
+def test_reserved_gpu_is_released_only_after_successful_evaluation(monkeypatch, tmp_path):
+    run_script = load_run_script()
+    release = run_script.GpuRelease("old-session", run_script.Job("old-evaluation", "system", "old.yml", []))
+    job = run_script.Job("new-evaluation", "system", "new.yml", [])
+    states = iter([(False, None), (True, 0)])
+    launched = []
+
+    monkeypatch.setattr(run_script, "pane_state", lambda session: next(states) if session == "old-session" else (True, 0))
+    monkeypatch.setattr(run_script, "job_is_complete", lambda candidate: candidate.name == "old-evaluation" or candidate.session is not None)
+    monkeypatch.setattr(run_script, "launch_job", lambda candidate, gpu, python, run_id: (launched.append(gpu), setattr(candidate, "session", "new-session")))
+    monkeypatch.setattr(run_script.time, "sleep", lambda seconds: None)
+
+    run_script.run_queue([job], tmp_path / "python", ["0"], "test", 0.001, {"0": release})
+
+    assert launched == ["0"]
+    assert job.status == "complete"
+
+
+def test_free_gpu_starts_while_other_gpu_is_reserved(monkeypatch, tmp_path):
+    run_script = load_run_script()
+    release = run_script.GpuRelease("old-session", run_script.Job("old-evaluation", "system", "old.yml", []))
+    job = run_script.Job("new-evaluation", "system", "new.yml", [])
+    launched = []
+
+    monkeypatch.setattr(run_script, "pane_state", lambda session: (False, None) if session == "old-session" else (True, 0))
+    monkeypatch.setattr(run_script, "job_is_complete", lambda candidate: candidate.session is not None)
+    monkeypatch.setattr(run_script, "launch_job", lambda candidate, gpu, python, run_id: (launched.append(gpu), setattr(candidate, "session", "new-session")))
+
+    run_script.run_queue([job], tmp_path / "python", ["0", "2"], "test", 0.001, {"0": release})
+
+    assert launched == ["2"]
+
+
+def test_failed_gpu_release_does_not_start_another_job(monkeypatch):
+    run_script = load_run_script()
+    release = run_script.GpuRelease("old-session", run_script.Job("old-evaluation", "system", "old.yml", []))
+    monkeypatch.setattr(run_script, "pane_state", lambda session: (True, 1))
+
+    with pytest.raises(RuntimeError, match="exited with status 1"):
+        run_script.gpu_release_ready("0", release)
+
+
+def test_successful_release_still_requires_complete_output(monkeypatch):
+    run_script = load_run_script()
+    release = run_script.GpuRelease("old-session", run_script.Job("old-evaluation", "system", "old.yml", []))
+    monkeypatch.setattr(run_script, "pane_state", lambda session: (True, 0))
+    monkeypatch.setattr(run_script, "job_is_complete", lambda job: False)
+
+    with pytest.raises(RuntimeError, match="output is incomplete"):
+        run_script.gpu_release_ready("0", release)
+
+
+def test_failed_gpu_release_keeps_other_gpu_available(monkeypatch, tmp_path):
+    run_script = load_run_script()
+    release = run_script.GpuRelease("old-session", run_script.Job("old-evaluation", "system", "old.yml", []))
+    job = run_script.Job("new-evaluation", "system", "new.yml", [])
+    launched = []
+
+    monkeypatch.setattr(run_script, "pane_state", lambda session: (True, 1) if session == "old-session" else (True, 0))
+    monkeypatch.setattr(run_script, "job_is_complete", lambda candidate: candidate.session is not None)
+    monkeypatch.setattr(run_script, "launch_job", lambda candidate, gpu, python, run_id: (launched.append(gpu), setattr(candidate, "session", "new-session")))
+
+    with pytest.raises(RuntimeError, match="did not complete successfully"):
+        run_script.run_queue([job], tmp_path / "python", ["0", "2"], "test", 0.001, {"0": release})
+
+    assert launched == ["2"]
+    assert job.status == "complete"
+
+
+def test_queue_requires_output_after_a_zero_exit_status(monkeypatch, tmp_path):
+    run_script = load_run_script()
+    job = run_script.Job("evaluation", "system", "changed-after-launch.yml", [])
+    python = tmp_path / "python"
+
+    monkeypatch.setattr(run_script, "job_is_complete", lambda job: False)
+    monkeypatch.setattr(run_script, "launch_job", lambda job, gpu, python, run_id: setattr(job, "session", "session"))
+    monkeypatch.setattr(run_script, "pane_state", lambda session: (True, 0))
+
+    with pytest.raises(RuntimeError, match="did not complete"):
+        run_script.run_queue([job], python, ["0"], "test", 0.001)
+
+    assert job.status == "failed"
 
 
 def test_job_commands_use_the_requested_evaluator_and_training_mode(tmp_path):
@@ -93,6 +233,25 @@ def test_job_commands_use_the_requested_evaluator_and_training_mode(tmp_path):
     assert run_script.job_command(run_script.Job("train", "train", "train.yml", []), python) == [str(python), "tools/train.py", "train", "train.yml"]
     assert run_script.job_command(run_script.Job("external", "evaluate", "test.yml", []), python) == [str(python), "tools/evaluate.py", "--overwrite", "test.yml"]
     assert run_script.job_command(run_script.Job("paper", "system", "system.yml", []), python) == [str(python), "tools/evaluate_system.py", "--overwrite", "system.yml"]
+    assert run_script.job_command(run_script.Job("swap", "package", "source;replacement;sleep;output", []), python) == [str(python), "iclr2026/scripts/package_exchange.py", "--source", "source", "--replacement", "replacement", "--task", "sleep", "--output", "output"]
+
+
+def test_naive_swap_launcher_uses_completion_gated_gpu_slots():
+    script = (REPO_ROOT / "iclr2026" / "scripts" / "run_naive_exchange.sh").read_text(encoding="utf-8")
+    declarations = [line.strip().removesuffix("\\").strip().strip('"') for line in script.splitlines() if any(kind in line for kind in ("|package|", "|system|", "|train|"))]
+    jobs = load_run_script().parse_jobs(declarations)
+
+    assert "--gpus 2,0,1" in script
+    assert script.count("--gpu-release") == 2
+    assert script.count("|package|") == 4
+    assert script.count("|system|") == 8
+    assert script.count("|train|") == 4
+    assert len(jobs) == 16
+    for family in ("sleepfm", "osf"):
+        for task in ("sleep", "breathing"):
+            assert f"eval-naive-{family}-{task}|system|" in script
+            assert f"train-adapted-naive-{family}-{task}|train|" in script
+            assert f"eval-adapted-naive-{family}-{task}|system|" in script
 
 
 def test_replace_yaml_block_materializes_complete_configs(tmp_path):
@@ -150,10 +309,8 @@ def test_external_configs_are_synchronized_with_iclr_sources():
             assert channels["NP"] == ["NEW AIR", "AIRFLOW", "THOR RES"]
         assert generated["test"]["output"] == f"results/iclr2026/other/shhs/{source.name.removesuffix('.yml')}.jsonl"
 
-    expert_sources = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml"))
-    graph_sources = sorted((REPO_ROOT / "iclr2026" / "configs" / "external" / "graphs").glob("*.yml"))
-    ruhrland_sources = expert_sources + graph_sources
-    assert len(ruhrland_sources) == 21
+    ruhrland_sources = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml"))
+    assert len(ruhrland_sources) == 12
     for cohort in ("pre2024", "2024"):
         cohort_dir = REPO_ROOT / "configs" / "other" / "ruhrland" / cohort
         cohort_data = yaml.safe_load((cohort_dir / "data.yml").read_text(encoding="utf-8"))
@@ -193,7 +350,7 @@ def test_external_data_blocks_cover_required_labels_and_distinct_cohorts():
 
 
 def test_external_runner_uses_general_package_evaluation_and_covers_generated_configs():
-    script_path = REPO_ROOT / "iclr2026" / "scripts" / "run.sh"
+    script_path = REPO_ROOT / "iclr2026" / "scripts" / "run_other.sh"
     script = script_path.read_text(encoding="utf-8")
     shhs_names = {path.name for path in (REPO_ROOT / "configs" / "other" / "shhs").glob("*.yml") if path.name != "data.yml"}
     ruhrland_names = {path.name for path in (REPO_ROOT / "configs" / "other" / "ruhrland" / "pre2024").glob("*.yml") if path.name != "data.yml"}
@@ -203,5 +360,5 @@ def test_external_runner_uses_general_package_evaluation_and_covers_generated_co
     assert script.count("--fractions 0 0 1") == 3
     for name in shhs_names:
         assert f"configs/other/shhs/{name}" in script
-    assert len(ruhrland_names) == 21
-    assert "Optional collaborator sweep: graph packages evaluated directly with tools/evaluate.py." in script
+    assert len(ruhrland_names) == 12
+    assert "SLEEPWALKER_ICLR2026_FULL_RUHRLAND" in script

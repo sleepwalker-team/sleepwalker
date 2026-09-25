@@ -5,31 +5,19 @@ from functools import partial
 from torch.utils.data import DataLoader, Dataset
 
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
-from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 import sleepwalker.trainer.utils.targets as target_utils
 from sleepwalker.trainer.losses import class_weights_for_loss, estimate_multilabel_class_cnts
 from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config, prepare_multitask_target
 
 
-class DummyEmbeddingModel(BaseModel, EmbeddingModel):
-    def __init__(self, n_channels, feature_dim):
+class ConstantMultiTaskModel(torch.nn.Module):
+    def __init__(self, task_config):
         super().__init__()
-        self.proj = torch.nn.Linear(n_channels, feature_dim, bias=False)
-        self._feature_dim = feature_dim
+        self.biases = torch.nn.ParameterDict({task: torch.nn.Parameter(torch.zeros(cfg["n_steps"], len(cfg["labels"]))) for task, cfg in task_config.items()})
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x.mean(dim=1))
-
-    def feature_dim(self) -> int:
-        return self._feature_dim
-
-    def compute(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encode(x)
-
-    def input_spec(self):
-        return (1, 4, self.proj.in_features), {"layout": "BTC", "ts_len": 4, "n_channels": self.proj.in_features}
+    def forward(self, inputs):
+        return {task: bias.unsqueeze(0).expand(inputs.shape[0], -1, -1) for task, bias in self.biases.items()}
 
 
 class MultiLabelBatchDataset(Dataset):
@@ -254,16 +242,10 @@ def test_run_epoch_masks_conditioned_tasks_during_wake():
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = ModelGraphClassifier(
-        nodes={"shared": GraphNode(DummyEmbeddingModel(1, 1), {task: {"classes": cfg["labels"], "sequence_len": cfg["sequence_len"]} for task, cfg in task_config.items()})},
-        method="latent",
-    )
+    model = ConstantMultiTaskModel(task_config)
     with torch.no_grad():
-        model.models["shared"].proj.weight.zero_()
-        model.heads["sleep"].weight.zero_()
-        model.heads["sleep"].bias.copy_(torch.tensor([0.0, 1.0]))
-        model.heads["breathing"].weight.zero_()
-        model.heads["breathing"].bias.copy_(torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0, 0.0]))
+        model.biases["sleep"].copy_(torch.tensor([[0.0, 1.0]]))
+        model.biases["breathing"].copy_(torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]))
 
     masked_trainer = MultiLabelTrainer(
         epochs=1,
@@ -318,18 +300,11 @@ def test_run_epoch_condition_mask_applies_to_entire_sample_when_condition_task_h
     ])
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
 
-    model = ModelGraphClassifier(
-        nodes={"shared": GraphNode(DummyEmbeddingModel(1, 1), {task: {"classes": cfg["labels"], "sequence_len": cfg["sequence_len"]} for task, cfg in task_config.items()})},
-        method="latent",
-    )
+    model = ConstantMultiTaskModel(task_config)
     with torch.no_grad():
-        model.models["shared"].proj.weight.zero_()
-        model.heads["coarse"].weight.zero_()
-        model.heads["coarse"].bias.copy_(torch.tensor([1.0, 0.0]))
-        model.heads["sleep"].weight.zero_()
-        model.heads["sleep"].bias.copy_(torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0, 0.0]))
-        model.heads["breathing"].weight.zero_()
-        model.heads["breathing"].bias.copy_(torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0, 0.0]))
+        model.biases["coarse"].copy_(torch.tensor([[1.0, 0.0]]))
+        model.biases["sleep"].copy_(torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]))
+        model.biases["breathing"].copy_(torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]))
 
     masked_trainer = MultiLabelTrainer(
         epochs=1,

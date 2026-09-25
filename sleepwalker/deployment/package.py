@@ -17,6 +17,7 @@ import pandas as pd
 import torch
 
 from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.predictions import format_prediction_batch
@@ -169,15 +170,20 @@ class PackagedModel:
             return
         assert_single_dataset_compatible(self.dataset, dataset, allow_preprocessing_override=allow_preprocessing_override)
 
-    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", allow_preprocessing_override: bool = False, progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", allow_preprocessing_override: bool = False, progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False, edf_cache_patients: int = 3, pin_memory: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
         """Run this classifier on an initialized compatible dataset."""
         if self.classification_contract is None:
             raise TypeError(f"Package '{self.name}' has no classification contract.")
         self.assert_compatible(dataset, allow_preprocessing_override=allow_preprocessing_override)
         if not hasattr(dataset, "set_rejection_strategy"):
             raise TypeError(f"{dataset.__class__.__name__} does not support rejection strategies.")
+        if edf_cache_patients < 0:
+            raise ValueError("edf_cache_patients must not be negative.")
         dataset.set_rejection_strategy(rejection_strategy)
-        loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=seed, rejection_strategy=None, n_views=n_repeat)
+        cache = EDFCache(edf_cache_patients) if edf_cache_patients > 0 and hasattr(dataset, "set_edf_cache") else None
+        if cache is not None:
+            dataset.set_edf_cache(cache)
+        loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=seed, rejection_strategy=None, n_views=n_repeat, pin_memory=pin_memory, persistent_workers=False)
         execution_model = (RepeatedViewModel(self.model) if n_repeat > 1 else self.model).to(device)
         execution_model.eval()
         contract = self.classification_contract
@@ -209,6 +215,9 @@ class PackagedModel:
         finally:
             if progress:
                 logger.progress_close()
+            if cache is not None:
+                dataset.set_edf_cache(None)
+                cache.close()
         predictions = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if return_received_windows:
             return predictions, dict(received_windows)
@@ -266,32 +275,6 @@ class PackagedModel:
         package = torch.load(payload_path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
         if not isinstance(package, cls):
             raise TypeError(f"Expected a PackagedModel payload, got {type(package).__name__}.")
-        model_state = vars(package.model)
-        is_graph = package.model.__class__.__module__ == "sleepwalker.models.ModelGraphClassifier" and package.model.__class__.__name__ == "ModelGraphClassifier"
-        if is_graph:
-            legacy_graph = "input_offsets" not in model_state
-            model_state.setdefault("native_outputs", package.model.node_outputs)
-            plans = model_state.get("execution_plans", {})
-            model_state.setdefault("input_offsets", {name: None if plans.get(name) is None else list(plans[name]["input_offsets_ns"]) for name in package.model.node_names})
-            model_state.setdefault("prediction_indices", {name: None if plans.get(name) is None else {next(iter(package.model.native_outputs[name])): list(plans[name]["alignment"])} for name in package.model.node_names})
-            configured_tasks = package.config.get("trainer", {}).get("task_config", {})
-            if legacy_graph and package.classification_contract is not None and package.classification_contract.get("type") == "multitask" and set(configured_tasks) == set(package.classification_contract["tasks"]):
-                legacy_output_span = max(pd.to_timedelta(task["target_offset"]) + pd.to_timedelta(task["target_resolution"]) * int(task["n_steps"]) for task in package.classification_contract["tasks"].values())
-                centered_output_offset = (package.dataset.total_input - legacy_output_span) / 2
-                for task, task_contract in package.classification_contract["tasks"].items():
-                    configured = configured_tasks[task]
-                    if list(task_contract["classes"]) != list(configured["labels"]) or int(task_contract["n_steps"]) != int(configured["sequence_len"]):
-                        raise ValueError(f"Legacy graph package '{package.name}' has inconsistent configured output shape for task '{task}'.")
-                    task_contract["target_resolution"] = str(pd.to_timedelta(configured["target_resolution"]))
-                    configured_offset = configured.get("target_offset")
-                    task_contract["target_offset"] = str(centered_output_offset + pd.to_timedelta(task_contract["target_offset"]) if configured_offset is None else pd.to_timedelta(configured_offset))
-        dataset_state = vars(package.dataset)
-        if package.dataset.__class__.__module__ == "sleepwalker.models.ModelGraphClassifier" and package.dataset.__class__.__name__ == "PairedDataset":
-            plans = dataset_state.get("execution_plans", {})
-            dataset_state.setdefault("base", dataset_state.get("reference"))
-            dataset_state.setdefault("input_offsets", {name: list(plan["input_offsets_ns"]) for name, plan in plans.items()})
-            if is_graph:
-                model_state.setdefault("input_datasets", dict(package.dataset.datasets))
         if package.classification_contract is not None and package.classification_contract.get("type") == "single-head-multiclass" and hasattr(package.dataset, "target_resolution"):
             legacy_resolution = pd.to_timedelta(package.dataset.target_resolution)
             package.classification_contract = {

@@ -14,23 +14,28 @@ from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel
+from sleepwalker.deployment.evaluation import resolve_entry_files
 from sleepwalker import prediction_transforms
-from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
-from iclr2026.pipeline import pair_datasets
-from sleepwalker.models.ModelGraphClassifier import GraphNode, ModelGraphClassifier
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-class MeanClassifier(BaseModel, ClassifierModel):
+class MeanClassifier(BaseModel, EmbeddingModel, ClassifierModel):
     def __init__(self, n_classes: int, ts_len: int = 300):
         super().__init__()
-        self.linear = torch.nn.Linear(1, n_classes)
+        self.head = torch.nn.Linear(1, n_classes)
         self.ts_len = int(ts_len)
 
+    def encode(self, x):
+        return x.mean(dim=1)
+
+    def feature_dim(self):
+        return 1
+
     def compute(self, x):
-        return self.linear(x.mean(dim=1)).unsqueeze(1)
+        return self.head(self.encode(x)).unsqueeze(1)
 
     def input_spec(self):
         return (1, self.ts_len, 1), {"layout": "BTC", "ts_len": self.ts_len, "n_channels": 1}
@@ -117,7 +122,7 @@ def test_package_fold_selects_matching_manifest_fold(tmp_path):
     path = tmp_path / "split.yml"
     path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
-    files, selected_fold = test_tool.resolve_entry_files(package, {"label": "internal", "split": {"file": str(path)}})
+    files, selected_fold = resolve_entry_files(package, {"label": "internal", "split": {"file": str(path)}})
 
     assert files == ["a.edf"]
     assert selected_fold == "fold_1"
@@ -253,51 +258,3 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
     assert len(output.read_text(encoding="utf-8").splitlines()) == 3
     assert any("windows" in status and "failed batches" in status and "inference" not in status and "predictions" not in status for status in progress_statuses)
     assert any("analysis | patient" in status and "kept" in status for status in progress_statuses)
-
-
-def test_paired_graph_package_uses_the_regular_labelled_evaluator(tmp_path):
-    sleep_classes = ["wake", "n2", "n3", "rem", "other"]
-    event_classes = ["event", "no event"]
-    slow = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=10, total_input="60s", stride="30s")
-    fast = UnlabelledDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=5, total_input="20s", stride="20s")
-    nodes = {
-        "long": GraphNode(MeanClassifier(len(sleep_classes), ts_len=600), {"long": {"classes": sleep_classes, "sequence_len": 1}}),
-        "short": GraphNode(MeanClassifier(len(event_classes), ts_len=100), {"short": {"classes": event_classes, "sequence_len": 1}}),
-    }
-    package = PackagedModel(
-        name="paired",
-        task="multitask",
-        model=ModelGraphClassifier(nodes=nodes, method="probability"),
-        dataset=pair_datasets({"long": slow, "short": fast}),
-        classification_contract={
-            "type": "multitask",
-            "tasks": {
-                "long": {"classes": sleep_classes, "n_steps": 1, "target_resolution": "60s", "target_offset": "0s", "default": "other", "percentage": 0.5, "soft_boundaries": False},
-                "short": {"classes": event_classes, "n_steps": 1, "target_resolution": "20s", "target_offset": "20s", "default": "no event", "percentage": 0.5, "soft_boundaries": False},
-            },
-        },
-    )
-    manifest = write_unsplit_manifest(tmp_path / "files.yml", [str(REPO_ROOT / "tests" / "data" / "signals_01.edf")])
-    output = tmp_path / "paired.jsonl"
-    config = {
-        "seed": 17,
-        "data": {
-            "label": "synthetic",
-            "files": str(manifest),
-            "dataset": {
-                "name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset",
-                "event_mapping": {"wake": "wake", "n1": "event", "n2": "n2", "n3": "n3", "rem": "rem"},
-            },
-            "num_workers": 0,
-            "strict": True,
-        },
-        "analyses": [{"name": "all"}],
-        "test": {"device": "cpu", "batch_size": 32, "num_workers_dataloader": 0, "output": str(output)},
-    }
-
-    result = load_test_tool().execute(package, config)
-    records = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
-
-    aggregates = [record for record in records if record["record_type"] == "aggregate"]
-    assert {record["task"] for record in aggregates} == {"long", "short"}
-    assert all(record["n_patients_evaluated"] == 1 for record in aggregates)

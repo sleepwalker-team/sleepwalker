@@ -9,7 +9,6 @@ from functools import partial
 from typing import Callable, Optional
 
 import numpy as np
-import pandas as pd
 import torch
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.losses import build_multilabel_task_masks, class_weights_for_loss, estimate_multilabel_class_cnts
@@ -297,7 +296,6 @@ class MultiLabelTrainer(BaseTrainer):
                 ] if self.condition_task is not None else None,
                 conditioned_tasks=list(self.conditioned_tasks) if self.condition_task is not None else None,
             )
-
             losses = []
             batch_cms = {} if self.log_batches else None
             for task_idx, cfg in enumerate(self.task_specs):
@@ -336,7 +334,8 @@ class MultiLabelTrainer(BaseTrainer):
                 per_task_loss_weights[task_idx] += task_loss_weight
                 per_task_correct[task_idx] += int((pred_flat == y_flat).sum().item())
                 per_task_counts[task_idx] += int(y_flat.numel())
-                losses.append(loss_task)
+                if opt is None or loss_task.requires_grad:
+                    losses.append(loss_task)
 
                 counts = torch.bincount(
                     y_flat.to(dtype=torch.int64) * n_classes + pred_flat.to(dtype=torch.int64),

@@ -13,7 +13,7 @@ class DummyDataset:
 
 
 def load_estimator():
-    path = REPO_ROOT / "iclr2026" / "estimate_class_distribution.py"
+    path = REPO_ROOT / "iclr2026" / "scripts" / "estimate_class_distribution.py"
     spec = importlib.util.spec_from_file_location("iclr_class_distribution", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

@@ -17,7 +17,7 @@ import torch
 from torchinfo import summary
 
 from sleepwalker.deployment import save_packaged_model
-from sleepwalker.models.ModelGraphClassifier import ModelGraphClassifier
+from sleepwalker.models.StackedClassifierModel import StackedClassifierModel
 from sleepwalker.trainer.utils.disk import write_json
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
@@ -121,12 +121,12 @@ def export_final_checkpoint(cfg: RunCfg) -> None:
 
 
 def model_statistics(model: torch.nn.Module) -> dict[str, int]:
-    """Return structured parameter and graph communication counts."""
+    """Return structured parameter and composition communication counts."""
     statistics = {
         "total_parameters": sum(parameter.numel() for parameter in model.parameters()),
         "trainable_parameters": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
     }
-    if isinstance(model, ModelGraphClassifier):
+    if isinstance(model, StackedClassifierModel):
         statistics["communication_scalars_per_window"] = model.communication_scalars()
     return statistics
 
@@ -167,7 +167,7 @@ def run(cfg: RunCfg) -> RunResult:
     logger.hparams(cfg.meta_data)
     logger.info(f"Model parameters: {statistics['trainable_parameters']:,} trainable / {statistics['total_parameters']:,} total")
     if "communication_scalars_per_window" in statistics:
-        logger.info(f"Graph communication: {statistics['communication_scalars_per_window']:,} scalars per window")
+        logger.info(f"Composition communication: {statistics['communication_scalars_per_window']:,} scalars per window")
 
     # TODO: Remove testing from this ??
     logger.info(f"Loaded {train_dataset.get_n_patients()} for training")

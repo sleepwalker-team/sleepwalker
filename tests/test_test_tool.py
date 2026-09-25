@@ -64,23 +64,6 @@ def write_unsplit_manifest(path: Path, files: list[str]) -> Path:
     return path
 
 
-def test_paper_evaluation_configs_are_valid():
-    test_tool = load_test_tool()
-    paths = sorted((REPO_ROOT / "iclr2026" / "configs" / "experts" / "test").glob("*.yml"))
-    tasks = {"sleep", "arousal", "breathing", "desaturation"}
-    expected = {
-        *(f"{task}_{model}" for task in tasks for model in ("sleepwalker", "osf")),
-        *(f"{task}_sleepfm" for task in tasks),
-    }
-
-    assert {path.stem for path in paths} == expected
-    for path in paths:
-        config = test_tool.read_config(path)
-        assert isinstance(config["data"], dict)
-        assert config["data"]["label"] == "HSP-test"
-        assert "channel_catalog" not in str(config)
-        assert "source" not in str(config)
-        assert test_tool.build_analyses(config["analyses"])
 
 
 def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path):

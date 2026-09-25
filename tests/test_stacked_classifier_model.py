@@ -15,7 +15,6 @@ from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel, load_packaged_model
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
 from sleepwalker.models.StackedClassifierModel import AlignedPackagedClassifier, RateResampler, StackedClassifierModel, timeline_resampler
-from iclr2026.scripts.package_exchange import exchange_package
 
 
 DATA = Path(__file__).parent / "data"
@@ -254,21 +253,3 @@ def test_stacked_package_round_trip(tmp_path):
     assert set(outputs) == {"source", "target"}
 
 
-@pytest.mark.parametrize("alignment,expected_calls", [("contract", 3), ("naive", 1)])
-def test_exchange_package_replans_replaced_expert_and_preserves_corrections(tmp_path, alignment, expected_calls):
-    model, _, _ = two_expert_stack("frozen", context_init_std=0, alignment=alignment)
-    with torch.no_grad():
-        model.correction_heads["target"].weight.fill_(0.25)
-    dataset = model.pair_dataset(UnlabelledDataset(channels=[], sample_frequency=1, total_input="4s", stride="4s"))
-    contract = {"type": "multitask", "tasks": {name: {"classes": model.experts[name].output["classes"], "n_steps": 4, "target_resolution": "1s", "target_offset": "0s"} for name in model.expert_names}}
-    source_path = PackagedModel(name="stack", task="multitask", model=model, dataset=dataset, classification_contract=contract).save(tmp_path / "stack")
-    replacement_model = SpanExpert(20, ["off", "on"], 2)
-    replacement_path = package("source", replacement_model, span="2s").save(tmp_path / "replacement")
-
-    exchanged = exchange_package(source_path, replacement_path, "source", tmp_path / "exchanged")
-
-    assert exchanged.model.alignment == alignment
-    assert len(exchanged.model.experts["source"].input_offsets) == expected_calls
-    assert torch.equal(exchanged.model.correction_heads["target"].weight, model.correction_heads["target"].weight)
-    predictions = exchanged.model({name: torch.randn(*shape) for name, shape in exchanged.model.input_spec()[0].items()})
-    assert set(predictions) == {"source", "target"}

@@ -9,3 +9,7 @@ Low-level objects that dataset classes build on. Most users work with the higher
 ## `EventIndex`
 
 ::: sleepwalker.datasets.Basedataset.EventIndex
+
+## `EDFCache` {#edf-cache}
+
+::: sleepwalker.datasets.EDFCache.EDFCache

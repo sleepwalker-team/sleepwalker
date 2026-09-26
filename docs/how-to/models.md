@@ -73,7 +73,8 @@ The available preprocessors (`Spectrogram`, `WindowedSpectrogram`, `Normalize`, 
 | Event tasks at fine resolution (apnea, desaturation) | `UTime` | Per-epoch output via `epoch_len`; used by the breathing configs. |
 | Self-supervised pretraining | `MaskedAutoencoder`, `CLSMaskedAutoencoder` | Reconstruction objectives; modality-keyed inputs (not `BaseModel`). |
 | Reuse a pretrained package as a backbone | `PackagedClassifierModel`, `PackagedSequenceClassifierModel` | Frozen encoder + trainable head; see below. |
-| Several packaged models as one system | `ModelGraphClassifier` | Graph of packaged nodes returning task-dict logits; pairs with `MultiLabelTrainer`. |
+| One encoder, several task heads | `MultiTaskClassifierModel` | Shared features with a separate output contract per task; pairs with `MultiLabelTrainer`. |
+| Several packaged experts | `StackedClassifierModel` | Aligns native expert predictions and learns task corrections; pairs with `PairedDataset`. |
 
 All models are selected in YAML by fully qualified path, and the CLI injects `classes`, `ts_len`, `n_channels`, `sampling_frequency`, and `sequence_len` from the dataset context:
 

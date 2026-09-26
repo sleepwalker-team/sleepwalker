@@ -17,7 +17,6 @@ data:
       sleep stage 4: n3
       sleep stage r: rem
     total_input: 450s
-
     stride: 30s
     assume_units_if_missing: false
     output_classes: [wake, n1, n2, n3, rem]
@@ -44,6 +43,7 @@ model:
   seq_len: 15
   use_lstm: true
 trainer:
+  target_offset: 0 days 00:03:30
   target_resolution: 30s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 100

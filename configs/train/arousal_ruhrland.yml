@@ -25,7 +25,6 @@ data:
     n3: sleep
     rem: sleep
   total_input: 60s
-
   stride: 1s
   output_classes: [no_arousal, arousal]
   prepare_patient:
@@ -62,6 +61,7 @@ model:
     - name: sleepwalker.training.callbacks.robust_scaler
       skip_first: 1
 trainer:
+  target_offset: 0 days 00:00:29.500000
   target_resolution: 1s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 35

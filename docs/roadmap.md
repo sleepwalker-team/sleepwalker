@@ -46,7 +46,7 @@ This page records useful features discovered while writing and testing the docum
 
 ## Document multitask and overlapping-event targets {#document-multitask-targets}
 
-**Current state:** The [multilabel target guide](how-to/multilabel.md) now documents the task configuration, the padded target and mask tensor shapes, `prepare_multitask_target()`, and `MultiLabelTrainer`, and the trainer and target helpers are rendered in the [trainers reference](reference/trainers.md). What is still missing is a verified end-to-end example: no YAML in `configs/` trains `MultiLabelTrainer`, and the only multitask-shaped model in the library is `ModelGraphClassifier`, so a simple two-head `BaseModel` example has not been run against real data.
+**Current state:** The [multilabel target guide](how-to/multilabel.md) now documents the task configuration, the padded target and mask tensor shapes, `prepare_multitask_target()`, and `MultiLabelTrainer`, and the trainer and target helpers are rendered in the [trainers reference](reference/trainers.md). What is still missing is a verified end-to-end example: no YAML in `configs/` trains `MultiLabelTrainer`, and `MultiTaskClassifierModel` and `StackedClassifierModel` now return task dictionaries, but no end-to-end YAML example has been run against real data.
 
 **Target:** Add one working configuration with overlapping annotations (dataset + two-head model + `MultiLabelTrainer`), verify it end to end, and link it from the guide.
 

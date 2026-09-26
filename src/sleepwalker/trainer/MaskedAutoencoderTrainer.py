@@ -14,7 +14,16 @@ from abc import ABC
 
 from sleepwalker.utils import logger
 from sleepwalker.trainer.BaseTrainer import build_lr_scheduler
-from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix, store_checkpoint
+from sleepwalker.trainer.utils import cohen_kappa_from_confusion_matrix, f1_score_from_confusion_matrix
+
+
+def store_checkpoint(model, optimizer, scheduler, folder):
+    os.makedirs(folder, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(folder, "model.pt"))
+    torch.save(optimizer.state_dict(), os.path.join(folder, "optimizer.pt"))
+    if scheduler is not None:
+        torch.save(scheduler.state_dict(), os.path.join(folder, "scheduler.pt"))
+    return folder
 
 def masked_mse(y_pred, y_true, mask):
     sq_err = (y_pred - y_true)**2
@@ -68,6 +77,11 @@ class MaskedAutoencoderTrainer(ABC):
             self.downstream_tasks = downstream_tasks 
 
         self.groups = groups
+        self.best_model_idx = None
+        self.best_checkpoint = None
+        self.steps = {"train": 0, "val": 0, "test": 0}
+        self.epoch_step = 0
+        self.last_folder = None
 
     def metrics_from_cm(self, cm: np.ndarray, mode: str, scope: str = "batch"):
         """Centralized metric logging from confusion matrix."""  

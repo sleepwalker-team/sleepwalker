@@ -6,7 +6,7 @@ The design target is terabytes of recordings: cohorts of thousands of patients, 
 
 ## Every window is read from disk
 
-As explained in [loading data](data.md), `initialize()` stores only metadata: patient descriptors, label indices, and window start positions. Signal values stay on disk. Each call to `dataset[idx]` resolves the index to a patient and a window start, and `EDFFile.get_x` reads that window through `edf_to_df`, which opens a fresh `pyedflib.EdfReader`, seeks to the sample offset of the window, reads the raw samples, and closes the handle again. Nothing is cached between calls.
+As explained in [loading data](data.md), `initialize()` stores only metadata: patient descriptors, label indices, and window start positions. Signal values stay on disk. Each call to `dataset[idx]` resolves the index to a patient and a window start, and `EDFFile.get_x` reads that window through `edf_to_df`, which opens a fresh `pyedflib.EdfReader`, seeks to the sample offset of the window, reads the raw samples, and closes the handle again. For ordinary training access, complete recordings are not retained between calls. Packaged-model inference can use the shared EDF cache described below.
 
 The EDF format shapes what "reading a window" costs. EDF stores samples as 16-bit integers grouped into fixed-duration data records, and every record contains all channels back to back. Reading one channel over a window therefore means many small strided reads — one slice per record — rather than one contiguous block. For a window of duration \(L\) and a channel sampled at \(f_c\), the channel contributes
 
@@ -50,13 +50,19 @@ Initialization has its own cost profile. `initialize()` reads only EDF headers a
 
 <!-- TODO: `EDFFile` carries a `handle` field, but `get_x` passes the file *path* to `edf_to_df`, so every window access opens and closes a new `pyedflib.EdfReader`. Reusing one open handle per worker would remove the per-window open/close overhead. See the [roadmap](../roadmap.md#reuse-open-edf-reader-handles). -->
 
+## Shared EDF cache during inference
+
+`PackagedModel.predict_dataset()` uses `edf_cache_patients=3` by default when the dataset supports `set_edf_cache()`. [`EDFCache`](../reference/loading.md#edf-cache) stores complete resampled recordings as memory-mapped NumPy arrays and shares them across DataLoader workers. It retains at most that many patients; `edf_cache_patients=0` disables it. The cache is closed after prediction, including when prediction raises an exception. Set `pin_memory=True` if page-locked batches help transfers to a GPU. This cache uses shared memory when available and otherwise uses the system temporary directory.
+
+The model still receives windows with its original channel, unit, normalization, and timing contracts. Cache size controls memory use; it does not change the prediction contract.
+
 ## Simple knobs: workers and threads
 
 There are two unrelated `num_workers` settings, and both matter.
 
 **Initialization workers.** `dataset.initialize(patients, num_workers=8)` runs header parsing, unit validation, and annotation mapping in a `multiprocessing.Pool` over the patient list. This shortens startup only; it does not affect per-window loading.
 
-**DataLoader workers.** The loader's `num_workers` controls how many processes materialize windows in parallel while the GPU consumes already-prepared batches. [`build_loader()`](../reference/api.md#build-loader) sets this up for you: whenever `num_workers > 0`, it enables `persistent_workers=True` (workers survive across epochs and keep their dataset copy), `prefetch_factor=2` (each worker keeps two batches in flight), and `pin_memory=True` (batches land in page-locked memory for fast host-to-device transfer).
+**DataLoader workers.** The loader's `num_workers` controls how many processes materialize windows in parallel while the GPU consumes already-prepared batches. [`build_loader()`](../reference/api.md#build-loader) sets this up for you: with `num_workers > 0`, it defaults to `persistent_workers=True` (workers survive across epochs and keep their dataset copy), `prefetch_factor=2` (each worker keeps two batches in flight), and `pin_memory=True` (batches land in page-locked memory for fast host-to-device transfer). Both `persistent_workers` and `pin_memory` can be set explicitly.
 
 The goal is to hide sample preparation behind GPU compute. If one window takes \(t_\text{cpu}\) seconds to read and normalize, and one training step takes \(t_\text{gpu}\) seconds, the GPU stays busy only if the worker pool produces faster than the GPU consumes:
 
@@ -217,6 +223,7 @@ bytes for `data` alone. A common configuration — 250,000 windows of 30 s at 10
 | Configuration | RAM | Disk reads per epoch | Use when |
 | --- | --- | --- | --- |
 | EDF lazy, `num_workers=0` | minimal | full | debugging, tiny cohorts |
+| EDF shared cache for packaged inference | bounded by cached patients | one full read per cached patient | repeated windows or expert inputs |
 | EDF lazy + workers + thread caps | low | full, but overlapped with compute | default training |
 | EDF lazy + `PatientSampler` | low | reduced (warm page cache) | large cohorts, I/O-bound |
 | `NumpyDataset` in memory | high | ~none | repeated experiments, cache fits in RAM |

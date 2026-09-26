@@ -34,7 +34,6 @@ data:
     mixed-apnea: apnea
     hypopnea: hypopnea
   total_input: 60s
-
   stride: 1s
   output_classes: [apnea, hypopnea, regular breathing]
   prepare_patient:
@@ -76,6 +75,7 @@ model:
       lower_quantile: 0.1
       upper_quantile: 0.9
 trainer:
+  target_offset: 0 days 00:00:27.500000
   target_resolution: 5s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 20

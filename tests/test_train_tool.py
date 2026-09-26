@@ -10,7 +10,7 @@ import yaml
 
 import sleepwalker.datasets.HSP as hsp_dataset
 import sleepwalker.cli.train as train_tool
-from sleepwalker.datasets import ChannelConfig
+from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.training.callbacks import prepare_patient_events
 from sleepwalker.training import files as training_files
 

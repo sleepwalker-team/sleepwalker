@@ -128,13 +128,27 @@ These wrap an existing [`PackagedModel`](api.md#packaged-model) encoder so a pre
     options:
       show_root_heading: false
 
-## Graph model
+## Multitask and composition models
 
-### `ModelGraphClassifier` {#modelgraphclassifier}
+`MultiTaskClassifierModel` gives one shared embedding encoder a separate head for each task. It returns task-keyed logits for `MultiLabelTrainer`.
 
-A model whose nodes are packaged encoders connected as a graph. `compute()` returns a **dictionary of task logits**, which is the shape [`MultiLabelTrainer`](trainers.md#multilabel-trainer) consumes. Nodes are loaded with `load_graph_nodes()` and can be trainable or frozen.
+### `MultiTaskClassifierModel` {#multitask-classifier-model}
 
-::: sleepwalker.models.ModelGraphClassifier.ModelGraphClassifier
+::: sleepwalker.models.MultiTaskClassifierModel.MultiTaskClassifierModel
+    options:
+      show_root_heading: false
+
+`StackedClassifierModel` combines existing packaged task experts on an aligned timeline. It adds trainable correction heads over the other experts' class probabilities. `PairedDataset` loads the native input windows each expert needs.
+
+### `StackedClassifierModel` {#stacked-classifier-model}
+
+::: sleepwalker.models.StackedClassifierModel.StackedClassifierModel
+    options:
+      show_root_heading: false
+
+### `PairedDataset` {#paired-dataset}
+
+::: sleepwalker.datasets.PairedDataset.PairedDataset
     options:
       show_root_heading: false
 

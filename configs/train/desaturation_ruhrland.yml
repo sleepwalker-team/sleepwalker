@@ -32,7 +32,6 @@ data:
     rem: sleep
     entsättigung: desaturation
   total_input: 100s
-
   stride: 2s
   output_classes: [desaturation, no desaturation]
   prepare_patient:
@@ -77,6 +76,7 @@ model:
   norm: channel
   mlp_size: 256
 trainer:
+  target_offset: 0 days 00:00:45
   target_resolution: 10s
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   epochs: 50

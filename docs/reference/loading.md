@@ -13,3 +13,20 @@ Low-level objects that dataset classes build on. Most users work with the higher
 ## `EDFCache` {#edf-cache}
 
 ::: sleepwalker.datasets.EDFCache.EDFCache
+    options:
+      show_root_heading: false
+      members:
+        - acquire
+        - store_frame
+        - attach
+        - copy_window
+        - close_local
+        - close
+
+### `EDFCacheEntry` {#edf-cache-entry}
+
+::: sleepwalker.datasets.EDFCache.EDFCacheEntry
+    options:
+      show_root_heading: false
+      members:
+        - copy_window

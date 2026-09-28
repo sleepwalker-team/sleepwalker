@@ -1,4 +1,10 @@
-"""Process-shared cache for complete resampled EDF recordings."""
+"""Process-shared cache for complete resampled EDF recordings.
+
+The cache is intended for repeated window access, especially during packaged
+model inference. It stores one complete resampled recording per cache key as a
+memory-mapped NumPy array and uses a manager-backed registry to coordinate
+cache misses between DataLoader workers.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +23,13 @@ import pandas as pd
 
 
 class EDFCacheEntry:
-    """Expose one process-local mapping of a globally cached recording."""
+    """Expose one process-local mapping of a globally cached recording.
+
+    Entries are returned by :meth:`EDFCache.acquire` and should be used as a
+    context manager. ``copy_window`` copies requested samples out of the
+    memory map, so the returned DataFrame remains valid after the entry is
+    released.
+    """
 
     def __init__(self, cache, key: Hashable, metadata: dict, array: np.ndarray):
         self.cache = cache
@@ -26,9 +38,16 @@ class EDFCacheEntry:
         self.array = array
 
     def __enter__(self):
+        """Return this entry for use in a ``with`` block."""
         return self
 
     def copy_window(self, start: pd.Timestamp, end: pd.Timestamp, channels: Sequence[str]) -> pd.DataFrame:
+        """Copy one time window and selected channels into a DataFrame.
+
+        The requested interval is aligned to the cached sample grid. The end
+        timestamp is treated as an exclusive boundary, and a request that
+        falls outside the recording is clipped to the available samples.
+        """
         if self.array is None:
             raise RuntimeError("EDF cache entry must be entered before it can be read.")
         available = list(self.metadata["columns"])
@@ -48,6 +67,7 @@ class EDFCacheEntry:
         return pd.DataFrame(values, columns=list(channels), index=index)
 
     def __exit__(self, exception_type, exception, traceback):
+        """Release the entry context."""
         pass
 
 
@@ -56,10 +76,30 @@ class EDFCache:
 
     Complete recordings are stored as NumPy memory maps. A manager-backed
     registry coordinates cache misses and leases; signal samples never pass
-    through the manager process.
+    through the manager process. Each process opens a local mapping only when
+    it first accesses a recording. The local mappings are also bounded by
+    ``max_patients`` and are closed when the least recently used patient is
+    displaced.
+
+    Use the cache as a context manager. The owning process removes the cache
+    directory and shuts down the registry when the context exits. A cache can
+    be passed to spawned DataLoader workers; workers close their local memory
+    maps without shutting down the shared registry.
     """
 
     def __init__(self, max_patients: int, directory: str | os.PathLike | None = None, loading_timeout: float = 3600.0):
+        """Create a shared cache.
+
+        Args:
+            max_patients: Maximum number of patients retained at once. All
+                recordings for one patient are evicted together.
+            directory: Parent directory for temporary cache files. The cache
+                prefers ``/dev/shm`` when writable and falls back to the
+                system temporary directory. The directory is created and
+                removed by the cache.
+            loading_timeout: Maximum number of seconds a worker waits for
+                another process to finish populating the same key.
+        """
         if max_patients < 1:
             raise ValueError("max_patients must be positive.")
         if loading_timeout <= 0:
@@ -87,9 +127,11 @@ class EDFCache:
         return state
 
     def __enter__(self):
+        """Return this cache for use in a ``with`` block."""
         return self
 
     def __exit__(self, exception_type, exception, traceback):
+        """Close the cache and remove its temporary files."""
         self.close()
 
     def next_access(self) -> int:
@@ -97,6 +139,12 @@ class EDFCache:
         return int(self.clock.value)
 
     def store_frame(self, frame: pd.DataFrame) -> dict:
+        """Store one complete, uniformly sampled recording as a memmap.
+
+        The frame must contain at least two samples on a uniform time index.
+        Values are stored as contiguous ``float32`` samples. The returned
+        metadata is suitable for registration in the shared cache.
+        """
         if frame.empty:
             raise ValueError("Cannot cache an empty EDF recording.")
         if len(frame.index) < 2:
@@ -122,7 +170,13 @@ class EDFCache:
         }
 
     def acquire(self, key: Hashable, patient: str, loader: Callable[[], pd.DataFrame]) -> EDFCacheEntry:
-        """Acquire a recording, populating one shared miss in the calling worker."""
+        """Acquire a recording, populating one shared miss in the calling worker.
+
+        ``loader`` is called only by the process that wins a cache miss. Other
+        processes wait for that population to finish and then attach to the
+        same memory-mapped recording. The returned entry must be used as a
+        context manager while its window is being copied.
+        """
         local = self.local_entries.get(key)
         if local is not None:
             self.touch_local_patient(patient)

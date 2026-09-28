@@ -50,12 +50,6 @@ Initialization has its own cost profile. `initialize()` reads only EDF headers a
 
 <!-- TODO: `EDFFile` carries a `handle` field, but `get_x` passes the file *path* to `edf_to_df`, so every window access opens and closes a new `pyedflib.EdfReader`. Reusing one open handle per worker would remove the per-window open/close overhead. See the [roadmap](../roadmap.md#reuse-open-edf-reader-handles). -->
 
-## Shared EDF cache during inference
-
-`PackagedModel.predict_dataset()` uses `edf_cache_patients=3` by default when the dataset supports `set_edf_cache()`. [`EDFCache`](../reference/loading.md#edf-cache) stores complete resampled recordings as memory-mapped NumPy arrays and shares them across DataLoader workers. It retains at most that many patients; `edf_cache_patients=0` disables it. The cache is closed after prediction, including when prediction raises an exception. Set `pin_memory=True` if page-locked batches help transfers to a GPU. This cache uses shared memory when available and otherwise uses the system temporary directory.
-
-The model still receives windows with its original channel, unit, normalization, and timing contracts. Cache size controls memory use; it does not change the prediction contract.
-
 ## Simple knobs: workers and threads
 
 There are two unrelated `num_workers` settings, and both matter.
@@ -167,6 +161,57 @@ block-beta
 
 !!! warning "Fewer patients means more correlated batches"
     Windows inside one locality group come from at most \(g\) patients. Batch statistics such as BatchNorm running means therefore see strongly correlated data. Keep \(g\) at or above the diversity floor and prefer larger groups when the GPU is not I/O limited.
+
+## EDFCache: reuse decoded recordings
+
+[`EDFCache`](../reference/loading.md#edf-cache) decodes and resamples a complete recording once, then serves later windows from a memory-mapped NumPy array. The cache is shared by DataLoader worker processes, so a recording loaded by one worker can be reused by the others without sending signal samples through the manager process. It is useful during training as well as packaged inference.
+
+With `PatientSampler`, set the cache bound to cover the locality group that is active at one time. The sampler interleaves windows from the patients in one group before moving to the next group, so a cache with `max_patients` at least as large as `patient_group_size` can keep that group's complete recordings available while its windows are consumed. A larger bound also covers prefetched batches and reduces reloads when groups overlap across workers.
+
+Attach one cache to the dataset before building the training loader and close it after the loader has stopped using it:
+
+```python
+from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.EDFCache import EDFCache
+from sleepwalker.training.loader import build_loader
+
+with EDFCache(max_patients=8) as cache:
+    dataset.set_edf_cache(cache)
+    loader = build_loader(
+        dataset,
+        batch_size=32,
+        num_workers=8,
+        n_samples=100_000,
+        collate_fn=batch_collate,
+        sampling="patient_balanced",
+        seed=0,
+        patients_per_epoch=32,
+        patient_group_size=8,
+        pin_memory=True,
+    )
+    train(model, loader)
+    dataset.set_edf_cache(None)
+```
+
+Here the cache can retain the eight patients in the active group, while `PatientSampler` rotates through the selected patients across epochs. This is especially useful when the same patient contributes many windows: the first window pays the full read, and later windows reuse the decoded recording. Keep `patient_group_size` and the cache bound small enough to fit complete recordings in memory, and increase the bound when prefetching causes patients to be revisited after eviction.
+
+`PackagedModel.predict_dataset()` enables this cache with `edf_cache_patients=3` by default when the dataset supports `set_edf_cache()`. The number is a patient bound, not a recording bound: all cached recordings for one patient are evicted together, and the least recently used patients are removed when the bound is exceeded. Set `edf_cache_patients=0` to disable it. Cache files use shared memory when `/dev/shm` is writable and otherwise use the system temporary directory.
+
+```python
+predictions = package.predict_dataset(
+    dataset,
+    batch_size=64,
+    num_workers=8,
+    edf_cache_patients=3,
+    pin_memory=True,
+)
+```
+
+The cache stores the complete resampled recording after the dataset's channel selection, unit conversion, resampling, normalization, and configured filters. Each request still returns only the requested time window and channels, with the same timestamps and sample frequency as the uncached path. Cache size changes the I/O and memory cost; it does not change the model input contract.
+
+Use a bound large enough to cover the patients that the loader revisits, while leaving room for model weights and batches. A complete recording is often much larger than one window, so three cached patients can consume several gigabytes even when individual batches are small. The cache copies each requested window before releasing its entry, and `predict_dataset()` closes it in a `finally` block, including when prediction raises an exception.
+
+The cache is most useful when training or inference reads many windows from a small patient set, or when repeated views revisit the same recordings. For a large one-pass cohort, the lazy path with multiple workers usually avoids allocating memory for recordings that will not be read again. The lower-level [cache reference](../reference/loading.md#edf-cache) documents how to use `EDFCache` directly with an EDF loader.
 
 ## NumpyDataset: full in-memory data
 

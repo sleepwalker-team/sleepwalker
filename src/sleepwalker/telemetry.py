@@ -3,16 +3,49 @@
 Disk counters describe individual devices, not job-specific I/O.
 """
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import platform
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 
-from sleepwalker.utils import NullProgress, Sink
+from sleepwalker.utils import NullProgress, Sink, logger
+
+
+@contextmanager
+def telemetry_run(options, *, output, run_name, tags=None, overwrite=False):
+    """Record an evaluation lifecycle with optional telemetry sink settings.
+
+    An overwrite of evaluation results records telemetry in a fresh ``rerun-*``
+    subdirectory when the telemetry directory already exists.
+    """
+    if options is None:
+        yield
+        return
+    settings = dict(options)
+    directory = Path(settings.pop("output", output))
+    if overwrite and directory.exists():
+        directory = Path(tempfile.mkdtemp(prefix="rerun-", dir=directory))
+    sink = TelemetrySink(directory, **settings)
+    logger.add_sink(sink)
+    started = False
+    status = "FAILED"
+    try:
+        logger.start_run(run_name=run_name, tags=tags)
+        started = True
+        yield
+        status = "FINISHED"
+    finally:
+        try:
+            if started:
+                logger.end_run(status)
+        finally:
+            logger.remove_sink(sink)
 
 
 def process_stats():

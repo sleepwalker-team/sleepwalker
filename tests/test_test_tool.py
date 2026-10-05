@@ -207,7 +207,8 @@ def test_cli_overwrite_updates_test_config(monkeypatch):
     assert calls == [("package", config)]
 
 
-def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
+@pytest.mark.parametrize("telemetry_enabled", [False, True])
+def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch, telemetry_enabled):
     test_tool = load_test_tool()
     progress_statuses = []
     monkeypatch.setattr(test_tool.logger, "progress_status", progress_statuses.append)
@@ -245,6 +246,8 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
         "test": {"device": "cpu", "batch_size": 64, "num_workers_dataloader": 0, "output": str(output)},
     }
 
+    if telemetry_enabled:
+        config["test"]["telemetry"] = {"resources": False}
     result = test_tool.execute(package_path, config)
     records = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
 
@@ -255,3 +258,15 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
     assert len(output.read_text(encoding="utf-8").splitlines()) == 3
     assert any("windows" in status and "failed batches" in status and "inference" not in status and "predictions" not in status for status in progress_statuses)
     assert any("analysis | patient" in status and "kept" in status for status in progress_statuses)
+    telemetry_output = output.with_suffix(".telemetry")
+    if telemetry_enabled:
+        summary = json.loads((telemetry_output / "summary.json").read_text())
+        assert summary["status"] == "FINISHED"
+        config["test"]["overwrite"] = True
+        test_tool.execute(package_path, config)
+        assert json.loads((telemetry_output / "summary.json").read_text()) == summary
+        reruns = list(telemetry_output.glob("rerun-*/summary.json"))
+        assert len(reruns) == 1
+        assert json.loads(reruns[0].read_text())["status"] == "FINISHED"
+    else:
+        assert not telemetry_output.exists()

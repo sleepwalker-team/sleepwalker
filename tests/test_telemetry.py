@@ -8,6 +8,8 @@ import pytest
 import torch
 import yaml
 
+import sleepwalker.cli.evaluate as evaluate_cli
+import sleepwalker.cli.evaluate_system as system_cli
 import sleepwalker.cli.train as train_cli
 import sleepwalker.telemetry as telemetry
 import sleepwalker.trainer.Run as run_module
@@ -291,3 +293,53 @@ def test_gpu_probe_uses_the_selected_physical_identifier(monkeypatch):
     assert result["uuid"] == "GPU-abc"
     assert result["utilization_pct"] == 72.
     assert result["memory_used_mib"] == 100.
+
+
+@pytest.mark.parametrize("module", [evaluate_cli, system_cli])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_evaluation_telemetry_covers_loading_failure_and_stops(tmp_path, monkeypatch, module, error_type):
+    output = tmp_path / "metrics.jsonl"
+    telemetry_output = tmp_path / "resources"
+    config = {"test": {"output": str(output), "telemetry": {"output": str(telemetry_output), "interval": 0.01}}, "system": {"name": "system"}}
+    sinks = list(module.logger._sinks)
+    context = module.logger._ctx_str()
+    sampled = threading.Event()
+    instances = []
+    original_sink = TelemetrySink
+    monkeypatch.setattr(telemetry, "inventory", lambda: {})
+
+    def make_sink(*args, **kwargs):
+        sink = original_sink(*args, **kwargs)
+        original_snapshot = sink.snapshot
+
+        def snapshot():
+            result = original_snapshot()
+            sampled.set()
+            return result
+
+        sink.snapshot = snapshot
+        instances.append(sink)
+        return sink
+
+    def fail_load(*args, **kwargs):
+        assert sampled.wait(2)
+        raise error_type("loading failed")
+
+    monkeypatch.setattr(telemetry, "TelemetrySink", make_sink)
+    if module is evaluate_cli:
+        monkeypatch.setattr(module, "load_packaged_model", fail_load)
+        execute = lambda: module.execute("package", config)
+    else:
+        monkeypatch.setattr(module, "load_system_packages", fail_load)
+        execute = lambda: module.execute(config)
+    with pytest.raises(error_type, match="loading failed"):
+        execute()
+
+    assert module.logger._sinks == sinks
+    assert module.logger._ctx_str() == context
+    assert len(instances) == 1
+    assert not instances[0].thread.is_alive()
+    assert all(handle.closed for handle in instances[0].handles.values())
+    assert read_records(telemetry_output / "telemetry.jsonl")
+    assert json.loads((telemetry_output / "summary.json").read_text())["status"] == "FAILED"
+    assert not output.exists()

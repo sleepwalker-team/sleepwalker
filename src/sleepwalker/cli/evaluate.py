@@ -19,6 +19,7 @@ from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.deployment import PackagedModel, load_packaged_model
 from sleepwalker.deployment.evaluation import confusion_metrics, mean_patient_metrics, package_fold, patient_classification_metrics, prepare_dataset, task_classes, validate_dataset_entry, write_record
 from sleepwalker.prediction_transforms import apply_pipeline
+from sleepwalker.telemetry import telemetry_run
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import json_ready
 from sleepwalker.utils import logger
@@ -139,48 +140,49 @@ def execute(package_path: str | Path | PackagedModel, config: Mapping[str, Any])
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     device = str(test_options.get("device", "cuda:0" if torch.cuda.is_available() else "cpu"))
-    package = package_path if isinstance(package_path, PackagedModel) else load_packaged_model(package_path, map_location=device)
-    package_reference = package.name if isinstance(package_path, PackagedModel) else str(package_path)
-    analyses = build_analyses(config["analyses"])
-    entries = config["data"] if isinstance(config["data"], list) else [config["data"]]
-    logger.info(f"Evaluating package '{package.name}' on {device}: {len(entries)} dataset(s), {len(analyses)} analysis pipeline(s), output {output}.")
+    with telemetry_run(test_options.get("telemetry"), output=output.with_suffix(".telemetry"), run_name=output.stem, tags={"command": "evaluate"}, overwrite=bool(test_options.get("overwrite", False))):
+        package = package_path if isinstance(package_path, PackagedModel) else load_packaged_model(package_path, map_location=device)
+        package_reference = package.name if isinstance(package_path, PackagedModel) else str(package_path)
+        analyses = build_analyses(config["analyses"])
+        entries = config["data"] if isinstance(config["data"], list) else [config["data"]]
+        logger.info(f"Evaluating package '{package.name}' on {device}: {len(entries)} dataset(s), {len(analyses)} analysis pipeline(s), output {output}.")
 
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            write_record(handle, {
-                "record_type": "run",
-                "package": package.name,
-                "package_path": package_reference,
-                "task": package.task,
-                "classification_contract": json_ready(package.classification_contract),
-                "git_commit": package.git_commit,
-                "fold": package_fold(package),
-                "seed": seed,
-                "config": json_ready(config),
-            })
-            for entry in entries:
-                dataset, patients, selected_fold = prepare_dataset(package, entry)
-                label = str(entry["label"])
-                logger.context(label)
-                try:
-                    logger.info(f"Initializing {len(patients)} requested patients with rejection_strategy='none'.")
-                    dataset.initialize(patients, num_workers=int(entry.get("num_workers", 4)), strict=bool(entry.get("strict", True)))
-                    if dataset.get_n_patients() == 0 or len(dataset) == 0:
-                        raise ValueError(f"Dataset '{label}' produced no evaluable windows.")
-                    logger.info(f"Initialized {dataset.get_n_patients()} patients and {len(dataset)} evaluation windows.")
-                    predictions = package.predict_dataset(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=int(test_options.get("num_workers_dataloader", 0)), n_repeat=int(test_options.get("n_repeat", 1)), device=device, seed=seed, rejection_strategy="none", allow_preprocessing_override=True, progress=True, progress_label=label)
-                    if predictions.empty:
-                        raise ValueError(f"Dataset '{label}' produced no valid prediction rows.")
-                    logger.info(f"Produced {len(predictions):,} prediction rows for {predictions['patient'].nunique() if not predictions.empty else 0} patients.")
-                    evaluate_predictions(handle, package, dataset, predictions, analyses, dataset_label=label, fold=selected_fold, n_patients_requested=len(patients))
-                finally:
-                    logger.uncontext()
-        os.replace(temporary, output)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    logger.info(f"Evaluation complete: {output}.")
-    return output
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                write_record(handle, {
+                    "record_type": "run",
+                    "package": package.name,
+                    "package_path": package_reference,
+                    "task": package.task,
+                    "classification_contract": json_ready(package.classification_contract),
+                    "git_commit": package.git_commit,
+                    "fold": package_fold(package),
+                    "seed": seed,
+                    "config": json_ready(config),
+                })
+                for entry in entries:
+                    dataset, patients, selected_fold = prepare_dataset(package, entry)
+                    label = str(entry["label"])
+                    logger.context(label)
+                    try:
+                        logger.info(f"Initializing {len(patients)} requested patients with rejection_strategy='none'.")
+                        dataset.initialize(patients, num_workers=int(entry.get("num_workers", 4)), strict=bool(entry.get("strict", True)))
+                        if dataset.get_n_patients() == 0 or len(dataset) == 0:
+                            raise ValueError(f"Dataset '{label}' produced no evaluable windows.")
+                        logger.info(f"Initialized {dataset.get_n_patients()} patients and {len(dataset)} evaluation windows.")
+                        predictions = package.predict_dataset(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=int(test_options.get("num_workers_dataloader", 0)), n_repeat=int(test_options.get("n_repeat", 1)), device=device, seed=seed, rejection_strategy="none", allow_preprocessing_override=True, progress=True, progress_label=label)
+                        if predictions.empty:
+                            raise ValueError(f"Dataset '{label}' produced no valid prediction rows.")
+                        logger.info(f"Produced {len(predictions):,} prediction rows for {predictions['patient'].nunique() if not predictions.empty else 0} patients.")
+                        evaluate_predictions(handle, package, dataset, predictions, analyses, dataset_label=label, fold=selected_fold, n_patients_requested=len(patients))
+                    finally:
+                        logger.uncontext()
+            os.replace(temporary, output)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        logger.info(f"Evaluation complete: {output}.")
+        return output
 
 
 def main(argv: list[str] | None = None) -> None:

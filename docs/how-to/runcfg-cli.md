@@ -111,6 +111,17 @@ Host and disk activity may include other jobs. Process-tree CPU uses 100% for on
 
 Custom measurements can use additional logger sinks and the [`batch_received()` hook](../reference/api.md#batch-received). Python callers register sinks before `logger.start_run()` and ensure `logger.end_run()` runs in `finally`.
 
+`evaluate` and `evaluate-system` accept the same sink settings under `test.telemetry`:
+
+```yaml
+test:
+  output: results/test/sleep.jsonl
+  telemetry:
+    interval: 1.0
+```
+
+Evaluation telemetry defaults to the result path with its `.jsonl` suffix replaced by `.telemetry`, for example `results/test/sleep.telemetry/`. It covers package loading, dataset initialization, inference and scoring, and stops on success, failure or interruption. Omit `test.telemetry` to disable it; `output` overrides the telemetry directory. Existing telemetry is preserved: when evaluation results are explicitly overwritten, a fresh `rerun-*` subdirectory is used if the telemetry directory exists. Skipping an already completed system evaluation does not start telemetry.
+
 ## The YAML configuration
 
 A training YAML has up to five top-level keys:

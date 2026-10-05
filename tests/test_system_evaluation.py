@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
 from sleepwalker.deployment.evaluation import condition_endpoint, read_prediction_feather, validate_dependencies, write_prediction_feather
 from sleepwalker.cli.evaluate_system import analyze_patient
+import sleepwalker.cli.evaluate_system as system_cli
 
 
 TASKS = ("sleep", "arousal", "breathing", "desaturation")
@@ -99,3 +103,46 @@ def test_patient_analysis_propagates_sleep_and_breathing_errors():
     assert result["arousal"]["metrics"]["confusion_matrix"] == [[0, 0], [1, 1]]
     assert result["breathing"]["metrics"]["confusion_matrix"][0] == [0, 0, 2]
     assert result["desaturation"]["metrics"]["confusion_matrix"] == [[0, 2], [0, 0]]
+
+
+@pytest.mark.parametrize("telemetry_enabled", [False, True])
+def test_system_evaluation_telemetry_and_completed_output(tmp_path, monkeypatch, telemetry_enabled):
+    output = tmp_path / "system.jsonl"
+    prediction_output = tmp_path / "predictions.feather"
+    classes = ["off", "on"]
+    package = SimpleNamespace(task="event", classification_contract={"type": "single-head-multiclass", "classes": classes})
+    predictions = prediction_frame(["2020-01-01"], classes, ["off"])
+    predictions.insert(0, "task", "event")
+    predictions.insert(0, "patient", "patient.edf")
+    calls = []
+
+    def predict(*args, **kwargs):
+        calls.append("predict")
+        return predictions, {"patient.edf": {"initialized": True}}, {"event": pd.Timedelta("1s")}, ["patient.edf"]
+
+    monkeypatch.setattr(system_cli, "load_system_packages", lambda system: {"system": package})
+    monkeypatch.setattr(system_cli, "predict_package", predict)
+    config = {"system": {"name": "tiny"}, "data": {"label": "synthetic"}, "dependencies": [], "pipeline": [], "test": {"output": str(output), "prediction_output": str(prediction_output)}}
+    if telemetry_enabled:
+        config["test"]["telemetry"] = {"resources": False}
+    sinks = list(system_cli.logger._sinks)
+    context = system_cli.logger._ctx_str()
+
+    assert system_cli.execute(config) == output
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert records[1]["tasks"]["event"]["metrics"]["accuracy"] == 1.0
+    assert read_prediction_feather(prediction_output).shape == predictions.shape
+    telemetry_output = output.with_suffix(".telemetry")
+    if telemetry_enabled:
+        summary = json.loads((telemetry_output / "summary.json").read_text())
+        assert summary["status"] == "FINISHED"
+        assert summary["run_name"] == "tiny"
+    else:
+        assert not telemetry_output.exists()
+
+    assert system_cli.execute(config) == output
+    assert calls == ["predict"]
+    if telemetry_enabled:
+        assert json.loads((telemetry_output / "summary.json").read_text()) == summary
+    assert system_cli.logger._sinks == sinks
+    assert system_cli.logger._ctx_str() == context

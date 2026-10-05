@@ -14,7 +14,7 @@ import torch
 
 from sleepwalker.config import build_callback, import_name, read_yaml
 from sleepwalker.deployment import PackagedModel, load_packaged_model
-from sleepwalker.deployment.evaluation import apply_dependency_graph, patient_classification_metrics, predict_package, task_classes, validate_dependencies, write_prediction_feather, write_record
+from sleepwalker.deployment.evaluation import apply_dependency_graph, patient_classification_metrics, predict_package, task_classes, validate_dataset_entry, validate_dependencies, write_prediction_feather, write_record
 from sleepwalker.prediction_transforms import apply_pipeline
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import json_ready
@@ -41,6 +41,7 @@ def read_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"{path} system.type must be independent, package, or factory.")
     if not isinstance(config.get("data"), dict):
         raise ValueError(f"{path} must define one data mapping.")
+    validate_dataset_entry(config["data"])
     if not isinstance(config.get("pipeline"), list):
         raise ValueError(f"{path} pipeline must be a list.")
     if not isinstance(config.get("dependencies"), list):
@@ -128,6 +129,8 @@ def execute(config: Mapping[str, Any], config_path: str | Path | None = None) ->
 
     packages = load_system_packages(config["system"])
     classes_by_task = system_task_classes(packages)
+    if "datasets" in config["data"] and set(config["data"]["datasets"]) != set(classes_by_task):
+        raise ValueError("data.datasets must name every system task exactly once.")
     dependencies = validate_dependencies(config["dependencies"], classes_by_task)
     pipeline = [build_callback(step) for step in config["pipeline"]]
     device = str(config["test"].get("device", "cuda" if torch.cuda.is_available() else "cpu"))
@@ -215,12 +218,15 @@ def execute(config: Mapping[str, Any], config_path: str | Path | None = None) ->
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("config", help="One system-evaluation YAML file.")
+    configs = parser.add_mutually_exclusive_group(required=True)
+    configs.add_argument("config", nargs="?", help="One system-evaluation YAML file.")
+    configs.add_argument("--config", dest="config_option", help="Evaluation YAML supplied by an external runtime.")
     args = parser.parse_args(argv)
-    config = read_config(args.config)
+    config_path = args.config or args.config_option
+    config = read_config(config_path)
     if args.overwrite:
         config["test"]["overwrite"] = True
-    execute(config, args.config)
+    execute(config, config_path)
 
 
 if __name__ == "__main__":

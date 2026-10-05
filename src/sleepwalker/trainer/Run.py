@@ -23,6 +23,7 @@ from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 from sleepwalker.utils import LocalArtifactSink, MlflowSink, logger
+from sleepwalker.telemetry import TelemetrySink
 
 
 @dataclass
@@ -63,6 +64,7 @@ class RunCfg:
     expert_task: str | None = None
     export_package: bool = True
     package_path: str | None = None
+    telemetry: dict[str, Any] | None = None
 
 
 @dataclass
@@ -156,112 +158,130 @@ def run(cfg: RunCfg) -> RunResult:
     result_path = os.path.join(local_artifact_path, "results.json")
     if os.path.exists(result_path):
         raise FileExistsError(f"Training result already exists: {result_path}.")
-    logger.add_sink(LocalArtifactSink(local_artifact_path))
-
+    run_sinks = [LocalArtifactSink(local_artifact_path)]
     if cfg.use_mlflow:
-        logger.add_sink(MlflowSink(tracking_uri=f"sqlite:///{os.path.join(cfg.log_path, 'mlflow.sqlite')}", experiment=cfg.experiment_name, artifact_uri=None))
-    logger.start_run(run_name=cfg.experiment_name, tags=cfg.tags)
+        run_sinks.append(MlflowSink(tracking_uri=f"sqlite:///{os.path.join(cfg.log_path, 'mlflow.sqlite')}", experiment=cfg.experiment_name, artifact_uri=None))
+    if cfg.telemetry is not None:
+        options = dict(cfg.telemetry)
+        output = options.pop("output", os.path.join(local_artifact_path, "telemetry"))
+        run_sinks.append(TelemetrySink(output, **options))
+    for sink in run_sinks:
+        logger.add_sink(sink)
+    started = False
+    status = "FAILED"
+    try:
+        logger.start_run(run_name=cfg.experiment_name, tags=cfg.tags)
+        started = True
 
-    statistics = model_statistics(cfg.model)
-    cfg.meta_data["model_statistics"] = statistics
-    logger.hparams(cfg.meta_data)
-    logger.info(f"Model parameters: {statistics['trainable_parameters']:,} trainable / {statistics['total_parameters']:,} total")
-    if "communication_scalars_per_window" in statistics:
-        logger.info(f"Composition communication: {statistics['communication_scalars_per_window']:,} scalars per window")
+        statistics = model_statistics(cfg.model)
+        cfg.meta_data["model_statistics"] = statistics
+        logger.hparams(cfg.meta_data)
+        logger.info(f"Model parameters: {statistics['trainable_parameters']:,} trainable / {statistics['total_parameters']:,} total")
+        if "communication_scalars_per_window" in statistics:
+            logger.info(f"Composition communication: {statistics['communication_scalars_per_window']:,} scalars per window")
 
-    # TODO: Remove testing from this ??
-    logger.info(f"Loaded {train_dataset.get_n_patients()} for training")
-    if val_dataset is not None:
-        logger.info(f"Loaded {val_dataset.get_n_patients()} for validation")
-    logger.info(f"Prepared {len(cfg.test_datasets)} test dataset(s)")
-    summary_input, _ =  cfg.model.input_spec() 
-    if isinstance(summary_input, dict):
-        for input_name, input_shape in summary_input.items():
-            if len(input_shape) == 4:
-                logger.info(f"Input '{input_name}' is {input_shape[1]} native call(s) of {input_shape[2]} x {input_shape[3]}")
-            else:
-                logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
-    elif summary_input is not None:
-        logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
-        summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
+        # TODO: Remove testing from this ??
+        logger.info(f"Loaded {train_dataset.get_n_patients()} for training")
+        if val_dataset is not None:
+            logger.info(f"Loaded {val_dataset.get_n_patients()} for validation")
+        logger.info(f"Prepared {len(cfg.test_datasets)} test dataset(s)")
+        summary_input, _ =  cfg.model.input_spec()
+        if isinstance(summary_input, dict):
+            for input_name, input_shape in summary_input.items():
+                if len(input_shape) == 4:
+                    logger.info(f"Input '{input_name}' is {input_shape[1]} native call(s) of {input_shape[2]} x {input_shape[3]}")
+                else:
+                    logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
+        elif summary_input is not None:
+            logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
+            summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
 
-    train_loader = build_loader(
-        train_dataset,
-        batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers_dataloader,
-        n_samples=cfg.n_samples,
-        collate_fn=cfg.collate_fn,
-        sampling="patient_balanced" if cfg.patients_per_epoch is not None else "random",
-        seed=loader_seed,
-        patients_per_epoch=cfg.patients_per_epoch,
-        patient_group_size=cfg.patient_group_size,
-        drop_last=True,
-    )
-    val_loader = None
-    if val_dataset is not None:
-        val_loader = build_loader(
-            val_dataset,
+        train_loader = build_loader(
+            train_dataset,
             batch_size=cfg.batch_size,
             num_workers=cfg.num_workers_dataloader,
             n_samples=cfg.n_samples,
             collate_fn=cfg.collate_fn,
-            sampling="sequential",
-            seed=loader_seed + 1,
-            rejection_strategy="none",
+            sampling="patient_balanced" if cfg.patients_per_epoch is not None else "random",
+            seed=loader_seed,
+            patients_per_epoch=cfg.patients_per_epoch,
+            patient_group_size=cfg.patient_group_size,
+            drop_last=True,
         )
-
-    train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
-    if "best_model_state" in train_result:
-        cfg.model.load_state_dict(train_result["best_model_state"])
-
-    export_final_checkpoint(cfg)
-    if cfg.export_package:
-        export_final_model(cfg, train_dataset)
-
-    test_records: list[dict[str, Any]] = []
-    for dataset_name, test_dataset in cfg.test_datasets:
-        for repeat in cfg.test_repeats:
-            context_label = f"{dataset_name}:r={repeat}" if len(cfg.test_repeats) > 1 else dataset_name
-            logger.context(context_label)
-            test_loader = build_loader(
-                test_dataset,
+        val_loader = None
+        if val_dataset is not None:
+            val_loader = build_loader(
+                val_dataset,
                 batch_size=cfg.batch_size,
                 num_workers=cfg.num_workers_dataloader,
-                n_samples=cfg.n_samples_test,
+                n_samples=cfg.n_samples,
                 collate_fn=cfg.collate_fn,
                 sampling="sequential",
-                seed=loader_seed + 2,
+                seed=loader_seed + 1,
                 rejection_strategy="none",
-                n_views=repeat,
             )
-            execution_model = RepeatedViewModel(cfg.model) if repeat > 1 else cfg.model
-            test_loss, test_cm = cfg.trainer.test(execution_model, test_loader)
-            record = {
-                "name":cfg.experiment_name,
-                "model": cfg.model_name,
-                "test_loss": test_loss,
-                "test_cm": test_cm,
-                "train_loss": train_result["losses"],
-                "train_cm": train_result["outputs"],
-                "dataset": dataset_name,
-                "classes": train_dataset.get_classes(),
-                "path": os.path.join(cfg.log_path, cfg.experiment_name),
-            }
-            if len(cfg.test_repeats) > 1:
-                record["repeat"] = repeat
-            if "best_model" in train_result:
-                record["best_model"] = train_result["best_model"]
-            test_records.append(record)
-            logger.uncontext()
 
-    result_value = test_records[0] if len(test_records) == 1 else test_records
-    write_json(result_path, result_value)
+        train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
+        if "best_model_state" in train_result:
+            cfg.model.load_state_dict(train_result["best_model_state"])
 
-    logger.end_run()
-    return RunResult(
-        experiment_name=cfg.experiment_name,
-        model=cfg.model,
-        trainer=cfg.trainer,
-        train_result=train_result,
-        test_results=test_records,
-    )
+        export_final_checkpoint(cfg)
+        if cfg.export_package:
+            export_final_model(cfg, train_dataset)
+
+        test_records: list[dict[str, Any]] = []
+        for dataset_name, test_dataset in cfg.test_datasets:
+            for repeat in cfg.test_repeats:
+                context_label = f"{dataset_name}:r={repeat}" if len(cfg.test_repeats) > 1 else dataset_name
+                logger.context(context_label)
+                try:
+                    test_loader = build_loader(
+                        test_dataset,
+                        batch_size=cfg.batch_size,
+                        num_workers=cfg.num_workers_dataloader,
+                        n_samples=cfg.n_samples_test,
+                        collate_fn=cfg.collate_fn,
+                        sampling="sequential",
+                        seed=loader_seed + 2,
+                        rejection_strategy="none",
+                        n_views=repeat,
+                    )
+                    execution_model = RepeatedViewModel(cfg.model) if repeat > 1 else cfg.model
+                    test_loss, test_cm = cfg.trainer.test(execution_model, test_loader)
+                    record = {
+                        "name":cfg.experiment_name,
+                        "model": cfg.model_name,
+                        "test_loss": test_loss,
+                        "test_cm": test_cm,
+                        "train_loss": train_result["losses"],
+                        "train_cm": train_result["outputs"],
+                        "dataset": dataset_name,
+                        "classes": train_dataset.get_classes(),
+                        "path": os.path.join(cfg.log_path, cfg.experiment_name),
+                    }
+                    if len(cfg.test_repeats) > 1:
+                        record["repeat"] = repeat
+                    if "best_model" in train_result:
+                        record["best_model"] = train_result["best_model"]
+                    test_records.append(record)
+                finally:
+                    logger.uncontext()
+
+        result_value = test_records[0] if len(test_records) == 1 else test_records
+        write_json(result_path, result_value)
+
+        status = "FINISHED"
+        return RunResult(
+            experiment_name=cfg.experiment_name,
+            model=cfg.model,
+            trainer=cfg.trainer,
+            train_result=train_result,
+            test_results=test_records,
+        )
+    finally:
+        try:
+            if started:
+                logger.end_run(status)
+        finally:
+            for sink in run_sinks:
+                logger.remove_sink(sink)

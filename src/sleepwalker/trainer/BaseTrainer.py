@@ -246,8 +246,12 @@ class BaseTrainer(ABC):
     def test(self, model, test_loader):
         """Run evaluation on one prepared loader."""
         model.eval()
-        with torch.inference_mode():
-            return self.run_epoch(test_loader, None, model, "TEST")
+        logger.context("TEST")
+        try:
+            with torch.inference_mode():
+                return self.run_epoch(test_loader, None, model, "TEST")
+        finally:
+            logger.uncontext()
 
     def fit(self, model, train_loader, val_loader=None):
         """Initialize or continue this trainer's model and optimization state."""
@@ -258,12 +262,16 @@ class BaseTrainer(ABC):
         if self.optimizer is None:
             self.set_loader_epoch(train_loader, 0)
             logger.context("Warmup trainer")
-            self.warmup_trainer(train_loader)
-            logger.uncontext()
+            try:
+                self.warmup_trainer(train_loader)
+            finally:
+                logger.uncontext()
 
             logger.context("Warmup preprocessors")
-            self.warmup_preprocessor(model, train_loader, self.warmup_device)
-            logger.uncontext()
+            try:
+                self.warmup_preprocessor(model, train_loader, self.warmup_device)
+            finally:
+                logger.uncontext()
 
             model.to(self.device)
             self.optimizer = self.optimizer_fn(model)
@@ -288,7 +296,11 @@ class BaseTrainer(ABC):
         for epoch in range(self.completed_epochs, self.epochs):
             self.set_loader_epoch(train_loader, epoch)
             model.train()
-            loss, output = self.run_epoch(train_loader, self.optimizer, model, f"TRAIN [{epoch+1}/{self.epochs}]", self.lr_scheduler if self.scheduler_per_batch else None)
+            logger.context(f"TRAIN [{epoch+1}/{self.epochs}]")
+            try:
+                loss, output = self.run_epoch(train_loader, self.optimizer, model, f"TRAIN [{epoch+1}/{self.epochs}]", self.lr_scheduler if self.scheduler_per_batch else None)
+            finally:
+                logger.uncontext()
             self.outputs.append({"train": output})
             self.losses.append({"train": loss})
 
@@ -298,8 +310,12 @@ class BaseTrainer(ABC):
 
             if val_loader is not None and self.eval_every > 0 and epoch_number % self.eval_every == 0:
                 model.eval()
-                with torch.inference_mode():
-                    val_loss, val_output = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]")
+                logger.context(f"VAL [{epoch+1}/{self.epochs}]")
+                try:
+                    with torch.inference_mode():
+                        val_loss, val_output = self.run_epoch(val_loader, None, model, f"VAL [{epoch+1}/{self.epochs}]")
+                finally:
+                    logger.uncontext()
                 self.outputs[-1]["val"] = val_output
                 self.losses[-1]["val"] = val_loss
                 self.val_losses.append(val_loss)

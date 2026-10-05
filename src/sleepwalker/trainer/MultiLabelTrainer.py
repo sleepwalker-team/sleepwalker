@@ -275,6 +275,7 @@ class MultiLabelTrainer(BaseTrainer):
         for batch in loader:
             if batch is None:
                 continue
+            logger.batch_received(batch)
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
 

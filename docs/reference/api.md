@@ -124,6 +124,30 @@ Sleepwalker does not currently expose a public dataset-download function. See th
     options:
       show_root_heading: false
 
+## Logging and telemetry
+
+### `logger.batch_received()` {#batch-received}
+
+::: sleepwalker.utils.UnifiedLogger.batch_received
+    options:
+      show_root_heading: false
+
+The module-level `sleepwalker.utils.logger` forwards the batch to every registered sink as `sink.batch_received(batch, context)`. The logger supplies its current context; no phase, epoch or timing arguments are required. Multiple sinks can observe the same batch. Sinks must treat it as read-only and avoid retaining tensors.
+
+`MulticlassTrainer` and `MultiLabelTrainer` emit one notification for each non-`None` batch at the beginning of their epoch loop, before device transfer and model execution. `BaseTrainer.fit()` and `test()` surround those loops with training/validation epoch or test context. Direct `run_epoch()` callers supply their own surrounding context. Warmup iteration does not emit batch notifications.
+
+This hook reports delivery, not successful processing or an optimizer step. It does not measure loading or GPU computation time. Built-in logging and resource-monitoring sinks ignore it; custom sinks may inspect it. Notification errors propagate to the caller.
+
+### `TelemetrySink` {#telemetry-sink}
+
+::: sleepwalker.telemetry.TelemetrySink
+    options:
+      show_root_heading: false
+      members:
+        - __init__
+
+See [Optional telemetry](../how-to/runcfg-cli.md#optional-telemetry) for native runner configuration.
+
 ## Model packages
 
 ### `PackagedModel` {#packaged-model}

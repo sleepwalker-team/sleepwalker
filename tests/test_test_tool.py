@@ -62,7 +62,8 @@ def write_unsplit_manifest(path: Path, files: list[str]) -> Path:
 
 
 
-def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path):
+@pytest.mark.parametrize("dataset_key", ["dataset", "datasets"])
+def test_dataset_uses_complete_yaml_specification(tmp_path, dataset_key):
     test_tool = load_test_tool()
     package = make_package()
     manifest = write_unsplit_manifest(tmp_path / "files.yml", ["patient.edf"])
@@ -73,9 +74,18 @@ def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path
             "name": "sleepwalker.datasets.Stages.Stages",
             "event_mapping": {"event": "event", "sleep": "sleep"},
             "channels": [{"logical_name": "EEG", "physical_names": ["external-eeg"], "normalizer": None, "unit": "uV"}],
+            "sample_frequency": 100,
+            "total_input": "60s",
+            "stride": "5s",
+            "resample_type": "nearest",
+            "z_normalize": False,
+            "assume_units_if_missing": False,
+            "edf_unit_overrides": {},
         },
     }
 
+    if dataset_key == "datasets":
+        entry["datasets"] = {package.task: entry.pop("dataset")}
     dataset, patients, selected_fold = test_tool.prepare_dataset(package, entry)
 
     assert isinstance(dataset, Stages)
@@ -219,6 +229,14 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
             "dataset": {
                 "name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset",
                 "event_mapping": {label: label for label in classes},
+                "channels": [{"logical_name": "EEG", "physical_names": ["EEG"], "unit": "uV", "normalizer": None}],
+                "sample_frequency": 10,
+                "total_input": "30s",
+                "stride": "30s",
+                "resample_type": "nearest",
+                "z_normalize": False,
+                "assume_units_if_missing": False,
+                "edf_unit_overrides": {},
             },
             "num_workers": 0,
             "strict": True,

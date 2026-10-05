@@ -30,6 +30,7 @@ Optional fields:
 | `use_mlflow` | `False` | Additionally log to MLflow at `sqlite:///<log_path>/mlflow.sqlite`. |
 | `log_path` | `"sleepwalker"` | Root directory for local artifacts. |
 | `tags` | `{}` | Run tags. |
+| `telemetry` | `None` | Optional [telemetry sink settings](#optional-telemetry). |
 | `collate_fn` | `None` | **Must be set** — `run()` raises `ValueError` if it is `None`. The CLI defaults it to `batch_collate`. |
 | `meta_data` | `{}` | Logged as hyperparameters and stored in the exported package's `config`. |
 | `expert_task` | `None` | Task name for the exported package; falls back to `model_name`. |
@@ -87,6 +88,29 @@ The `sleepwalker` command dispatches to subcommands:
 
 There is **no `sleepwalker predict` command**; prediction from the CLI goes through `evaluate`, and single-recording prediction is a Python call (`package.predict_patient`, see [Predict sleep stages](predict-patient.md)). <!-- TODO: add a `sleepwalker predict` command. See the [roadmap](../roadmap.md#stabilize-command-line-prediction-and-evaluation). -->
 
+### External runtimes
+
+Sleepwalker works well with [HAML](https://github.com/lamarr-institute/haml) for scheduling runs. The CLI accepts `--config PATH` for YAML configurations and `--id RUN_ID` for identifying a run. Training commands record the ID in run tags and exported configuration metadata.
+
+### Optional telemetry
+
+The runner can register a [`TelemetrySink`](../reference/api.md#telemetry-sink) alongside its existing logging sinks:
+
+```yaml
+run:
+  telemetry:
+    interval: 1.0
+    io_devices: [md0, nvme0n1]
+```
+
+Omit `telemetry` to disable it. `RunCfg.telemetry` accepts the same settings from Python. The sink samples CPU, GPU, memory and per-device disk activity into `telemetry.jsonl`, records hardware in `machine.json`, and writes run duration and status to `summary.json`. It does not inspect batches or compute training metrics.
+
+Artifacts default to `<log_path>/<experiment_name>/telemetry`; `output` selects another directory. `gpu` selects a physical NVIDIA index or UUID and defaults to the first `CUDA_VISIBLE_DEVICES` entry. Resource probes require Linux `/proc`; `resources: false` records only run duration and status. GPU sampling uses `nvidia-smi` when available.
+
+Host and disk activity may include other jobs. Process-tree CPU uses 100% for one core; summed RSS can count shared pages more than once. Interpret RAID and constituent-drive counters separately. Monitoring starts after dataset construction. The runner stops it on success or failure; checkpoint resumption writes a fresh `resume-*` subdirectory.
+
+Custom measurements can use additional logger sinks and the [`batch_received()` hook](../reference/api.md#batch-received). Python callers register sinks before `logger.start_run()` and ensure `logger.end_run()` runs in `finally`.
+
 ## The YAML configuration
 
 A training YAML has up to five top-level keys:
@@ -124,6 +148,38 @@ trainer:
 ```
 
 **Dataset entries.** Keys consumed by the CLI itself are `files`, `num_workers`, `strict`, `label`, `output_classes`, and `patient_filter`; everything else goes to the dataset constructor. `files` is either a path to a split manifest (from `sleepwalker split`) or a mapping of role → selector function with optional `validation_fraction` / `test_fraction` that carve held-out subsets from the training pool using the config `seed`. A `patient_filter` may only *remove* paths from a partition, never add or move them.
+
+!!! note "Cached datasets"
+    For cached datasets such as `NumpyDataset`, the adapter skips EDF initialization because the constructor already loads the arrays. It verifies that cached patients belong to the configured partition; use a separate cache for each partition.
+
+### Explicit evaluation datasets
+
+Evaluation constructs preprocessing from YAML; it does not merge preparation
+from a model package. `data.dataset` is a complete specification for one input.
+For a composed package, `data.datasets` maps every expert/task to its complete
+specification and `data.reference` explicitly describes the annotation timeline
+and window anchors. The reference has no signal channels. These forms are
+mutually exclusive, with no global/task fallback or field precedence.
+For independent systems, `data.datasets` provides each task's complete labelled
+dataset; each package evaluates its own entry, without a reference dataset.
+
+Each specification names `channels`, `sample_frequency`, `total_input`, `stride`,
+`resample_type`, `z_normalize`, `assume_units_if_missing`, `edf_unit_overrides`
+and `event_mapping`. Each channel declares its logical name, physical aliases,
+unit and normalizer explicitly. Optional callbacks remain normal constructor
+arguments. YAML anchors may reuse definitions explicitly within a file.
+Older evaluation configs that relied on package inheritance must supply these
+fields; incomplete input specs fail before EDF initialization.
+
+Packages provide weights, prediction timing/classes and, for compositions, the
+fixed native-call offsets. Evaluation validates logical channel order and input
+geometry against those contracts. Labels/targets are prepared from the package
+classification contract and the entry's `target` options; do not specify a
+separate dataset `prepare_target`. Existing evaluation pipelines and dependency
+scoring remain explicit configuration.
+
+Unit conversion remains strict. Supply `edf_unit_overrides` for verified header
+corrections rather than guessing units or silently bypassing conversion.
 
 ## Typical command sequences
 

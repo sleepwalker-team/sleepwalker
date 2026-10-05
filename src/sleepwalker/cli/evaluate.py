@@ -17,7 +17,7 @@ import torch
 from sleepwalker.config import build_callback, read_yaml
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.deployment import PackagedModel, load_packaged_model
-from sleepwalker.deployment.evaluation import confusion_metrics, mean_patient_metrics, package_fold, patient_classification_metrics, prepare_dataset, task_classes, write_record
+from sleepwalker.deployment.evaluation import confusion_metrics, mean_patient_metrics, package_fold, patient_classification_metrics, prepare_dataset, task_classes, validate_dataset_entry, write_record
 from sleepwalker.prediction_transforms import apply_pipeline
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import json_ready
@@ -30,6 +30,8 @@ def read_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Expected a top-level mapping in {path}.")
     if not isinstance(config["data"], (dict, list)) or not config["data"]:
         raise ValueError("data must be a dataset mapping or list of mappings.")
+    for entry in config["data"] if isinstance(config["data"], list) else [config["data"]]:
+        validate_dataset_entry(entry)
     if not isinstance(config["analyses"], list) or not config["analyses"]:
         raise ValueError("analyses must be a non-empty list.")
     if not str(config["test"]["output"]).endswith(".jsonl"):
@@ -184,9 +186,11 @@ def execute(package_path: str | Path | PackagedModel, config: Mapping[str, Any])
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("config", help="Evaluation YAML under configs/test/.")
+    configs = parser.add_mutually_exclusive_group(required=True)
+    configs.add_argument("config", nargs="?", help="Evaluation YAML under configs/test/.")
+    configs.add_argument("--config", dest="config_option", help="Evaluation YAML supplied by an external runtime.")
     args = parser.parse_args(argv)
-    config = read_config(args.config)
+    config = read_config(args.config or args.config_option)
     if args.overwrite:
         config["test"]["overwrite"] = True
     execute(config["test"]["package"], config)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -11,6 +13,7 @@ import yaml
 import sleepwalker.datasets.HSP as hsp_dataset
 import sleepwalker.cli.train as train_tool
 from sleepwalker.datasets.Basedataset import ChannelConfig
+from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.training.callbacks import prepare_patient_events
 from sleepwalker.training import files as training_files
 
@@ -266,6 +269,45 @@ def test_dataset_initialization_filters_each_precomputed_partition(monkeypatch):
     assert initialized[id(train[0])] == (["train-keep.edf"], 3, False)
     assert initialized[id(validation[0])] == (["validation-keep.edf"], 3, False)
     assert initialized[id(test[0][1])] == (["test-keep.edf"], 3, False)
+
+
+def write_numpy_cache(path, patients):
+    path.mkdir()
+    metadata = {"sample_frequency": 100, "resample_type": "nearest", "total_input": "30s", "stride": "30s", "classes": ["wake", "rem"], "input_channels": ["eeg"]}
+    (path / "meta.json").write_text(json.dumps(metadata))
+    np.save(path / "data.npy", np.zeros((len(patients), 3000, 1), dtype=np.float32))
+    np.save(path / "target.npy", np.tile(np.array([[1.0, 0.0]], dtype=np.float32), (len(patients), 1)))
+    np.save(path / "patient.npy", np.array(patients))
+    np.save(path / "time.npy", np.arange(len(patients), dtype=np.int64))
+    return path
+
+
+@pytest.mark.parametrize("role", ["train", "validation", "test"])
+@pytest.mark.parametrize("in_memory", [False, True])
+def test_numpy_partition_uses_constructor_loaded_cache(tmp_path, role, in_memory):
+    cache = write_numpy_cache(tmp_path / "cache", ["patient-a.edf", "patient-a.edf", "patient-b.edf"])
+    config = {"data": {"name": "sleepwalker.datasets.NumpyDataset.NumpyDataset", "cache_path": str(cache), "in_memory": in_memory, "files": {role: ["patient-a.edf", "patient-b.edf"]}, "label": "cached"}}
+
+    train, validation, test = train_tool.initialize_datasets(config)
+
+    partitions = {"train": train, "validation": validation, "test": [dataset for _, dataset in test]}
+    assert {name: len(datasets) for name, datasets in partitions.items()} == {name: int(name == role) for name in partitions}
+    dataset = partitions[role][0]
+    assert isinstance(dataset, NumpyDataset)
+    assert dataset.initialized
+    assert len(dataset) == 3
+    assert dataset[2]["patient"] == "patient-b.edf"
+    assert isinstance(dataset.data_shards[0], np.memmap) == (not in_memory)
+    if role == "test":
+        assert test[0][0] == "cached"
+
+
+def test_numpy_cache_cannot_bypass_patient_partition(tmp_path):
+    cache = write_numpy_cache(tmp_path / "cache", ["training.edf", "held-out.edf"])
+    config = {"data": {"name": "sleepwalker.datasets.NumpyDataset.NumpyDataset", "cache_path": str(cache), "files": {"train": ["training.edf"]}}}
+
+    with pytest.raises(ValueError, match="outside the train partition"):
+        train_tool.initialize_datasets(config)
 
 
 def test_dry_run_changes_training_not_just_validation(monkeypatch):

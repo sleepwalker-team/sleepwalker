@@ -94,6 +94,7 @@ import torch
 from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_component, build_factory, build_value, import_name, read_yaml
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.MultiDataset import combine_datasets
+from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.utils import random_split
 from sleepwalker.trainer.BaseTrainer import BaseTrainer
 from sleepwalker.trainer.Run import RunCfg, run, seed_everything
@@ -202,7 +203,13 @@ def initialize_datasets(config: Mapping[str, Any], dry_run: bool = False, fold: 
                 continue
             if hasattr(model, "pair_dataset"):
                 dataset = model.pair_dataset(dataset)
-            dataset.initialize(patients, workers, strict=bool(entry.get("strict", False)))
+            if isinstance(dataset, NumpyDataset):
+                cached_patients = {str(patient) for shard in dataset.patient_shards for patient in shard.tolist()}
+                outside_partition = cached_patients - set(patients)
+                if outside_partition:
+                    raise ValueError(f"NumPy cache includes patients outside the {role} partition: {sorted(outside_partition)[:5]}. Use a cache exported for this partition.")
+            else:
+                dataset.initialize(patients, workers, strict=bool(entry.get("strict", False)))
             if role == "train":
                 train_datasets.append(dataset)
             elif role == "validation":
@@ -333,6 +340,11 @@ def runcfg_from_checkpoint(path: str | Path) -> RunCfg:
     seed_everything(int(config.get("seed", 17)))
     train_datasets, validation_datasets, test_datasets = initialize_datasets(config, fold=fold)
     run_options = run_options_from_dict(config, False, fold)
+    if run_options.get("telemetry") is not None:
+        telemetry_root = Path(run_options["telemetry"].get("output", Path(run_options.get("log_path", "sleepwalker")) / run_options["experiment_name"] / "telemetry"))
+        telemetry_root.mkdir(parents=True, exist_ok=True)
+        run_options["telemetry"]["output"] = tempfile.mkdtemp(prefix="resume-", dir=telemetry_root)
+        run_options["meta_data"]["run"]["telemetry"] = copy.deepcopy(run_options["telemetry"])
     return RunCfg(
         **run_options,
         model=model,
@@ -348,24 +360,32 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     train_parser = commands.add_parser("train", help="Start a new training run from YAML.")
-    train_parser.add_argument("config", help="Training YAML under configs/.")
+    train_config = train_parser.add_mutually_exclusive_group(required=True)
+    train_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    train_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     train_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
 
     resume_parser = commands.add_parser("resume", help="Resume the run embedded in a training checkpoint.")
     resume_parser.add_argument("checkpoint", help="Training checkpoint file.")
 
     dry_parser = commands.add_parser("dry", help="Run one epoch with small patient and sample budgets.")
-    dry_parser.add_argument("config", help="Training YAML under configs/.")
+    dry_config = dry_parser.add_mutually_exclusive_group(required=True)
+    dry_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    dry_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     dry_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, run_id: str | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "resume":
-        run(runcfg_from_checkpoint(args.checkpoint))
-        return
-    run(runcfg_from_dict(read_yaml(args.config), dry_run=args.command == "dry", fold=args.fold))
+        cfg = runcfg_from_checkpoint(args.checkpoint)
+    else:
+        cfg = runcfg_from_dict(read_yaml(args.config or args.config_option), dry_run=args.command == "dry", fold=args.fold)
+    if run_id is not None:
+        cfg.tags["run_id"] = run_id
+        cfg.meta_data["run_id"] = run_id
+    run(cfg)
 
 
 if __name__ == "__main__":

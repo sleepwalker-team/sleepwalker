@@ -12,6 +12,8 @@ from sklearn.metrics import confusion_matrix
 import torch
 
 from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_value, import_name
+from sleepwalker.datasets.PairedDataset import PairedDataset
+from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.package import PackagedModel
 from sleepwalker.metrics import accuracy_from_confusion_matrix, cohen_kappa_from_confusion_matrix, f1_per_class_from_confusion_matrix, precision_from_confusion_matrix, recall_from_confusion_matrix, support_from_confusion_matrix
 from sleepwalker.trainer.utils.disk import NumpyEncoder
@@ -112,18 +114,54 @@ def build_evaluation_target(package: PackagedModel, entry: Mapping[str, Any], an
     return partial(prepare_multitask_target, task_config=normalize_multitask_config(task_config), annotation_labels=annotation_labels, allow_partial=True)
 
 
-def prepare_dataset(package: PackagedModel, entry: Mapping[str, Any]):
-    dataset_name, overrides = build_dataset_arguments(entry["dataset"])
-    if "event_mapping" not in overrides or not overrides["event_mapping"]:
-        raise ValueError(f"Dataset '{entry['label']}' must provide event_mapping.")
-    arguments = package.dataset.dataset_kwargs()
-    arguments.update(overrides)
+def validate_dataset_entry(entry: Mapping[str, Any]) -> None:
+    """Require one explicit dataset form without global/task fallback rules."""
+    if any(key in entry for key in ("channels_by_task", "overrides", "task_overrides")):
+        raise ValueError("Use complete dataset or datasets specifications, not preprocessing overrides.")
+    if ("dataset" in entry) == ("datasets" in entry):
+        raise ValueError("Provide exactly one of data.dataset or data.datasets.")
+    if "dataset" in entry and "reference" in entry:
+        raise ValueError("data.reference is only used with task datasets for a composed package.")
+    if "datasets" in entry and (not isinstance(entry["datasets"], Mapping) or not entry["datasets"]):
+        raise ValueError("data.datasets must be a non-empty mapping of tasks to complete specifications.")
+
+
+def build_explicit_dataset(spec: Mapping[str, Any]):
+    """Construct YAML preprocessing directly; never inherit package settings."""
+    required = {"name", "channels", "sample_frequency", "total_input", "stride", "resample_type", "z_normalize", "assume_units_if_missing", "edf_unit_overrides"}
+    missing = sorted(required - set(spec))
+    if missing:
+        raise ValueError(f"Evaluation dataset must explicitly specify {missing}.")
+    for channel in spec["channels"]:
+        if not {"logical_name", "physical_names", "unit", "normalizer"} <= set(channel):
+            raise ValueError("Evaluation channels must explicitly specify logical_name, physical_names, unit and normalizer.")
+    dataset_name, arguments = build_dataset_arguments(spec)
+    if not arguments.get("event_mapping"):
+        raise ValueError("Evaluation dataset must provide event_mapping.")
+    if "prepare_target" in arguments:
+        raise ValueError("Evaluation targets come from the package contract and data.target; omit dataset.prepare_target.")
     arguments["rejection_strategy"] = "none"
-    annotation_labels = sorted(set(arguments["event_mapping"].values()))
-    arguments["prepare_target"] = build_evaluation_target(package, entry, annotation_labels)
-    dataset = import_name(dataset_name)(**arguments)
-    if hasattr(package.dataset, "with_labels"):
-        dataset = package.dataset.with_labels(dataset)
+    return import_name(dataset_name)(**arguments)
+
+
+def prepare_dataset(package: PackagedModel, entry: Mapping[str, Any]):
+    validate_dataset_entry(entry)
+    if isinstance(package.dataset, PairedDataset):
+        if "datasets" not in entry or set(entry["datasets"]) != set(package.dataset.datasets):
+            raise ValueError("A composed package requires data.datasets naming every expert exactly once.")
+        if "reference" not in entry:
+            raise ValueError("A composed package requires data.reference for annotation timing and window anchors.")
+        base = build_explicit_dataset(entry["reference"])
+        inputs = {task: UnlabelledDataset.from_dataset(build_explicit_dataset(spec)) for task, spec in entry["datasets"].items()}
+        dataset = PairedDataset(inputs, base=base, input_offsets=package.dataset.input_offsets)
+    else:
+        if "reference" in entry:
+            raise ValueError("A single-input package does not use data.reference.")
+        spec = entry["dataset"] if "dataset" in entry else entry["datasets"][package.task]
+        dataset = build_explicit_dataset(spec)
+        base = dataset
+    annotation_labels = sorted(set(base.event_mapping.values()))
+    base.prepare_target_callback = build_evaluation_target(package, entry, annotation_labels)
     if not hasattr(dataset, "set_rejection_strategy"):
         raise TypeError(f"Evaluation dataset {dataset.__class__.__name__} does not support rejection strategies.")
     dataset.set_rejection_strategy("none")

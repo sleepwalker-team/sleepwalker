@@ -63,7 +63,7 @@ Set `export_package: false` to train without producing a package.
 
 ### Embedding-only packages
 
-A package whose model implements `EmbeddingModel` but not `ClassifierModel` needs no contract — `classification_contract=None` is valid, and `package.capabilities` reports `["embeddings"]`. This is how converted foundation encoders are shipped (`sleepwalker foundation-model convert` produces a `PackagedEmbeddingModel` package). You can then use the embeddings downstream as shown in [Extract embeddings](extract-embeddings.md) or build a new head on top via [`PackagedClassifierModel`](../reference/models.md#packaged-classifier-model).
+A package whose model implements `EmbeddingModel` but not `ClassifierModel` needs no contract — `classification_contract=None` is valid, and `package.capabilities` reports `["embeddings"]`. Export `SleepFM` or `OSF` directly with `save_packaged_model()` and a matching dataset; see [Use foundation models](foundation-models.md). You can then use the embeddings downstream as shown in [Extract embeddings](extract-embeddings.md) or build a new head on top via [`PackagedClassifierModel`](../reference/models.md#packaged-classifier-model).
 
 ## Importing a package
 

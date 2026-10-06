@@ -26,11 +26,12 @@ Install additional dependencies only when you need them:
 ```bash
 python -m pip install -e ".[datasets]"     # spreadsheet and archive-backed datasets
 python -m pip install -e ".[tracking]"     # MLflow and Weights & Biases
-python -m pip install -e ".[foundation]"   # foundation-model conversion tools
 python -m pip install -e ".[dev,docs]"     # tests and documentation
 ```
 
 On Windows, activate the environment with `.venv\Scripts\activate` instead of `source .venv/bin/activate`.
+
+[SleepFM and OSF](../how-to/foundation-models.md) use the default dependencies. Their weights require explicit download consent or a local released checkpoint.
 
 ## Get the example data
 

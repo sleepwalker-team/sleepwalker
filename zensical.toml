@@ -19,6 +19,7 @@ nav = [
     "how-to/index.md",
     { "Load and prepare data" = "how-to/data.md" },
     { "Models: classification and embeddings" = "how-to/models.md" },
+    { "Use foundation models" = "how-to/foundation-models.md" },
     { "Train and export a sleep-staging model" = "how-to/train-sleep-staging.md" },
     { "Train a multiclass model" = "how-to/train-multiclass.md" },
     { "Train with multiple labels" = "how-to/multilabel.md" },

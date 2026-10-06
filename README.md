@@ -7,7 +7,7 @@
 [![Docs](https://img.shields.io/badge/docs-online-4c9aff?logo=readthedocs&logoColor=white)](https://sleepwalker-team.github.io/sleepwalker/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Status: Research](https://img.shields.io/badge/status-research-orange)](https://github.com/sleepwalker-team/sleepwalker)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **[Documentation](https://sleepwalker-team.github.io/sleepwalker/)** |
 **[Getting Started](https://sleepwalker-team.github.io/sleepwalker/getting-started/)** |
@@ -174,11 +174,14 @@ Optional extras are grouped by purpose:
 ```bash
 python -m pip install -e ".[datasets]"     # spreadsheet and archive-backed datasets
 python -m pip install -e ".[tracking]"     # MLflow and Weights & Biases
-python -m pip install -e ".[foundation]"   # foundation-model conversion tools
 python -m pip install -e ".[dev,docs]"     # tests and documentation
 ```
 
 On Windows, activate the environment with `.venv\Scripts\activate` instead of `source .venv/bin/activate`.
+
+`SleepFM` and `OSF` use the default dependencies. Load them through `sleepwalker.models` with explicit download consent or a local checkpoint; see [Use foundation models](https://sleepwalker-team.github.io/sleepwalker/how-to/foundation-models/).
+
+Sleepwalker's own code is licensed under [MIT](LICENSE). The adapted [SleepFM module](src/sleepwalker/models/SleepFM.py) is an exception under [CC BY-NC 4.0](LICENSES/SleepFM.txt). The adapted [OSF module](src/sleepwalker/models/OSF.py) is [MIT](LICENSES/OSF.txt), with its upstream copyright notice. These notices apply to the respective model files; they do not change the license of the rest of Sleepwalker. Package metadata lists both licenses because distributions include the SleepFM module.
 
 ## Documentation
 

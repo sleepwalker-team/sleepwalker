@@ -12,5 +12,9 @@ dotenv
 rarfile
 openpyxl
 xmltodict
-mysqlclient
+# mysqlclient
 mne
+#server
+fastapi
+uvicorn[standard]
+python-multipart

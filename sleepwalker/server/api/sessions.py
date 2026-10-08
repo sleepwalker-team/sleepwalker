@@ -1,5 +1,6 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, UploadFile, status
 
+from ..errors import APIError
 from ..schemas.session import SessionResponse, SessionState, SignalResponse
 from ..services.session_service import SessionService
 from ..stores.session_store import SessionStore
@@ -47,26 +48,22 @@ async def create_session(
         storage.delete_session(session.id)
         service.delete(session.id)
 
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "INVALID_STUDY",
-                "message": str(exc),
-            },
-        )
+        raise APIError(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="INVALID_STUDY",
+            message=str(exc),
+        ) from exc
 
     except ValueError as exc:
         # z.B. doppelter Dateiname oder ungültiger Upload
         storage.delete_session(session.id)
         service.delete(session.id)
 
-        raise HTTPException(
+        raise APIError(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "INVALID_REQUEST",
-                "message": str(exc),
-            },
-        )
+            code="INVALID_REQUEST",
+            message=str(exc),
+        ) from exc
 
     except Exception:
         # Auch bei unerwarteten Fehlern keine halbfertige Session und keine temporären Dateien liegen lassen.
@@ -97,12 +94,10 @@ def get_session(session_id: str):
     session = service.get(session_id)
 
     if session is None:
-        raise HTTPException(
+        raise APIError(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "SESSION_NOT_FOUND",
-                "message": "Session not found.",
-            },
+            code="SESSION_NOT_FOUND",
+            message="Session not found.",
         )
 
     return SessionResponse(
@@ -129,12 +124,10 @@ def delete_session(session_id: str):
     session = service.delete(session_id)
 
     if session is None:
-        raise HTTPException(
+        raise APIError(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "SESSION_NOT_FOUND",
-                "message": "Session not found.",
-            },
+            code="SESSION_NOT_FOUND",
+            message="Session not found.",
         )
 
     storage.delete_session(session_id)

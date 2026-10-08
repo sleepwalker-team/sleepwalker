@@ -1,8 +1,9 @@
 from pathlib import Path
 
 from .edf import validate_edf
+from .nox import looks_like_nox_study
 from .study import InvalidStudyError, StudyInfo, UnsupportedStudyFormatError
-from .nox import looks_like_nox_study, validate_nox
+
 
 def validate_study(files: list[Path]) -> StudyInfo:
     if not files:
@@ -17,9 +18,12 @@ def validate_study(files: list[Path]) -> StudyInfo:
     ):
         return validate_edf(files[0])
 
-    # NOX
+    # Native Nox data cannot be read by Sleepwalker yet.
     if looks_like_nox_study(files):
-        return validate_nox(files)
+        raise UnsupportedStudyFormatError(
+            "Native Nox studies are not supported yet. "
+            "Export the study as EDF before uploading it."
+        )
 
     raise UnsupportedStudyFormatError(
         "Uploaded files do not represent a supported study format."

@@ -1,0 +1,82 @@
+# Example: train a linear or MLP sleep-staging head on frozen MiniRocket features, Ruhrland cohort.
+# First build the package from this same config, so channels, units and training split match:
+#   sleepwalker package-features configs/examples/rocket_head_ruhrland.yml -f minirocket --n-jobs 16 -o /raid/packages/minirocket-ruhrland
+# Then run:  sleepwalker train configs/examples/rocket_head_ruhrland.yml   (or `sleepwalker dry ...` first)
+# MultiRocket: package with `-f multirocket` and point `model.package` at it. Its features are not scaled yet
+# (values up to ~3000 next to [0, 1]), so a head on it trains poorly; see docs/how-to/features.md.
+
+seed: 17
+
+data:
+  name: sleepwalker.datasets.Ruhrlandklinik.Ruhrlandklinik
+  # One physical name per channel, so every recording feeds the same signal into the package.
+  channels:
+    - {logical_name: eeg_frontal, physical_names: [F4-M1], unit: V}
+    - {logical_name: eeg_central, physical_names: [C4-M1], unit: V}
+    - {logical_name: eeg_occipital, physical_names: [O2-M1], unit: V}
+    - {logical_name: eog_left, physical_names: [E1-M2], unit: V}
+    - {logical_name: eog_right, physical_names: [E2-M1], unit: V}
+    - {logical_name: emg_chin, physical_names: [1-F], unit: V}
+  sample_frequency: 100
+  event_mapping:
+    wach: wake
+    n1: n1
+    n2: n2
+    n3: n3
+    rem: rem
+  total_input: 30s
+  stride: 30s
+  assume_units_if_missing: false
+  output_classes: &classes [wake, n1, n2, n3, rem]
+  prepare_patient:
+    name: sleepwalker.training.callbacks.trim_patient_to_events
+    keep_events: [n1, n2, n3, rem]
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_resolution: 30s
+    target_classes: *classes
+  patient_filter:
+    name: sleepwalker.training.files.filter_edf_files
+  files:
+    train:
+      name: sleepwalker.datasets.utils.get_edf_files_in_repo
+      root: /raid/sleepwalker/ruhrlandklinik/raw/train-test-2023
+    validation_fraction: 0.1
+    test:
+      name: sleepwalker.datasets.utils.get_edf_files_in_repo
+      root: /raid/sleepwalker/ruhrlandklinik/raw/val-2024
+  label: Ruhrland2024
+  num_workers: 32
+
+model:
+  name: sleepwalker.models.PackagedClassifierModel.PackagedClassifierModel
+  package: /raid/packages/minirocket-ruhrland
+  head: mlp
+  hidden_dim: 256
+  freeze_encoder: true
+
+trainer:
+  name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
+  target_resolution: 30s
+  epochs: 40
+  eval_every: 1
+  early_stopping: 10
+  optimizer:
+    name: torch.optim.AdamW
+    lr: 1.0e-3
+    weight_decay: 1.0e-4
+  loss_function: torch.nn.functional.cross_entropy
+  # Featurization runs on the CPU anyway; set cuda:0 on a GPU host to train the head there.
+  device: cpu
+
+run:
+  experiment_name: rocket_head_ruhrland
+  batch_size: 32
+  n_samples: null
+  num_workers_dataloader: 4
+  use_mlflow: true
+  log_path: results/rocket_head
+  expert_task: sleep
+  tags:
+    task: sleep
+    model: rocket_head

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from sleepwalker.cli import evaluate, evaluate_system, foundation_models, mirror_edf_repo, split, train
+from sleepwalker.cli import evaluate, evaluate_system, foundation_models, mirror_edf_repo, package_features, split, train
 
 
 COMMANDS = {
@@ -13,6 +13,7 @@ COMMANDS = {
     "evaluate-system": evaluate_system.main,
     "foundation-model": foundation_models.main,
     "mirror-edf": mirror_edf_repo.main,
+    "package-features": package_features.main,
     "resume": lambda arguments: train.main(["resume", *arguments]),
     "split": split.main,
     "train": lambda arguments: train.main(["train", *arguments]),

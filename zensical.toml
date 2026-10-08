@@ -28,6 +28,7 @@ nav = [
     { "Import and export model packages" = "how-to/package-import-export.md" },
     { "Predict sleep stages" = "how-to/predict-patient.md" },
     { "Extract embeddings" = "how-to/extract-embeddings.md" },
+    { "Train a head on rocket features" = "how-to/features.md" },
     { "Inspect a model package" = "how-to/inspect-package.md" },
     { "Tune data loading performance" = "how-to/performance.md" },
     { "How Sleepwalker works" = "how-to/overview.md" },

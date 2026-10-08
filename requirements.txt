@@ -1,1 +1,1 @@
--e .[datasets,dev,foundation,tracking,docs]
+-e .[datasets,dev,foundation,tracking,docs,features]

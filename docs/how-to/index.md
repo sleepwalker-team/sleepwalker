@@ -24,6 +24,7 @@ These guides each solve one task. Install [Sleepwalker](../getting-started/index
 - [Import and export model packages](package-import-export.md) — create and load packages.
 - [Predict sleep stages](predict-patient.md) — score one recording.
 - [Extract embeddings](extract-embeddings.md) — window-level features for one recording.
+- [Train a head on rocket features](features.md) — MiniRocket, MultiRocket and ROCKET features as a frozen encoder package.
 - [Inspect a model package](inspect-package.md) — read a package's settings and capabilities.
 
 **Advanced**

@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "Research-first building blocks for training and deploying sleep models on EDF recordings"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+# Distribution includes the CC-BY-NC-4.0 SleepFM module; Sleepwalker's own code is MIT.
+license = "MIT AND CC-BY-NC-4.0"
+license-files = ["LICENSE", "LICENSES/*.txt"]
 authors = [
   { name = "Sebastian Buschjäger" },
   { name = "Matthias Jakobs" },
@@ -35,7 +36,6 @@ dependencies = [
 
 [project.optional-dependencies]
 datasets = ["openpyxl", "rarfile", "xlrd"]
-foundation = ["lightning", "timm", "torchvision", "transformers"]
 tracking = ["mlflow", "wandb"]
 docs = ["zensical==0.0.60", "mkdocstrings-python==2.0.8"]
 dev = ["pytest", "python-dotenv"]

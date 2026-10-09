@@ -12,6 +12,7 @@ These guides each solve one task. Install [Sleepwalker](../getting-started/index
 **Training (API first)**
 
 - [Models: classification and embeddings](models.md) — choosing and configuring a model.
+- [Use foundation models](foundation-models.md) — load SleepFM and OSF weights, extract embeddings, and export packages.
 - [Train and export a sleep-staging model](train-sleep-staging.md) — the canonical Python tutorial.
 - [Train a multiclass model](train-multiclass.md) — the in-depth Python tutorial: targets, rejection, and class balance.
 - [Train with multiple labels](multilabel.md) — multi-task and multi-label objectives.

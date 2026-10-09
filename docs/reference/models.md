@@ -100,6 +100,22 @@ A plain `nn.Module` (not a `BaseModel`): preprocessors are a `ModuleDict` keyed 
     options:
       show_root_heading: false
 
+## Foundation models
+
+These classes implement `BaseModel` and `EmbeddingModel`, with optional released weights. See [Use foundation models](../how-to/foundation-models.md) for download consent, cache use, EDF preparation, packaging, and upstream licenses.
+
+### `SleepFM` {#sleepfm}
+
+::: sleepwalker.models.SleepFM.SleepFM
+    options:
+      show_root_heading: false
+
+### `OSF` {#osf}
+
+::: sleepwalker.models.OSF.OSF
+    options:
+      show_root_heading: false
+
 ## Packaged backbone models
 
 These wrap an existing [`PackagedModel`](api.md#packaged-model) encoder so a pretrained package can serve as the backbone of a new trainable head.

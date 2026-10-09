@@ -156,6 +156,9 @@ class Sink(Protocol):
     def figure(self, name: str, figure: Any, context: str) -> None: ...
     def artifact(self, path: str, dest: Optional[str], context: str) -> None: ...
     def progress(self, total: int, desc: str, leave: bool, formatter: logging.Formatter) -> Progress: ...
+    def batch_received(self, batch: Any, context: str) -> None:
+        """Observe a delivered batch; sinks that do not inspect batches may ignore it."""
+        pass
 
 
 # ---------------------------
@@ -176,6 +179,9 @@ class ConsoleTqdmHandler(logging.Handler):
 
 
 class StdLogSink:
+    def batch_received(self, batch, context):
+        pass
+
     def __init__(self, path: str, formatter: logging.Formatter):
         self._logger = logging.getLogger(f"UnifiedLogger.stdout.{id(self)}")
         self._logger.propagate = False
@@ -239,6 +245,9 @@ class StdLogSink:
 # ---------------------------
 
 class TqdmSink:
+    def batch_received(self, batch, context):
+        pass
+
     def __init__(self, default_leave: bool = False, formatter: Optional[logging.Formatter] = None):
         self._default_leave = default_leave
         self._formatter = formatter or logging.Formatter("%(message)s")
@@ -261,6 +270,9 @@ class TqdmSink:
 # ---------------------------
 
 class MlflowSink:
+    def batch_received(self, batch, context):
+        pass
+
     def __init__(self, tracking_uri: Optional[str] = None, experiment: Optional[str] = None, artifact_uri:Optional[str]= None):
         import mlflow
         self.mlflow = mlflow
@@ -375,6 +387,9 @@ class MlflowSink:
         return NullProgress()
 
 class WandbSink:
+    def batch_received(self, batch, context):
+        pass
+
     def __init__(self, tracking_uri: Optional[str] = None, experiment: Optional[str] = None, artifact_uri: Optional[str] = None):
         import wandb
         self.wandb = wandb
@@ -484,6 +499,9 @@ class WandbSink:
 
 
 class LocalArtifactSink:
+    def batch_received(self, batch, context):
+        pass
+
     def __init__(self, base_path: str):
         self.base_path = Path(base_path)
 
@@ -569,6 +587,9 @@ class UnifiedLogger:
 
     def add_sink(self, sink: Sink): self._sinks.append(sink)
 
+    def remove_sink(self, sink: Sink) -> None:
+        self._sinks.remove(sink)
+
     def remove_sinks_by_type(self, sink_type: type) -> None:
         self._sinks = [sink for sink in self._sinks if not isinstance(sink, sink_type)]
 
@@ -593,17 +614,49 @@ class UnifiedLogger:
     # ---- Run lifecycle ----
     def start_run(self, run_name: Optional[str] = None,
                   params: Optional[Dict[str, Any]] = None, tags: Optional[Dict[str, Any]] = None):
-        for s in self._sinks:
-            try: s.start(run_name, params, tags)
-            except Exception: pass
+        started = []
+        try:
+            for sink in self._sinks:
+                started.append(sink)
+                sink.start(run_name, params, tags)
+        except BaseException:
+            for sink in reversed(started):
+                try:
+                    sink.end("FAILED")
+                except Exception:
+                    pass
+            raise
         if run_name:
             self.context(run_name)
 
     def end_run(self, status: str = "FINISHED"):
-        for s in self._sinks:
-            try: s.end(status)
-            except Exception: pass
-        self.uncontext()
+        errors = []
+        try:
+            try:
+                self.progress_close()
+            except Exception as error:
+                errors.append(error)
+            for sink in self._sinks:
+                try:
+                    sink.end(status)
+                except Exception as error:
+                    errors.append(error)
+        finally:
+            self.uncontext()
+        if errors:
+            raise errors[0]
+
+    def batch_received(self, batch: Any) -> None:
+        """Notify sinks that a valid batch has reached the trainer, before processing.
+
+        The logger supplies its current context. It does not inspect or modify
+        the batch, time retrieval, or synchronize CUDA. Sinks must treat the
+        batch as read-only and should not retain it. Notification errors
+        propagate to the caller.
+        """
+        context = self._ctx_str()
+        for sink in self._sinks:
+            sink.batch_received(batch, context=context)
 
     # ---- Events ----
     def _event(self, level: str, msg: str):

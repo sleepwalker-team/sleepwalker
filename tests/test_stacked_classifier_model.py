@@ -4,6 +4,7 @@ import sys
 import pandas as pd
 import pytest
 import torch
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -13,6 +14,7 @@ from sleepwalker.datasets.Basedataset import ChannelConfig, EDFFile
 from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel, load_packaged_model
+from sleepwalker.deployment.evaluation import prepare_dataset
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
 from sleepwalker.models.StackedClassifierModel import AlignedPackagedClassifier, RateResampler, StackedClassifierModel, timeline_resampler
 
@@ -253,3 +255,61 @@ def test_stacked_package_round_trip(tmp_path):
     assert set(outputs) == {"source", "target"}
 
 
+@pytest.fixture
+def cross_cohort_stack(tmp_path):
+    model, _, _ = two_expert_stack("frozen", context_init_std=0)
+    dataset = model.pair_dataset(UnlabelledDataset(channels=[], sample_frequency=1, total_input="4s", stride="4s"))
+    contract = {"type": "multitask", "tasks": {name: {"classes": expert.output["classes"], "n_steps": 4, "target_resolution": "1s", "target_offset": "0s", "default": expert.output["classes"][0], "percentage": 0.5, "soft_boundaries": False} for name, expert in model.experts.items()}}
+    packaged = PackagedModel(name="stack", task="multitask", model=model, dataset=dataset, classification_contract=contract)
+    manifest = tmp_path / "files.yml"
+    manifest.write_text(yaml.safe_dump({"files": [str(DATA / "signals_01.edf")]}))
+    reference = {"name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset", "channels": [], "sample_frequency": 1, "total_input": "4s", "stride": "4s", "resample_type": "nearest", "z_normalize": False, "assume_units_if_missing": False, "edf_unit_overrides": {}, "event_mapping": {"wake": "on", "n1": "yes", "n2": "on", "n3": "yes", "rem": "on"}}
+    specs = {task: {**reference, "sample_frequency": 10, "channels": [{"logical_name": task, "physical_names": ["EEG"], "unit": "uV", "normalizer": None}], "edf_unit_overrides": {"EEG": "uV"}} for task in ("source", "target")}
+    entry = {"label": "external", "files": str(manifest), "reference": reference, "datasets": specs}
+    return packaged, entry
+
+
+def test_external_experts_use_yaml_preprocessing_and_keep_packaged_weights(cross_cohort_stack):
+    packaged, entry = cross_cohort_stack
+    before = {name: value.clone() for name, value in packaged.model.state_dict().items()}
+    # A different alias in each expert must survive without modifying the package.
+    entry["datasets"]["source"]["channels"][0]["physical_names"] = ["new-source"]
+    entry["datasets"]["target"]["channels"][0]["physical_names"] = ["new-target"]
+
+    dataset, patients, _ = prepare_dataset(packaged, entry)
+
+    assert patients == [str(DATA / "signals_01.edf")]
+    assert dataset.datasets["source"].channels == [ChannelConfig("source", ["new-source"], unit="uV")]
+    assert dataset.datasets["target"].channels == [ChannelConfig("target", ["new-target"], unit="uV")]
+    assert dataset.datasets["source"].edf_unit_overrides == {"EEG": "uV"}
+    assert dataset.input_spec() == packaged.dataset.input_spec()
+    assert packaged.dataset.datasets["source"].channels[0].physical_names == ["EEG"]
+    assert all(torch.equal(value, before[name]) for name, value in packaged.model.state_dict().items())
+
+
+@pytest.mark.parametrize("invalid", ["missing", "extra", "logical-order", "both", "incomplete", "reference"])
+def test_external_expert_specs_fail_before_initialization(cross_cohort_stack, invalid):
+    packaged, entry = cross_cohort_stack
+    if invalid == "missing":
+        entry["datasets"].pop("source")
+    elif invalid == "extra":
+        entry["datasets"]["unknown"] = entry["datasets"]["source"]
+    elif invalid == "logical-order":
+        entry["datasets"]["source"]["channels"][0]["logical_name"] = "target"
+    elif invalid == "incomplete":
+        entry["datasets"]["source"].pop("sample_frequency")
+    elif invalid == "reference":
+        entry.pop("reference")
+    else:
+        entry["dataset"] = entry["reference"]
+    with pytest.raises(ValueError):
+        prepare_dataset(packaged, entry)
+
+
+def test_complete_joint_dataset_initializes_and_predicts(cross_cohort_stack):
+    packaged, entry = cross_cohort_stack
+    dataset, patients, _ = prepare_dataset(packaged, entry)
+    dataset.initialize(patients, num_workers=0, strict=True)
+    predictions = packaged.predict_dataset(dataset, batch_size=2, num_workers=0, progress=False, allow_preprocessing_override=True, edf_cache_patients=0)
+    assert set(predictions["task"]) == {"source", "target"}
+    assert predictions["valid"].all()

@@ -62,7 +62,8 @@ def write_unsplit_manifest(path: Path, files: list[str]) -> Path:
 
 
 
-def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path):
+@pytest.mark.parametrize("dataset_key", ["dataset", "datasets"])
+def test_dataset_uses_complete_yaml_specification(tmp_path, dataset_key):
     test_tool = load_test_tool()
     package = make_package()
     manifest = write_unsplit_manifest(tmp_path / "files.yml", ["patient.edf"])
@@ -73,9 +74,18 @@ def test_dataset_inherits_package_geometry_and_accepts_regular_channels(tmp_path
             "name": "sleepwalker.datasets.Stages.Stages",
             "event_mapping": {"event": "event", "sleep": "sleep"},
             "channels": [{"logical_name": "EEG", "physical_names": ["external-eeg"], "normalizer": None, "unit": "uV"}],
+            "sample_frequency": 100,
+            "total_input": "60s",
+            "stride": "5s",
+            "resample_type": "nearest",
+            "z_normalize": False,
+            "assume_units_if_missing": False,
+            "edf_unit_overrides": {},
         },
     }
 
+    if dataset_key == "datasets":
+        entry["datasets"] = {package.task: entry.pop("dataset")}
     dataset, patients, selected_fold = test_tool.prepare_dataset(package, entry)
 
     assert isinstance(dataset, Stages)
@@ -197,7 +207,8 @@ def test_cli_overwrite_updates_test_config(monkeypatch):
     assert calls == [("package", config)]
 
 
-def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
+@pytest.mark.parametrize("telemetry_enabled", [False, True])
+def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch, telemetry_enabled):
     test_tool = load_test_tool()
     progress_statuses = []
     monkeypatch.setattr(test_tool.logger, "progress_status", progress_statuses.append)
@@ -219,6 +230,14 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
             "dataset": {
                 "name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset",
                 "event_mapping": {label: label for label in classes},
+                "channels": [{"logical_name": "EEG", "physical_names": ["EEG"], "unit": "uV", "normalizer": None}],
+                "sample_frequency": 10,
+                "total_input": "30s",
+                "stride": "30s",
+                "resample_type": "nearest",
+                "z_normalize": False,
+                "assume_units_if_missing": False,
+                "edf_unit_overrides": {},
             },
             "num_workers": 0,
             "strict": True,
@@ -227,6 +246,8 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
         "test": {"device": "cpu", "batch_size": 64, "num_workers_dataloader": 0, "output": str(output)},
     }
 
+    if telemetry_enabled:
+        config["test"]["telemetry"] = {"resources": False}
     result = test_tool.execute(package_path, config)
     records = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
 
@@ -237,3 +258,15 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch):
     assert len(output.read_text(encoding="utf-8").splitlines()) == 3
     assert any("windows" in status and "failed batches" in status and "inference" not in status and "predictions" not in status for status in progress_statuses)
     assert any("analysis | patient" in status and "kept" in status for status in progress_statuses)
+    telemetry_output = output.with_suffix(".telemetry")
+    if telemetry_enabled:
+        summary = json.loads((telemetry_output / "summary.json").read_text())
+        assert summary["status"] == "FINISHED"
+        config["test"]["overwrite"] = True
+        test_tool.execute(package_path, config)
+        assert json.loads((telemetry_output / "summary.json").read_text()) == summary
+        reruns = list(telemetry_output.glob("rerun-*/summary.json"))
+        assert len(reruns) == 1
+        assert json.loads(reruns[0].read_text())["status"] == "FINISHED"
+    else:
+        assert not telemetry_output.exists()

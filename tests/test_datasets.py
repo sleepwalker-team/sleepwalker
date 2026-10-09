@@ -9,7 +9,9 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.core.signal import resample_native_signals
+from sleepwalker.datasets.normalizer import RecordingZScore
 from sleepwalker.datasets.Basedataset import ChannelConfig, BaseDataset, EDFFile, EventIndex, batch_collate
 from sleepwalker.datasets.CAP import CAP
 from sleepwalker.datasets.MNC import MNC
@@ -73,13 +75,13 @@ class OffsetNormalizer:
     def __init__(self, offset):
         self.offset = float(offset)
 
-    def transform(self, data):
-        return data + self.offset
+    def __call__(self, data, *, unit, is_recording):
+        return data + self.offset, unit
 
 
 class CenterNormalizer:
-    def transform(self, data):
-        return data - data.mean()
+    def __call__(self, data, *, unit, is_recording):
+        return data - data.mean(), unit
 
 
 def build_export_loader(dataset, batch_size=128):
@@ -107,6 +109,7 @@ def create_dummy_file() -> EDFFile:
         }
     )
     return EDFFile(
+        preprocessors={("EEG", "EEG"): []},
         channels=["EEG"],
         path="dummy.edf",
         start_date=start,
@@ -253,7 +256,12 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
         index=pd.date_range("2024-01-01", periods=30, freq="1s"),
     )
 
-    built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, signal)
+    file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=signal.index[0], length=1)
+    file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
+    file.get_x = lambda *args, **kwargs: signal.copy()
+    selected_channels = dataset.select_channels(file.channels)
+    processed, quality = dataset.transform_window(file, signal.index[0], selected_channels)
+    built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, processed, quality)
     selected = pd.DataFrame(built["data"].numpy(), index=signal.index, columns=["eeg"])
 
     assert list(selected.columns) == ["eeg"]
@@ -286,30 +294,32 @@ def test_get_item_reads_only_selected_physical_aliases_and_quality_channels():
     file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=start, length=1)
     reads = []
 
-    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None):
+    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None, read_mode="physical"):
         reads.append(list(channels))
         return signal.loc[:, channels].copy()
 
+    file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
     file.get_x = get_x
     item = dataset.get_item(file, start)
 
-    assert reads == [["C3-M2", "E1-M2", "C3 quality"]]
+    assert len(reads) == 1 and set(reads[0]) == {"C3-M2", "E1-M2", "C3 quality"}
     assert item["data"].tolist() == [[1.0, 1.0, 7.0], [2.0, 2.0, 8.0], [3.0, 3.0, 9.0]]
 
 
 @pytest.mark.parametrize("resample_type", ["nearest", "polyphase"])
 def test_get_items_matches_separate_reads(resample_type):
-    dataset = UnlabelledDataset(channels=[ChannelConfig("eeg", ["EEG"])], sample_frequency=10, resample_type=resample_type, total_input="4s", stride="1s")
+    dataset = UnlabelledDataset(channels=[ChannelConfig("eeg", ["EEG"], preprocessors=[CenterNormalizer()])], sample_frequency=10, resample_type=resample_type, total_input="4s", stride="1s")
     start = pd.Timestamp("2024-01-01")
     signal = pd.DataFrame({"EEG": np.sin(np.arange(200, dtype=np.float32) / 7)}, index=pd.date_range(start, periods=200, freq="50ms"))
-    file = EDFFile(channels=["EEG"], path="patient.edf", start_date=start, length=1, normalizers={"EEG": CenterNormalizer()})
+    file = EDFFile(channels=["EEG"], path="patient.edf", start_date=start, length=1, preprocessors={("eeg", "EEG"): [CenterNormalizer()]})
     reads = []
 
-    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None):
+    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None, read_mode="physical"):
         reads.append((start_date, end_date))
         native = {20.0: signal.loc[(signal.index >= start_date) & (signal.index < end_date), channels].copy()}
         return resample_native_signals(native, channels, start_date, end_date, sample_frequency, resample_type)
 
+    file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
     file.get_x = get_x
     starts = [start, start + pd.Timedelta("2s"), start + pd.Timedelta("4s")]
     separate = [dataset.get_item(file, value)["data"] for value in starts]
@@ -323,8 +333,8 @@ def test_get_items_matches_separate_reads(resample_type):
 def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
     dataset = DummyDataset(
         channels=[
-            ChannelConfig("sleep_eeg", ["C3-M2"], normalizer=OffsetNormalizer(1)),
-            ChannelConfig("arousal_eeg", ["C3-M2"], normalizer=OffsetNormalizer(10)),
+            ChannelConfig("sleep_eeg", ["C3-M2"], preprocessors=[OffsetNormalizer(1)]),
+            ChannelConfig("arousal_eeg", ["C3-M2"], preprocessors=[OffsetNormalizer(10)]),
         ],
         sample_frequency=1,
         total_input="3s",
@@ -332,37 +342,27 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
     )
     signal = pd.DataFrame({"C3-M2": [0.0, 1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1s"))
 
-    built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, signal)
+    file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=signal.index[0], length=1)
+    file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
+    file.get_x = lambda *args, **kwargs: signal.copy()
+    selected_channels = dataset.select_channels(file.channels)
+    processed, quality = dataset.transform_window(file, signal.index[0], selected_channels)
+    built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, processed, quality)
 
     assert built["data"].tolist() == [[1.0, 10.0], [2.0, 11.0], [3.0, 12.0]]
 
 
-def test_shared_physical_channel_requires_one_unit_and_no_rereferencing():
-    channels = [ChannelConfig("a", ["signal"], unit="uV"), ChannelConfig("b", ["signal"], unit="mV")]
-    with pytest.raises(ValueError, match="incompatible target units"):
-        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None)
-
-    channels = [ChannelConfig("a", ["signal"]), ChannelConfig("b", ["signal"])]
-    with pytest.raises(ValueError, match="rereferencing"):
-        DummyDataset(channels=channels, sample_frequency=1, event_mapping=None, rereference=[["signal", "reference"]])
-
-
-def test_shared_physical_channel_is_z_normalized_once_before_duplication():
-    start = pd.Timestamp("2024-01-01")
-    dataset = DummyDataset(
-        channels=[ChannelConfig("a", ["signal"]), ChannelConfig("b", ["signal"])],
-        sample_frequency=1,
-        total_input="3s",
-        event_mapping=None,
-        z_normalize=True,
-    )
-    signal = pd.DataFrame({"signal": [0.0, 1.0, 2.0]}, index=pd.date_range(start, periods=3, freq="1s"))
-    file = EDFFile(channels=["signal"], path="patient.edf", start_date=start, length=1, z_statistics={"signal": (1.0, 1.0)})
+def test_shared_sources_can_use_independent_units_and_recording_scalers():
+    channels = [ChannelConfig('a', ['signal'], preprocessors=[ConvertUnit('uV'), RecordingZScore()]), ChannelConfig('b', ['signal'], preprocessors=[ConvertUnit('mV'), RecordingZScore()])]
+    dataset = DummyDataset(channels=channels, sample_frequency=1, total_input="3s", event_mapping=None)
+    signal = pd.DataFrame({"signal": [0., 1., 2., 3.]}, index=pd.date_range("2024-01-01", periods=4, freq="1s"))
+    file = EDFFile(channels=["signal"], path="patient.edf", start_date=signal.index[0], end_date=signal.index[-1], units={"signal": "uV"}, preprocessors={(cfg.logical_name, "signal"): cfg.preprocessors_for("signal") for cfg in channels})
     file.get_x = lambda *args, **kwargs: signal.copy()
-
-    item = dataset.get_item(file, start)
-
-    assert item["data"].tolist() == [[-1.0, -1.0], [0.0, 0.0], [1.0, 1.0]]
+    dataset.fit_recording_preprocessors(file)
+    first, second = (file.preprocessors[(name, "signal")][-1] for name in ("a", "b"))
+    assert first is not second and np.isclose(first.std, second.std * 1000)
+    item = dataset.get_item(file, file.start_date)
+    np.testing.assert_allclose(item["data"][:, 0], item["data"][:, 1])
 
 
 def test_target_callback_can_discard_an_unusable_extra_target():
@@ -389,22 +389,16 @@ def test_target_callback_can_discard_an_unusable_extra_target():
 
 
 def test_channel_config_resolves_per_physical_normalizers_and_quality_channels():
-    normalizer = object()
-    config = ChannelConfig(
-        logical_name="eeg",
-        physical_names=["C3-A2", "C4-A1"],
-        normalizer={"C3-A2": normalizer, "C4-A1": None},
-        quality_name={"C3-A2": "C3 quality", "C4-A1": "C4 quality"},
-        unit="uV",
-    )
+    normalizer = OffsetNormalizer(1)
+    config = ChannelConfig(logical_name='eeg', physical_names=['C3-A2', 'C4-A1'], quality_name={'C3-A2': 'C3 quality', 'C4-A1': 'C4 quality'}, preprocessors={'C3-A2': [ConvertUnit('uV'), normalizer], 'C4-A1': [ConvertUnit('uV')]})
 
-    assert config.normalizer_for("C3-A2") is normalizer
-    assert config.normalizer_for("C4-A1") is None
+    assert config.preprocessors_for("C3-A2")[1:] == [normalizer]
+    assert config.preprocessors_for("C4-A1")[0].target == "uV"
     assert config.quality_name_for("C3-A2") == "C3 quality"
     assert config.quality_name_for("C4-A1") == "C4 quality"
 
-    with pytest.raises(ValueError, match="unknown physical channels"):
-        ChannelConfig("eeg", ["C3-A2"], normalizer={"C4-A1": normalizer})
+    with pytest.raises(ValueError, match="cover exactly"):
+        ChannelConfig("eeg", ["C3-A2"], preprocessors={"C4-A1": [normalizer]})
 
 
 def test_batch_collate_filters_rejected_samples_and_returns_none_for_empty_batch():
@@ -427,7 +421,7 @@ def test_dataset_initialization_does_not_load_complete_signals(monkeypatch):
         remove_unmapped_events=False,
     )
     edf_path = Path(__file__).parent / "data" / "signals_01.edf"
-    monkeypatch.setattr(basedataset_module, "edf_to_df", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("initialize loaded the signal")))
+    monkeypatch.setattr(basedataset_module, "read_edf_native", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("initialize loaded the signal")))
 
     dataset.initialize([edf_path], num_workers=0, strict=True)
 
@@ -435,55 +429,28 @@ def test_dataset_initialization_does_not_load_complete_signals(monkeypatch):
     assert dataset.get_patient_ranges() == [(0, len(dataset))]
 
 
-def test_recording_z_normalization_runs_after_normalizers_and_rereferencing(monkeypatch):
-    import sleepwalker.datasets.Basedataset as basedataset_module
-
+def test_recording_fitting_uses_source_processors_and_final_mapping_runs_only_on_windows():
     start = pd.Timestamp("2024-01-01")
-    full_signal = pd.DataFrame(
-        {"A": [0.0, 2.0, 4.0, 6.0], "B": [0.0, 0.0, 0.0, 0.0]},
-        index=pd.date_range(start, periods=4, freq="1s"),
-    )
-    reads = []
+    signal = pd.DataFrame({"A": [0., 2., 4., 6.], "B": [1., 3., 5., 7.]}, index=pd.date_range(start, periods=4, freq="1s"))
+    calls = []
 
-    def read_meta(path):
-        return {"start": start, "end": start + pd.Timedelta(seconds=4), "signals": ["A", "B"], "units": {"A": "uV", "B": "uV"}, "source": "pyedflib"}
+    def reference(channels):
+        calls.append(list(channels))
+        a, unit_a = channels["A"]
+        b, unit_b = channels["B"]
+        assert unit_a == unit_b == "dimensionless"
+        return {"referenced": (a - b, unit_a)}
 
-    def read_signal(path, channels, start, end, frequency, how, verbose):
-        reads.append((start, end))
-        return full_signal.loc[:, channels].copy()
-
-    def read_native(path, channels, start, end, verbose):
-        selected = full_signal.loc[(full_signal.index >= start) & (full_signal.index < end), channels].copy()
-        return {1.0: selected}
-
-    warnings = []
-    monkeypatch.setattr(basedataset_module, "read_edf_meta", read_meta)
-    monkeypatch.setattr(basedataset_module, "edf_to_df", read_signal)
-    monkeypatch.setattr(basedataset_module, "read_edf_native", read_native)
-    monkeypatch.setattr(basedataset_module.logger, "warning", warnings.append)
-
-    dataset = SyntheticDataset(
-        channels=[ChannelConfig("A", ["A"], normalizer=OffsetNormalizer(10.0)), ChannelConfig("B", ["B"])],
-        sample_frequency=1,
-        total_input="2s",
-        stride="1s",
-        event_mapping=None,
-        rereference=[["A", "B"]],
-        z_normalize=True,
-    )
-    dataset.initialize(["recording.edf"], num_workers=0, strict=True)
-
-    assert reads == [(None, None)]
-    assert warnings == ["z_normalize=True with rereferencing enabled: recording z-normalization is applied after rereferencing."]
-    assert dataset.edf_files[0].z_statistics == {
-        "A": (6.5, np.std([5.0, 6.0, 7.0, 8.0])),
-        "B": (-6.5, np.std([-5.0, -6.0, -7.0, -8.0])),
-    }
-
-    item = dataset.get_item(dataset.edf_files[0], start)
-
-    expected = torch.tensor([[-1.3416408, 1.3416408], [-0.4472136, 0.4472136]])
-    assert torch.allclose(item["data"], expected)
+    dataset = DummyDataset(channels=[ChannelConfig('A', ['A'], preprocessors=[ConvertUnit('uV'), OffsetNormalizer(10), RecordingZScore()]), ChannelConfig('B', ['B'], preprocessors=[ConvertUnit('uV'), RecordingZScore()])], sample_frequency=1, total_input="2s", prepare_channels=reference, input_channels=["referenced"])
+    file = EDFFile(channels=["A", "B"], path="recording.edf", start_date=start, end_date=start + pd.Timedelta("4s"), units={"A": "uV", "B": "uV"}, preprocessors={(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names})
+    file.get_x = lambda begin, finish, *args, channels=None, **kwargs: signal.loc[(signal.index >= begin) & (signal.index < finish), channels].copy()
+    dataset.fit_recording_preprocessors(file)
+    assert calls == []
+    assert file.preprocessors[("A", "A")][-1].mean == 13.
+    assert file.preprocessors[("B", "B")][-1].mean == 4.
+    np.testing.assert_allclose(dataset.get_item(file, start)["data"], 0, atol=1e-6)
+    assert calls == [["A", "B"]]
+    assert dataset.get_input_channels() == ["referenced"]
 
 
 def test_prepare_patient_callback_is_label_only():
@@ -1189,6 +1156,7 @@ class GroupedCacheDataset(DummyDataset):
                 index=pd.date_range("2024-01-01", periods=3, freq="1s"),
             ),
         )
+        self._file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in self.channels for name in cfg.physical_names}
         self.edf_files = [self._file]
         self.lower_bounds = [0]
         self.upper_bounds = [1]

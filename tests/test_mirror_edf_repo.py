@@ -9,13 +9,14 @@ import numpy as np
 import pyedflib
 import pytest
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.cli import mirror_edf_repo
 
 
 def channel_config() -> list[mirror_edf_repo.ChannelConfig]:
     return [
-        mirror_edf_repo.ChannelConfig(logical_name="high", physical_names=["HIGH"], unit="uV"),
-        mirror_edf_repo.ChannelConfig(logical_name="low", physical_names=["LOW"], unit="uV"),
+        mirror_edf_repo.ChannelConfig(logical_name='high', physical_names=['HIGH'], preprocessors=[ConvertUnit('uV')]),
+        mirror_edf_repo.ChannelConfig(logical_name='low', physical_names=['LOW'], preprocessors=[ConvertUnit('uV')]),
     ]
 
 
@@ -70,12 +71,15 @@ data:
   channels:
     - logical_name: high
       physical_names: [HIGH]
-      unit: uV
-      normalizer:
-        name: this.is.deliberately.not.imported
+      preprocessors:
+      - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+        target: uV
+      - name: this.is.deliberately.not.imported
     - logical_name: low
       physical_names: [LOW]
-      unit: uV
+      preprocessors:
+      - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+        target: uV
 """.strip()
         + "\n",
         encoding="utf-8",

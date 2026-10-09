@@ -1,7 +1,7 @@
-"""Process-shared cache for complete resampled EDF recordings.
+"""Process-shared cache for uniformly sampled EDF channels.
 
 The cache is intended for repeated window access, especially during packaged
-model inference. It stores one complete resampled recording per cache key as a
+model inference. It stores one complete channel or uniformly sampled channel group per cache key as a
 memory-mapped NumPy array and uses a manager-backed registry to coordinate
 cache misses between DataLoader workers.
 """

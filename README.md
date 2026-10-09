@@ -58,7 +58,7 @@ Assemble a dataset, a model, and a trainer, wrap them in a `RunCfg`, and call `r
 
 ```python
 import torch
-from sleepwalker.datasets import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.models.AttnSleep import AttnSleep
@@ -69,7 +69,7 @@ classes = ["wake", "n1", "n2", "n3", "rem"]
 
 dataset = SleepEDFx(
     channels=[ChannelConfig("eeg", ["EEG Fpz-Cz"], unit="uV",
-                           normalizer=EEGFilterNormalizer(fs=100))],
+                           preprocessors=[EEGFilterNormalizer(fs=100)])],
     sample_frequency=100,
     event_mapping={"sleep stage w": "wake", "sleep stage 1": "n1",
                    "sleep stage 2": "n2", "sleep stage 3": "n3",

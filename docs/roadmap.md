@@ -50,12 +50,6 @@ This page records useful features discovered while writing and testing the docum
 
 **Target:** Add one working configuration with overlapping annotations (dataset + two-head model + `MultiLabelTrainer`), verify it end to end, and link it from the guide.
 
-## Document and validate channel normalizers {#document-and-validate-channel-normalizers}
-
-**Current state:** Only `EEGFilterNormalizer` appears in the [Python API](reference/api.md). The `Normalizer` protocol and `SignalFilterNormalizer`, which implements the Butterworth band-pass, notch, and `(x - mean) / std` rescaling steps, have no generated reference entry and no docstrings, and the other normalizers (`PulseFilterNormalizer`, `RespirationFilterNormalizer`, `SaturationFilterNormalizer`) are undocumented. Nothing checks that the `fs` given to a normalizer matches the dataset `sample_frequency`, so a mismatch silently filters at the wrong frequencies.
-
-**Target:** Document the normalizer interface, each built-in normalizer with its default filter settings, and the order in which normalizers run relative to unit conversion, resampling, rereferencing, and z-normalization. Add docstrings so the reference renders, and reject or warn about a normalizer frequency that disagrees with `sample_frequency`.
-
 ## Document target interval placement {#document-target-interval-placement}
 
 **Current state:** The annotation window handed to `prepare_target` spans the whole input window and `time` is the window start. Which sub-interval is supervised is chosen inside the callback through `target_resolution`, `target_position`, and `target_offset`; `BaseDataset` exposes no placement option, and the deployment contract does not record one.

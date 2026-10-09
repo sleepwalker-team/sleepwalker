@@ -6,6 +6,44 @@ import pandas as pd
 from sleepwalker.datasets.Basedataset import BaseDataset
 from sleepwalker.datasets.utils import read_nsrr, read_profusion
 
+def correct_shhs_waveform(values, *, unit, is_recording):
+    """Use relative units for SHHS respiratory inputs with missing dimensions.
+
+    SHHS equipment documentation distinguishes older respiratory inputs from
+    newer airflow on an auxiliary input with 250 microvolt sensitivity:
+    https://sleepdata.org/datasets/shhs/pages/08-equipment-shhs1.md
+    https://sleepdata.org/forum/shhs-database-new-air-signal
+    Local October 2026 inspection found blank-unit AIRFLOW, ABDO RES and THOR
+    RES with dummy +/-1 physical ranges. EDF FAQ Q8 permits such uncalibrated
+    thermocouple exports: https://www.edfplus.info/specs/edffaq.html
+    This recipe declares their scale relative; it does not infer a voltage gain
+    or divide by 250. Already labelled signals and digital counts are retained.
+    Apply this function only to the respiratory channels named above.
+    """
+    return values, "relative" if unit is None else unit
+
+
+def correct_shhs_saturation(values, *, unit, is_recording):
+    """Declare missing SHHS SaO2/SpO2 dimensions as percent.
+
+    Local October 2026 inspection found blank dimensions with a 0..100 physical
+    mapping. SHHS describes pulse oximetry here:
+    https://sleepdata.org/datasets/shhs/pages/08-equipment-shhs1.md
+    This is an explicit dataset recipe assumption. It preserves decoded values,
+    gain, offset, labelled variants and digital counts. It does not check ranges.
+    """
+    return values, "%" if unit is None else unit
+
+
+def get_preprocessors(channel_name):
+    """Return explicit unit-label corrections for one SHHS source channel."""
+    if channel_name.upper() in {"AIRFLOW", "ABDO RES", "THOR RES"}:
+        return [correct_shhs_waveform]
+    if channel_name.casefold() in {"sao2", "spo2"}:
+        return [correct_shhs_saturation]
+    return []
+
+
 def read_xml(fpath, annotator, start_date):
     """Load one SHHS XML annotation file into the common event-table format."""
     name = os.path.basename(fpath).split(".edf")[0]

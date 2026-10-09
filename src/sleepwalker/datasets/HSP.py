@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import multiprocessing
 from typing import Sequence
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 import pandas as pd
 from .Basedataset import BaseDataset, ChannelConfig
 from os.path import basename, dirname, join, exists
@@ -361,7 +362,20 @@ def hsp_group_name(subgroup: str, grouped: bool) -> str | None:
         return "Pulse"
     return None
 
-def resolve_normalizer(
+def correct_hsp_saturation(values, *, unit, is_recording):
+    """Correct the known HSP saturation microvolt label to percent.
+
+    Local HSP EDF inspection found SaO2/SpO2 percentage samples labelled uV.
+    The same assumption was previously in HSP.__init__ as a unit override.
+    HSP acquisition/export context: https://sleepdata.org/datasets/hsp
+    This correction is specific to the named HSP saturation channels. It does
+    not multiply values, alter the EDF calibration, or reinterpret digital counts.
+    Other source units remain unchanged for ConvertUnit to accept or reject.
+    """
+    return values, "%" if unit in {None, "uV", "µV", "μV"} else unit
+
+
+def get_preprocessors(
     channel_name: str,
     group_name: str | None,
     normalize: bool,
@@ -369,14 +383,15 @@ def resolve_normalizer(
     sample_frequency: float,
 ):
     """Resolve the effective normalizer for one HSP channel."""
+    value = hsp_normalizer(channel_name, sample_frequency) if normalize else None
     if override_normalize is not None:
         if channel_name in override_normalize:
-            return override_normalize[channel_name]
-        if group_name is not None and group_name in override_normalize:
-            return override_normalize[group_name]
-    if not normalize:
-        return None
-    return hsp_normalizer(channel_name, sample_frequency)
+            value = override_normalize[channel_name]
+        elif group_name is not None and group_name in override_normalize:
+            value = override_normalize[group_name]
+    target = "%" if channel_name in HSP_CHANNEL_GROUPS["spo2"] else "uV"
+    correction = [correct_hsp_saturation] if channel_name in HSP_CHANNEL_GROUPS["spo2"] else []
+    return correction + [ConvertUnit(target)] + ([] if value is None else [value])
 
 
 def get_channels(
@@ -416,8 +431,8 @@ def get_channels(
                 if not physical_names:
                     continue
                 if logical_group is not None:
-                    normalizers = {
-                        channel_name: resolve_normalizer(
+                    processors = {
+                        channel_name: get_preprocessors(
                             channel_name=channel_name,
                             group_name=subgroup,
                             normalize=normalize,
@@ -430,12 +445,7 @@ def get_channels(
                         ChannelConfig(
                             logical_name=logical_group,
                             physical_names=physical_names,
-                            normalizer=(
-                                None
-                                if all(value is None for value in normalizers.values())
-                                else normalizers
-                            ),
-                            unit="%" if subgroup == "spo2" else "uV",
+                            preprocessors=processors,
                         )
                     )
                 else:
@@ -443,14 +453,13 @@ def get_channels(
                         ChannelConfig(
                             logical_name=channel_name,
                             physical_names=[channel_name],
-                            normalizer=resolve_normalizer(
+                            preprocessors=get_preprocessors(
                                 channel_name=channel_name,
                                 group_name=subgroup,
                                 normalize=normalize,
                                 override_normalize=override_normalize,
                                 sample_frequency=sample_frequency,
                             ),
-                            unit="%" if subgroup == "spo2" else "uV",
                         )
                         for channel_name in physical_names
                     )
@@ -464,14 +473,13 @@ def get_channels(
             ChannelConfig(
                 logical_name=channel_name,
                 physical_names=[channel_name],
-                normalizer=resolve_normalizer(
+                preprocessors=get_preprocessors(
                     channel_name=channel_name,
                     group_name=None,
                     normalize=normalize,
                     override_normalize=override_normalize,
                     sample_frequency=sample_frequency,
                 ),
-                unit="%" if channel_name in HSP_CHANNEL_GROUPS["spo2"] else "uV",
             )
         )
 
@@ -2117,11 +2125,7 @@ class HSP(BaseDataset):
             - new sensitivity 50 µvp-p chin1-chin3, new high filters 50.0hz notch 60hz chin1-chin3 - 1001
     '''
     def __init__(self, sane_labels=True, **kwargs):
-        # HSP saturation samples are percentages although their EDF headers
-        # incorrectly label these channels as microvolts.
-        overrides = {"SaO2": "%", "SpO2": "%", "SPO2": "%"}
-        overrides.update(kwargs.pop("edf_unit_overrides", {}) or {})
-        super().__init__(edf_unit_overrides=overrides, **kwargs)
+        super().__init__(**kwargs)
         self.sane_labels = sane_labels
 
     def get_event_df(self, edf_path, start_datetime):

@@ -170,7 +170,7 @@ def execute(package_path: str | Path | PackagedModel, config: Mapping[str, Any])
                         if dataset.get_n_patients() == 0 or len(dataset) == 0:
                             raise ValueError(f"Dataset '{label}' produced no evaluable windows.")
                         logger.info(f"Initialized {dataset.get_n_patients()} patients and {len(dataset)} evaluation windows.")
-                        predictions = package.predict_dataset(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=int(test_options.get("num_workers_dataloader", 0)), n_repeat=int(test_options.get("n_repeat", 1)), device=device, seed=seed, rejection_strategy="none", allow_preprocessing_override=True, progress=True, progress_label=label)
+                        predictions = package.predict_dataset(dataset, batch_size=int(test_options.get("batch_size", 64)), num_workers=int(test_options.get("num_workers_dataloader", 0)), n_repeat=int(test_options.get("n_repeat", 1)), device=device, seed=seed, rejection_strategy="none", progress=True, progress_label=label)
                         if predictions.empty:
                             raise ValueError(f"Dataset '{label}' produced no valid prediction rows.")
                         logger.info(f"Produced {len(predictions):,} prediction rows for {predictions['patient'].nunique() if not predictions.empty else 0} patients.")

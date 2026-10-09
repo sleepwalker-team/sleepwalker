@@ -16,7 +16,9 @@ import urllib.request
 
 import torch
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.datasets.Basedataset import ChannelConfig
+from sleepwalker.datasets.normalizer import RecordingZScore
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import save_packaged_model
 from sleepwalker.models.PackagedEmbeddingModel import PackagedEmbeddingModel
@@ -328,13 +330,11 @@ def convert(model_name: str, model_root: str | Path, destination: str | Path):
     model = PackagedEmbeddingModel(encoder=encoder, embedding_dim=embedding_dim, ts_len=ts_len, n_channels=len(channel_names), channel_first=True, preprocessors=preprocessors)
     input_unit = "uV" if model_name == "sleepgpt" else None
     dataset = UnlabelledDataset(
-        channels=[ChannelConfig(logical_name=name, physical_names=[name], unit=input_unit) for name in channel_names],
+        channels=[ChannelConfig(logical_name=name, physical_names=[name], preprocessors=([ConvertUnit(input_unit)] if input_unit else []) + ([RecordingZScore()] if model_name in {'osf', 'sleepfm'} else [])) for name in channel_names],
         sample_frequency=sample_frequency,
         resample_type="polyphase" if model_name == "sleepfm" else "nearest",
         total_input=f"{window_seconds}s",
         stride=f"{window_seconds}s",
-        z_normalize=model_name in {"osf", "sleepfm"},
-        assume_units_if_missing=True,
     )
     return save_packaged_model(destination, name=model_name, model=model, dataset=dataset, classification_contract=None, task=None, config={"foundation_model": model_name, "source": source})
 

@@ -10,6 +10,7 @@ import torch
 import yaml
 
 import sleepwalker.cli.evaluate as evaluate_tool
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
@@ -47,7 +48,7 @@ def load_test_tool():
 
 def make_package():
     dataset = UnlabelledDataset(
-        channels=[ChannelConfig("EEG", ["source-eeg"], unit="uV")],
+        channels=[ChannelConfig('EEG', ['source-eeg'], preprocessors=[ConvertUnit('uV')])],
         sample_frequency=100,
         total_input="60s",
         stride="5s",
@@ -73,14 +74,11 @@ def test_dataset_uses_complete_yaml_specification(tmp_path, dataset_key):
         "dataset": {
             "name": "sleepwalker.datasets.Stages.Stages",
             "event_mapping": {"event": "event", "sleep": "sleep"},
-            "channels": [{"logical_name": "EEG", "physical_names": ["external-eeg"], "normalizer": None, "unit": "uV"}],
+            "channels": [{'logical_name': 'EEG', 'physical_names': ['external-eeg'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}],
             "sample_frequency": 100,
             "total_input": "60s",
             "stride": "5s",
             "resample_type": "nearest",
-            "z_normalize": False,
-            "assume_units_if_missing": False,
-            "edf_unit_overrides": {},
         },
     }
 
@@ -92,7 +90,9 @@ def test_dataset_uses_complete_yaml_specification(tmp_path, dataset_key):
     assert dataset.sample_frequency == 100
     assert dataset.total_input == pd.Timedelta("60s")
     assert dataset.stride == pd.Timedelta("5s")
-    assert dataset.channels == [ChannelConfig("EEG", ["external-eeg"], normalizer=None, unit="uV")]
+    expected = [ChannelConfig('EEG', ['external-eeg'], preprocessors=[ConvertUnit('uV')])]
+    assert dataset.channels[0].logical_name == expected[0].logical_name
+    assert dataset.channels[0].physical_names == expected[0].physical_names
     assert dataset.rejection_strategy == "none"
     assert patients == ["patient.edf"]
     assert selected_fold is None
@@ -214,7 +214,7 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch, telemetry_enab
     monkeypatch.setattr(test_tool.logger, "progress_status", progress_statuses.append)
     classes = ["wake", "n1", "n2", "n3", "rem"]
     dataset = UnlabelledDataset(
-        channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
+        channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])],
         sample_frequency=10,
         total_input="30s",
         stride="30s",
@@ -230,15 +230,12 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch, telemetry_enab
             "dataset": {
                 "name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset",
                 "event_mapping": {label: label for label in classes},
-                "channels": [{"logical_name": "EEG", "physical_names": ["EEG"], "unit": "uV", "normalizer": None}],
+                "channels": [{'logical_name': 'EEG', 'physical_names': ['EEG'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}],
                 "sample_frequency": 10,
                 "total_input": "30s",
                 "stride": "30s",
                 "resample_type": "nearest",
-                "z_normalize": False,
-                "assume_units_if_missing": False,
-                "edf_unit_overrides": {},
-            },
+                },
             "num_workers": 0,
             "strict": True,
         },

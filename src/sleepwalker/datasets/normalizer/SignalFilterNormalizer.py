@@ -8,7 +8,7 @@ class SignalFilterNormalizer(Normalizer):
     """Zero-phase Butterworth band/high/low-pass filter with optional notch and standardization.
 
     Builds its filters once at construction time and applies them to a single
-    signal channel on each call to `transform`. The filtering chain is:
+    signal channel on each call. The filtering chain is:
     optional clipping, then the Butterworth band/high/low-pass filter, then an
     optional IIR notch filter. All filtering is zero-phase (forward-backward).
     When `normalize` is set, the filtered signal is additionally standardized
@@ -109,25 +109,25 @@ class SignalFilterNormalizer(Normalizer):
 
         return filtered
 
-    def transform(self, X):
+    def __call__(self, values: np.ndarray, *, unit: str | None, is_recording: bool) -> tuple[np.ndarray, str | None]:
         """Filter and optionally standardize a single-channel signal.
 
         Args:
-            X: Input array of shape ``(N, 1)``, where the single column holds
+            values: Input array of shape ``(N, 1)``, where the single column holds
                 the signal samples.
 
         Returns:
-            Array of shape ``(N, 1)`` containing the filtered signal, scaled by
-            ``(x - mean) / std`` when `normalize` is set.
+            The filtered array and its unit. Fixed standardization returns
+            dimensionless output; filtering alone preserves the input unit.
 
         Raises:
-            ValueError: If `X` is not 2D with a single column.
+            ValueError: If `values` is not 2D with a single column.
         """
-        X = np.asarray(X)
-        if X.ndim != 2 or X.shape[1] != 1:
-            raise ValueError(f"Expected shape (N, 1), got {X.shape}")
+        values = np.asarray(values)
+        if values.ndim != 2 or values.shape[1] != 1:
+            raise ValueError(f"Expected shape (N, 1), got {values.shape}")
 
-        filtered = self.filter(X[:, 0])
+        filtered = self.filter(values[:, 0])
         if self.normalize:
             filtered = (filtered - self.mean) / self.std
-        return filtered.reshape(-1, 1)
+        return filtered.reshape(-1, 1), "dimensionless" if self.normalize else unit

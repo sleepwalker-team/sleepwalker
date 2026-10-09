@@ -4,24 +4,30 @@ data:
   channels:
     - logical_name: Abdomen
       physical_names: [ABD, ABDOMEN, Abdomen]
-      normalizer: &respiration_normalizer
-        name: sleepwalker.datasets.normalizer.RespirationFilterNormalizer.RespirationFilterNormalizer
-        fs: 100
-      unit: uV
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
+        - &respiration_normalizer
+          name: sleepwalker.datasets.normalizer.RespirationFilterNormalizer.RespirationFilterNormalizer
+          fs: 100
     - logical_name: Chest
       physical_names: [CHEST, THORAX, Chest]
-      normalizer: *respiration_normalizer
-      unit: uV
+      preprocessors: [*respiration_normalizer]
     - logical_name: Airflow
       physical_names: [PTAF, AIRFLOW, AirFlow, Airflow2, IC, THERMISTOR, Thermistor, Flow, Flow_DR, CFLOW, CFlow, C-Flow, XFlow]
-      normalizer: *respiration_normalizer
-      unit: uV
+      preprocessors: [*respiration_normalizer]
     - logical_name: SpO2
       physical_names: [SaO2, SpO2, SPO2]
-      normalizer:
-        name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+      preprocessors:
+      - sleepwalker.datasets.HSP.correct_hsp_saturation
+      - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+        target: '%'
+      - name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
         fs: 100
-      unit: '%'
   sample_frequency: 100
   event_mapping:
     n1: sleep

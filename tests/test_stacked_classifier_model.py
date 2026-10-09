@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.datasets.Basedataset import ChannelConfig, EDFFile
 from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
@@ -263,8 +264,8 @@ def cross_cohort_stack(tmp_path):
     packaged = PackagedModel(name="stack", task="multitask", model=model, dataset=dataset, classification_contract=contract)
     manifest = tmp_path / "files.yml"
     manifest.write_text(yaml.safe_dump({"files": [str(DATA / "signals_01.edf")]}))
-    reference = {"name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset", "channels": [], "sample_frequency": 1, "total_input": "4s", "stride": "4s", "resample_type": "nearest", "z_normalize": False, "assume_units_if_missing": False, "edf_unit_overrides": {}, "event_mapping": {"wake": "on", "n1": "yes", "n2": "on", "n3": "yes", "rem": "on"}}
-    specs = {task: {**reference, "sample_frequency": 10, "channels": [{"logical_name": task, "physical_names": ["EEG"], "unit": "uV", "normalizer": None}], "edf_unit_overrides": {"EEG": "uV"}} for task in ("source", "target")}
+    reference = {"name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset", "channels": [], "sample_frequency": 1, "total_input": "4s", "stride": "4s", "resample_type": "nearest", "event_mapping": {"wake": "on", "n1": "yes", "n2": "on", "n3": "yes", "rem": "on"}}
+    specs = {task: {**reference, "sample_frequency": 10, "channels": [{'logical_name': task, 'physical_names': ['EEG'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}]} for task in ("source", "target")}
     entry = {"label": "external", "files": str(manifest), "reference": reference, "datasets": specs}
     return packaged, entry
 
@@ -279,9 +280,13 @@ def test_external_experts_use_yaml_preprocessing_and_keep_packaged_weights(cross
     dataset, patients, _ = prepare_dataset(packaged, entry)
 
     assert patients == [str(DATA / "signals_01.edf")]
-    assert dataset.datasets["source"].channels == [ChannelConfig("source", ["new-source"], unit="uV")]
-    assert dataset.datasets["target"].channels == [ChannelConfig("target", ["new-target"], unit="uV")]
-    assert dataset.datasets["source"].edf_unit_overrides == {"EEG": "uV"}
+    expected = [ChannelConfig('source', ['new-source'], preprocessors=[ConvertUnit('uV')])]
+    assert dataset.datasets["source"].channels[0].logical_name == expected[0].logical_name
+    assert dataset.datasets["source"].channels[0].physical_names == expected[0].physical_names
+    expected = [ChannelConfig('target', ['new-target'], preprocessors=[ConvertUnit('uV')])]
+    assert dataset.datasets["target"].channels[0].logical_name == expected[0].logical_name
+    assert dataset.datasets["target"].channels[0].physical_names == expected[0].physical_names
+    assert dataset.datasets["source"].channels[0].preprocessors[0].target == "uV"
     assert dataset.input_spec() == packaged.dataset.input_spec()
     assert packaged.dataset.datasets["source"].channels[0].physical_names == ["EEG"]
     assert all(torch.equal(value, before[name]) for name, value in packaged.model.state_dict().items())
@@ -310,6 +315,6 @@ def test_complete_joint_dataset_initializes_and_predicts(cross_cohort_stack):
     packaged, entry = cross_cohort_stack
     dataset, patients, _ = prepare_dataset(packaged, entry)
     dataset.initialize(patients, num_workers=0, strict=True)
-    predictions = packaged.predict_dataset(dataset, batch_size=2, num_workers=0, progress=False, allow_preprocessing_override=True, edf_cache_patients=0)
+    predictions = packaged.predict_dataset(dataset, batch_size=2, num_workers=0, progress=False, edf_cache_patients=0)
     assert set(predictions["task"]) == {"source", "target"}
     assert predictions["valid"].all()

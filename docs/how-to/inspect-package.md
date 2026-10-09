@@ -36,12 +36,11 @@ print("sampling frequency:", dataset.sample_frequency)
 print("window duration:", dataset.total_input)
 print("window stride:", dataset.stride)
 print("resampling:", dataset.resample_type)
-print("recording z-normalization:", dataset.z_normalize)
+print("channel processing:", [(channel.logical_name, channel.preprocessors) for channel in dataset.channels])
 
 for channel in dataset.channels:
     print("logical name:", channel.logical_name)
     print("accepted EDF names:", channel.physical_names)
-    print("output unit:", channel.unit)
 ```
 
 `logical_name` is the channel name passed to the model. `physical_names` lists EDF header names that can supply it, in lookup order. Normalizers and preparation callbacks are also stored on the dataset object.

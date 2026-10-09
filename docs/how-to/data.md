@@ -25,27 +25,188 @@ values. A 1 Hz channel from the same patient contains only \(28{,}800\) values.
 
 ## Channel configuration
 
-EDF headers contain the names chosen by the recording system or dataset producer. These are not standardized across datasets, vendors and sensors and thus often vary between datasets. For example, [Sleep-EDFx](../how-to/sleep-edfx.md) contains two EEG derivations named `EEG Fpz-Cz` and `EEG Pz-Oz`, whereas [SHHS](https://sleepdata.org/datasets/shhs/pages) only contains one `EEG` channel. Moreover, multiple channel can form one physiological signal group. The two EEG channels `EEG Fpz-Cz` and `EEG Pz-Oz` in [Sleep-EDFx](../how-to/sleep-edfx.md) both measure EEG, but from different electrode pairs. Sleepwalker refers to these channels as **physical channels**. They identify actual sensor recordings in an EDF and are mapped to **logical channels** which are required by the ML models. For example, a model may require one channel called `eeg` without specifying one particular electrode derivation. The [`ChannelConfig`](../reference/api.md#channel-config) maps the logical input to the physical EDF channels that may supply it. Second, it bundles these with a physical unit. The physical unit (e.g. `unit="uV"`) states the expected unit of the data. Sleepwalker reads the unit from the EDF header and converts compatible units before any subsequent processing. If an EDF value \(x\) is stored in volts and the requested unit is microvolts, then we scale it accordingly:
+EDF headers contain the names chosen by the recording system or dataset producer. These are not standardized across datasets, vendors and sensors and thus often vary between datasets. For example, [Sleep-EDFx](../how-to/sleep-edfx.md) contains two EEG derivations named `EEG Fpz-Cz` and `EEG Pz-Oz`, whereas [SHHS](https://sleepdata.org/datasets/shhs/pages) only contains one `EEG` channel. Moreover, multiple channel can form one physiological signal group. The two EEG channels `EEG Fpz-Cz` and `EEG Pz-Oz` in [Sleep-EDFx](../how-to/sleep-edfx.md) both measure EEG, but from different electrode pairs. Sleepwalker refers to these channels as **physical channels**. They identify actual sensor recordings in an EDF and are mapped to **logical channels** which are required by the ML models. For example, a model may require one channel called `eeg` without specifying one particular electrode derivation. The [`ChannelConfig`](../reference/api.md#channel-config) maps the logical input to the physical EDF channels that may supply it. `ChannelConfig` also selects physical or digital decoding and an ordered list of processors. Conversion is an explicit step: `ConvertUnit("uV")` converts volts to microvolts by multiplying values by a million. Voltage, pressure and flow conversions stay within their respective measurement families.
 
-$$
-x_{\mu\mathrm{V}} = 10^6 x_{\mathrm{V}}.
-$$
+`read_mode="physical"`, the default, applies the EDF header's gain and offset. `read_mode="digital"` returns floating-point EDF codes. It bypasses gain magnitude and offset while retaining the sign of a valid gain. Codes do not establish the sensor's original ADC range or a shared bit depth across recording systems. Signal decoding uses pyEDFlib; it does not silently switch to a backend that returns different units.
 
-Missing units are rejected by default. If you set `assume_units_if_missing` to `True`, then Sleepwalker ignores missing unit information and assumes the values are already in the correct unit. It does not infer or convert an unknown unit. See the [dataset signal settings](../reference/api.md#dataset-signal-settings) for the available options. Last, raw physiological signals contain components that a model may not be intended to learn from. An EEG can contain slow baseline drift, electrical mains interference, or frequencies outside the range used during training. Signal amplitudes can also have a scale or offset that differs from what the model expects. The `ChannelConfig` optionally also expects a `normalizer` that is applied to the physical channels after loading them. A normalizer is any object with a `transform(X)` method that maps an `[N, 1]` array of samples to an array of the same shape, so filtering and rescaling can be combined in one step. The [`EEGFilterNormalizer`](../reference/pipeline.md#eeg-filter-normalizer) used below, for example, is a `SignalFilterNormalizer`: it applies a fourth-order Butterworth band-pass filter between `lowcut=0.3` and `highcut=35.0` Hz, a notch filter at `notch_freq=50.0` Hz, and finally maps the result to `(x - mean) / std`. Since `mean` and `std` default to `0.0` and `1.0`, that last step is the identity by default and the values stay in the unit of the channel; pass explicit statistics if you want a z-scored output. One normalizer can be shared by every physical alternative of a logical channel, or a dictionary can assign a separate normalizer to each physical channel name. The `fs` argument of the normalizer is not checked against the dataset `sample_frequency`; both must be set to the same value, otherwise the filter operates on the wrong frequencies. The full normalizer family is documented in the [data pipeline reference](../reference/pipeline.md#normalizers); the missing `fs` cross-check for user-provided normalizers is tracked in the [roadmap](../roadmap.md#document-and-validate-channel-normalizers).
-
-Below is a complete example, where the two channels `EEG Fpz-Cz` and `EEG Pz-Oz` are  mapped to the common `eeg` channel which is measured in microvolts. After loading the selected physical channel and converting it to microvolts, the [EEGFilterNormalizer](../reference/pipeline.md#eeg-filter-normalizer) is applied for a signal sampled at 100 Hz.
+Each processor receives an array of shape `(N, 1)`, its current `unit`, and `is_recording`. It returns `(values, unit)` or `None` to exclude that input. Conversion updates the unit, filtering preserves it, and normalization returns `"dimensionless"`. Digital input starts with `"counts"`; unknown physical units use `None`. Documented unknown waveform scales can use `"relative"`.
 
 ```python
 from sleepwalker.datasets.Basedataset import ChannelConfig
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer import ConvertUnit, EEGFilterNormalizer, RecordingZScore
 
-eeg_channel_config = ChannelConfig(
+eeg = ChannelConfig(
     logical_name="eeg",
     physical_names=["EEG Fpz-Cz", "EEG Pz-Oz"],
-    unit="uV",
-    normalizer=EEGFilterNormalizer(fs=100),
+    preprocessors=[
+        ConvertUnit("uV"),
+        EEGFilterNormalizer(fs=100, normalize=False),
+        RecordingZScore(),
+    ],
 )
 ```
+
+`ConvertUnit` rejects unknown or incompatible source units. Put a documented source-label correction before `ConvertUnit` in the processor list. A label correction does not recover an unknown gain. There is no automatic calibration inference or generic physiological range check.
+
+`EEGFilterNormalizer(normalize=False)` filters without amplitude scaling. With `normalize=True`, it also applies its configured mean and standard deviation. `FixedScale` expresses fixed scaling separately. These values are configured, not fitted. Filter `fs` must equal the dataset's `sample_frequency`. See the [normalizer reference](../reference/pipeline.md#normalizers).
+
+## Recording and window normalization
+
+The same processor list serves recording preparation and window access:
+
+| Stage | Calls |
+| --- | --- |
+| Recording preparation | Read the interval between `EDFFile.start_date` and `end_date` when a step has `fit`. Do not mask samples by annotation or window coverage. Fit optional steps in order, applying predecessors to prepare the next fit's input. Pass `is_recording=True` to both fitting and application. Stop after the last fit. |
+| Window access | Read and resample the window, then call every step with `is_recording=False`. Never fit. Call `prepare_channels` if configured, then pad or truncate its outputs before sample assembly. |
+| Sample assembly | Format processed logical columns and targets. |
+
+A fitted step implements `fit(values, *, unit, is_recording)`. It updates itself in place and returns `self` on success or `None` to exclude the recording alias. Application uses `__call__(values, *, unit, is_recording)`; functions and lambdas use the same arguments without `self`.
+
+**Recording normalization is independent for every logical channel and physical alias.** `RecordingZScore` learns the mean and population standard deviation; `RecordingRobustScale` learns the median and quantile span. Preparation copies the configured processors for each recording and alias. Sparse annotations and annotation callbacks do not create a signal coverage mask. Window access reuses these fitted parameters.
+
+Window normalization computes statistics during application. The explicit argument lets a window-only step preserve input during recording preparation:
+
+```python
+import numpy as np
+
+
+def window_zscore(values, *, unit, is_recording):
+    if is_recording:
+        return values, unit
+    if not np.isfinite(values).all():
+        return None
+    scale = values.std()
+    if scale <= 0:
+        return None
+    return (values - values.mean()) / scale, "dimensionless"
+```
+
+Steps can repair data, convert values using documented rules, or reject input. Recording rules can accept short sensor dropouts while window rules reject affected windows. A `None` result during preparation excludes the physical alias; the recording is excluded only when a required logical channel has no usable alias. During window access, another eligible alias is tried. If all aliases fail, only that window is excluded. Exceptions report processing errors and propagate. With `group_sampling_strategy="none"`, all selected aliases must succeed to preserve the output shape.
+
+`read_mode` and `preprocessors` accept shared settings or complete dictionaries keyed by physical alias. Two aliases can use different conversions, filters, or normalization:
+
+```python
+from sleepwalker.datasets.normalizer import RecordingRobustScale
+
+eeg = ChannelConfig(
+    "eeg", ["C3-M2", "C4-M1"],
+    preprocessors={
+        "C3-M2": [ConvertUnit("uV"), EEGFilterNormalizer(fs=100, normalize=False), RecordingZScore()],
+        "C4-M1": [ConvertUnit("uV"), EEGFilterNormalizer(fs=100, normalize=False), RecordingRobustScale()],
+    },
+)
+```
+
+## Dataset unit corrections
+
+Dataset modules provide ordinary processor functions. Add them explicitly to a channel's list; adapters do not alter units implicitly. Their docstrings explain the evidence and limits. The functions change unit labels while retaining decoded values and the EDF gain and offset. They need no header dictionary or remote correction file.
+
+```python
+from sleepwalker.datasets.Apples import get_preprocessors as apples_preprocessors
+
+apples_eog = ChannelConfig(
+    "EOG", ["LOC", "ROC"],
+    preprocessors={
+        name: [*apples_preprocessors(name), ConvertUnit("uV"), RecordingZScore()]
+        for name in ["LOC", "ROC"]
+    },
+)
+```
+
+
+YAML names an ordinary correction function directly. Filters and fitted normalizers use constructor specifications:
+
+```yaml
+logical_name: EOG
+physical_names: [LOC, ROC]
+preprocessors:
+  - sleepwalker.datasets.Apples.correct_apples_eeg
+  - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+    target: uV
+  - name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+    fs: 100
+    normalize: false
+  - name: sleepwalker.datasets.normalizer.RecordingZScore
+```
+
+| Dataset | Explicit physical interpretation |
+| --- | --- |
+| SHHS | Keep labelled `NEW AIR` microvolt calibration. Declare missing older airflow/belt units as relative. Declare missing saturation units as percent. Division by 125 or 250 does not recover unknown gain. |
+| APPLES | Supply NSRR's EEG/EOG microvolt assumption for missing units. Declare other missing waveform units as relative, and saturation as percent. Preserve non-identity EDF mappings. |
+| HSP | Correct the known saturation microvolt label to percent through `correct_hsp_saturation`. |
+| Ruhrlandklinik | Convert voltage and pressure within their measurement families. `ConvertUnit("%")` rejects saturation labelled as voltage before filtering. No additional header rejection rule is required. |
+
+For SHHS, both airflow variants can use recording normalization without assuming that their amplitudes are microvolts:
+
+```python
+from dataclasses import replace
+from sleepwalker.datasets.normalizer import RespirationFilterNormalizer, SaturationFilterNormalizer
+from sleepwalker.datasets.SHHS import get_preprocessors as shhs_preprocessors
+
+flow = ChannelConfig(
+    "Airflow", ["NEW AIR", "AIRFLOW"],
+    preprocessors={
+        name: [*shhs_preprocessors(name), RespirationFilterNormalizer(fs=100, normalize=False), RecordingZScore()]
+        for name in ["NEW AIR", "AIRFLOW"]
+    },
+)
+saturation = ChannelConfig(
+    "SpO2", ["SaO2"],
+    preprocessors=[*shhs_preprocessors("SaO2"), ConvertUnit("%"), SaturationFilterNormalizer(fs=100, normalize=False)],
+)
+digital_flow = replace(flow, read_mode="digital")
+```
+
+Modes can also differ between aliases: `read_mode={"NEW AIR": "physical", "AIRFLOW": "digital"}`. Keep saturation physical when its absolute percentage matters. Normalization removes constant amplitude and offset differences; it cannot recover missing signals or make different sensors equivalent.
+
+
+## Derived channels and rereferencing
+
+Use `prepare_channels` when a computation needs several processed source channels. Declare those sources through `ChannelConfig`, including aliases and their processor lists. The callback receives `{logical_name: (values, unit)}` and returns the same dictionary format. Arrays have shape `(N, 1)`. Supply `input_channels` to select and order the returned model inputs. Ten configured sources can therefore produce three model channels.
+
+```python
+from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+from sleepwalker.models.TinySleepNet import TinySleepNet
+
+
+def reference(channels):
+    c3, unit_c3 = channels["C3"]
+    m2, unit_m2 = channels["M2"]
+    if unit_c3 != unit_m2:
+        return None
+    return {"EEG": (c3 - m2, unit_c3)}
+
+
+dataset = UnlabelledDataset(
+    channels=[
+        ChannelConfig("C3", ["C3", "EEG C3"], preprocessors=[ConvertUnit("uV"), EEGFilterNormalizer(fs=100, normalize=False)]),
+        ChannelConfig("M2", ["M2", "A2"], preprocessors=[ConvertUnit("uV"), EEGFilterNormalizer(fs=100, normalize=False)]),
+    ],
+    prepare_channels=reference,
+    input_channels=["EEG"],
+    sample_frequency=100,
+    total_input="30s",
+)
+model = TinySleepNet(
+    n_channels=len(dataset.get_input_channels()),  # one EEG output, two sources
+    ts_len=dataset.get_timeseries_len(),
+    sampling_frequency=dataset.sample_frequency,
+    seq_len=1,
+)
+dataset.initialize(["patient.edf"], num_workers=0, strict=True)
+```
+
+The callback runs once per window, after all source processor lists and before final padding or truncation. It can combine physical and digital sources, repair values, or return `None` to reject the window. It does not run during recording fitting: fitted normalizers belong to the declared sources. Units are the units returned by those processors, such as `"counts"`, `"uV"`, or `"dimensionless"`. No implicit conversion occurs when channels are combined.
+
+Accepted windows must return every name in `input_channels`. The list sets tensor column order; extra returned names are ignored. Use separate logical source names when several physical channels must be available at once; aliases within one group select alternative sources. Companion `quality_data` keeps its source logical names for `prepare_sample`; the mapper does not combine quality scores automatically.
+
+Without a callback, configured logical channels remain the model inputs. With a callback, `input_channels` is required. `get_input_channels()` returns these configured names without reading data or calling processors, including before initialization. Inference templates and model packages retain the same list. The CLI derives model channel count from this list, as it does for ordinary channel configurations. In YAML, put the output names on the dataset specification:
+
+```yaml
+input_channels: [EEG]
+prepare_channels: my_processing.reference
+```
+
 
 ## Sampling frequencies
 
@@ -96,7 +257,7 @@ time points per logical channel. With `total_input="30s"`, `sample_frequency=100
 Window starts are multiples of `stride` counted from the first usable sample of the recording, so a `stride="15s"` produces windows starting at 0 s, 15 s, 30 s, and so on, and every window is dropped if it does not fit into the usable signal range. Once labels are available, `initialize()` does not keep every window in that grid: it keeps only the windows that overlap at least one retained annotation interval. Windows that fall entirely inside an unlabelled gap between two blocks of annotations are therefore never offered. See [what happens when a dataset is initialized](#what-happens-when-a-dataset-is-initialized).
 
 !!! important
-    The order of operations matters here: The time series is first windowed, then the physical channels for each window are read from the EDF file and their units are converted to the target unit. After that, resampling is applied *to that window* and only then is the normalizer applied *to that resampled window*. Resampling and normalization can produce different results when applied to the entire time series compared to individual windows, due to artifacts at the borders.
+    Filters and window-dependent normalization receive the actual requested window. Filter boundary effects and window statistics can therefore differ between overlapping windows. During recording fitting, preceding filters receive the complete recording. The EDF cache stores native samples before resampling and processing; enabling it does not change this lifecycle.
 
 ## What happens when a dataset is initialized
 
@@ -113,9 +274,10 @@ prepares the `dataset` for iteration on the given list of patients via `patient_
 3. validate physical units;
 4. locate and map the annotations (see next section); 
 5. determine the common usable time range; and
-6. calculate valid window start positions.
+6. calculate valid window start positions; and
+7. fit any processors that implement `fit` on the complete recording.
 
-Signal values are normally loaded lazily when `dataset[index]` is requested. The selected window is read, converted to the target unit, resampled, normalized, and passed through the target and sample callbacks. The result normally contains:
+Signal values are normally loaded lazily when `dataset[index]` is requested. The selected window is read, resampled, processed, and passed through the target and sample callbacks. The result normally contains:
 
 ```python
 {
@@ -128,7 +290,7 @@ Signal values are normally loaded lazily when `dataset[index]` is requested. The
 
 Adapters that expose a secondary annotation timeline can add `target_extra` (see [loading data with labels](#loading-data-with-labels)). `len(dataset)` counts the prepared windows over all patients, not the patients themselves; use [`get_n_patients()`](../reference/api.md#base-dataset) or [`get_patient_ranges()`](../reference/api.md#base-dataset) for the patient dimension.
 
-`strict=True` makes an invalid patient fail initialization. With `strict=False`, invalid patients are logged and skipped. Use strict initialization while developing a dataset configuration so that missing channels, bad units, and annotation problems are not silently converted into a smaller cohort.
+`strict=True` makes an invalid patient fail initialization. With `strict=False`, invalid headers, annotations, and explicitly rejected recordings are logged and skipped. Processor errors always propagate. Stateless steps run during window access, so their rejection is handled there.
 
 !!! warning "Data loading pressures I/O bandwidth"
     Data is loaded lazily from disk and is *not* held in memory. Each requested window means we are reading some part of an EDF file into main memory. This allows us to process even terabytes of data on fairly small machines, but also pressures I/O. In many cases, I/O bandwidth will be the limiting factor and not GPU speed. We highly recommend storing data on local SSDs for good performance rather than on a networked file system.
@@ -143,7 +305,7 @@ from torch.utils.data import DataLoader
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer import ConvertUnit, EEGFilterNormalizer
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 
 data_root = "data/sleep-edfx/SC"
@@ -152,8 +314,7 @@ patient_paths = [path for path in get_edf_files_in_repo(data_root) if path.endsw
 eeg_channel_config = ChannelConfig(
     logical_name="eeg",
     physical_names=["EEG Fpz-Cz", "EEG Pz-Oz"],
-    unit="uV",
-    normalizer=EEGFilterNormalizer(fs=100),
+    preprocessors=[ConvertUnit("uV"), EEGFilterNormalizer(fs=100)],
 )
 
 dataset = SleepEDFx(
@@ -162,7 +323,6 @@ dataset = SleepEDFx(
     total_input="30s",
     stride="30s",
     group_sampling_strategy="first",
-    assume_units_if_missing=False,
 )
 dataset = UnlabelledDataset.from_dataset(dataset)
 
@@ -302,7 +462,7 @@ from functools import partial
 
 from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
-from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer import ConvertUnit, EEGFilterNormalizer
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.training.loader import build_loader
@@ -315,15 +475,13 @@ labelled_dataset = SleepEDFx(
         ChannelConfig(
             logical_name="eeg",
             physical_names=["EEG Fpz-Cz", "EEG Pz-Oz"],
-            unit="uV",
-            normalizer=EEGFilterNormalizer(fs=100),
+            preprocessors=[ConvertUnit("uV"), EEGFilterNormalizer(fs=100)],
         )
     ],
     sample_frequency=100,
     total_input="30s",
     stride="30s",
     group_sampling_strategy="first",
-    assume_units_if_missing=False,
     event_mapping={
         "sleep stage w": "wake",
         "sleep stage 1": "n1",
@@ -363,5 +521,3 @@ for batch in loader:
 ```
 
 The target has shape `[batch, sequence_len, 5]`. The middle dimension is the number of consecutive categorical targets requested from `prepare_multiclass_target` (`sequence_len=1` here, i.e. one label per window) and the last dimension follows the order of `target_classes`.
-
-

@@ -15,7 +15,7 @@ from functools import partial
 
 import torch
 
-from sleepwalker.datasets import ChannelConfig, batch_collate
+from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
@@ -29,7 +29,7 @@ classes = ["n1", "n2", "n3", "rem", "wake"]
 
 def make_dataset():
     return SleepEDFx(
-        channels=[ChannelConfig("eeg", ["EEG Fpz-Cz"], normalizer=EEGFilterNormalizer(fs=100), unit="uV")],
+        channels=[ChannelConfig("eeg", ["EEG Fpz-Cz"], preprocessors=[EEGFilterNormalizer(fs=100)], unit="uV")],
         sample_frequency=100,
         event_mapping={
             "sleep stage w": "wake",

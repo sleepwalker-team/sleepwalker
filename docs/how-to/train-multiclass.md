@@ -127,7 +127,7 @@ Note that the trainer does not *select* the supervised interval inside the input
 
 ## Three filters, three costs
 
-A [`BaseDataset`](../reference/api.md#base-dataset) exposes three optional hooks. They differ in *when* they run and *what* they may reject, and that difference is a performance decision, not a stylistic one.
+A [`BaseDataset`](../reference/api.md#base-dataset) provides the following hooks for labels and sample assembly. They differ in *when* they run and *what* they may reject, and that difference is a performance decision, not a stylistic one. For computations across processed source channels, use the separate [final channel callback](data.md#derived-channels-and-rereferencing).
 
 | Hook | Runs | Sees | Can drop | Typical use |
 | --- | --- | --- | --- | --- |
@@ -291,10 +291,11 @@ data:
   channels:
     - logical_name: eeg
       physical_names: [EEG Fpz-Cz]
-      unit: uV
-      normalizer:
-        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
-        fs: 100
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: uV
+        - name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+          fs: 100
   sample_frequency: 100
   event_mapping:
     sleep stage w: wake
@@ -305,7 +306,6 @@ data:
     sleep stage r: rem
   total_input: 30s
   stride: 30s
-  assume_units_if_missing: false
   output_classes: &classes [wake, n1, n2, n3, rem]
   prepare_patient:
     name: sleepwalker.training.callbacks.trim_patient_to_events

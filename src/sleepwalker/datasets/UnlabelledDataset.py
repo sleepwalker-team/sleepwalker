@@ -9,7 +9,7 @@ files without ground-truth annotations.
 from __future__ import annotations
 
 import copy
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import pandas as pd
 
@@ -30,9 +30,8 @@ class UnlabelledDataset(BaseDataset):
         online_max_tries: Retry budget when `prepare_sample` rejects a window.
         rejection_strategy: Candidate fallback policy after expected rejection.
         n_views: Number of independently prepared views per accepted window.
-        rereference: Optional rereferencing groups applied after loading.
-        z_normalize: Whether to apply full-recording channel-wise z-score
-            normalization as the final built-in signal transform.
+        prepare_channels: Optional final callback that maps processed source channels to model channels.
+        input_channels: Ordered model channel names, required with prepare_channels.
     """
     def __init__(
         self,
@@ -46,11 +45,9 @@ class UnlabelledDataset(BaseDataset):
         online_max_tries: int = 128,
         rejection_strategy: str = "patient_then_global",
         n_views: int = 1,
-        rereference: list[list[str]] | None = None,
-        z_normalize: bool = False,
+        prepare_channels: Optional[Callable] = None,
+        input_channels: Optional[Sequence[str]] = None,
         group_sampling_strategy: str = "first",
-        assume_units_if_missing: bool = False,
-        edf_unit_overrides: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._init_kwargs = {
             "channels": list(channels),
@@ -62,31 +59,13 @@ class UnlabelledDataset(BaseDataset):
             "online_max_tries": online_max_tries,
             "rejection_strategy": rejection_strategy,
             "n_views": n_views,
-            "rereference": rereference,
-            "z_normalize": z_normalize,
+            "prepare_channels": prepare_channels,
+            "input_channels": input_channels,
             "group_sampling_strategy": group_sampling_strategy,
-            "assume_units_if_missing": assume_units_if_missing,
-            "edf_unit_overrides": dict(edf_unit_overrides or {}),
         }
-        super().__init__(
-            channels=channels,
-            sample_frequency=sample_frequency,
-            resample_type=resample_type,
-            total_input=total_input,
-            stride=stride,
-            event_mapping=None,
-            prepare_target=None,
-            prepare_sample=prepare_sample,
-            online_max_tries=online_max_tries,
-            rejection_strategy=rejection_strategy,
-            n_views=n_views,
-            force_one_day=False,
-            rereference=rereference,
-            z_normalize=z_normalize,
-            group_sampling_strategy=group_sampling_strategy,
-            assume_units_if_missing=assume_units_if_missing,
-            edf_unit_overrides=edf_unit_overrides,
-        )
+        super().__init__(**self._init_kwargs, event_mapping=None, prepare_target=None, force_one_day=False)
+        if input_channels is not None:
+            self._init_kwargs["input_channels"] = list(self.input_channels)
 
     @classmethod
     def from_dataset(cls, dataset: BaseDataset) -> UnlabelledDataset:
@@ -103,34 +82,24 @@ class UnlabelledDataset(BaseDataset):
             online_max_tries=dataset.online_max_tries,
             rejection_strategy=dataset.rejection_strategy,
             n_views=dataset.n_views,
-            rereference=dataset.rereference,
-            z_normalize=dataset.z_normalize,
+            prepare_channels=dataset.prepare_channels_callback,
+            input_channels=dataset.get_input_channels() if dataset.prepare_channels_callback is not None else None,
             group_sampling_strategy="first",
-            assume_units_if_missing=dataset.assume_units_if_missing,
-            edf_unit_overrides=dataset.edf_unit_overrides,
         )
 
     def clone(
         self,
         *,
         channels: Optional[Sequence[ChannelConfig]] = None,
-        assume_units_if_missing: Optional[bool] = None,
     ) -> UnlabelledDataset:
         """Return a fresh dataset template with the same configuration."""
         kwargs = dict(self._init_kwargs)
         if channels is not None:
             kwargs["channels"] = list(channels)
-        if assume_units_if_missing is not None:
-            kwargs["assume_units_if_missing"] = bool(assume_units_if_missing)
         return UnlabelledDataset(**kwargs)
 
     def dataset_kwargs(self) -> dict:
-        """Return a fresh copy of the executable dataset constructor arguments.
-
-        Existing expert packages already serialize ``_init_kwargs``. Adding
-        this public accessor therefore also exposes those stored arguments on
-        packages created before the method existed.
-        """
+        """Return a fresh copy of the dataset constructor arguments."""
         return copy.deepcopy(self._init_kwargs)
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:

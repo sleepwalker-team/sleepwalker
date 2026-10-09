@@ -33,9 +33,9 @@ def test_eegfilternorm_fixed_distribution_and_transform(fs, n_samples):
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(n_samples)).reshape(-1, 1)
 
     filter_only = EEGFilterNormalizer(fs=fs, normalize=False)
-    filtered = filter_only.transform(signal)
+    filtered = filter_only(signal, unit="uV", is_recording=False)[0]
     norm = EEGFilterNormalizer(fs=fs, mean=float(filtered.mean()), std=float(filtered.std()))
-    transformed = norm.transform(signal)
+    transformed = norm(signal, unit="uV", is_recording=False)[0]
 
     assert transformed.shape == signal.shape
     assert np.isclose(np.mean(transformed), 0, atol=1e-1)
@@ -48,7 +48,7 @@ def test_eegfilternorm_can_filter_without_patient_normalization():
     signal = (3.0 + np.sin(2 * np.pi * 10 * t)).reshape(-1, 1)
     norm = EEGFilterNormalizer(fs=fs, normalize=False)
 
-    transformed = norm.transform(signal)
+    transformed = norm(signal, unit="uV", is_recording=False)[0]
 
     assert np.allclose(transformed[:, 0], norm.filter(signal[:, 0]))
 
@@ -60,7 +60,7 @@ def test_eegfilternorm_invalid_shape_transform(fs):
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(len(t))).reshape(-1, 1)
     norm = EEGFilterNormalizer(fs=fs)
     with pytest.raises(ValueError):
-        norm.transform(signal.squeeze())
+        norm(signal.squeeze(), unit="uV", is_recording=False)[0]
 
 
 def test_eegfilternorm_rejects_nonpositive_std():
@@ -73,7 +73,7 @@ def test_eegfilternorm_different_bandpass(lowcut, highcut, fs):
     t = np.arange(2000) / fs
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(len(t))).reshape(-1, 1)
     norm = EEGFilterNormalizer(fs=fs, lowcut=lowcut, highcut=highcut)
-    transformed = norm.transform(signal)
+    transformed = norm(signal, unit="uV", is_recording=False)[0]
     assert np.isfinite(transformed).all()
 
 
@@ -85,7 +85,7 @@ def test_eegfilternorm_cuda_vs_cpu_consistency(device, fs):
     signal = (np.sin(2 * np.pi * 10 * t) + 0.1 * np.random.randn(n_samples)).reshape(-1, 1)
 
     norm_cpu = EEGFilterNormalizer(fs=fs)
-    out_cpu = norm_cpu.transform(signal)
+    out_cpu = norm_cpu(signal, unit="uV", is_recording=False)[0]
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
@@ -93,7 +93,7 @@ def test_eegfilternorm_cuda_vs_cpu_consistency(device, fs):
     x_torch = torch.tensor(signal, dtype=torch.float32, device=device)
     x_np = x_torch.cpu().numpy()
     norm_gpu = EEGFilterNormalizer(fs=fs)
-    out_gpu = norm_gpu.transform(x_np)
+    out_gpu = norm_gpu(x_np, unit="uV", is_recording=False)[0]
 
     assert np.isclose(out_cpu.mean(), out_gpu.mean(), atol=1e-3)
     assert np.isclose(out_cpu.std(), out_gpu.std(), atol=1e-3)
@@ -112,7 +112,7 @@ def test_eegfilternorm_integration():
     fs = 100
     normalizer = EEGFilterNormalizer(fs=fs)
     dataset = SyntheticDataset(
-        channels=[ChannelConfig("EEG", ["EEG"], normalizer=normalizer)],
+        channels=[ChannelConfig("EEG", ["EEG"], preprocessors=[] if normalizer is None else [normalizer])],
         sample_frequency=fs,
         event_mapping={},
         remove_unmapped_events=False,

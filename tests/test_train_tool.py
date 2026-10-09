@@ -12,6 +12,7 @@ import yaml
 
 import sleepwalker.datasets.HSP as hsp_dataset
 import sleepwalker.cli.train as train_tool
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.training.callbacks import prepare_patient_events
@@ -100,25 +101,26 @@ def test_resume_command_uses_checkpoint_run_config(monkeypatch):
 def test_channel_config_builds_direct_and_per_physical_normalizers():
     train_tool = load_train_tool()
     direct = train_tool.build_channel(
-        {"logical_name": "eeg", "physical_names": ["EEG"], "unit": "uV"}
+        {'logical_name': 'eeg', 'physical_names': ['EEG'], 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}
     )
     per_physical = train_tool.build_channel(
         {
             "logical_name": "eeg",
             "physical_names": ["C3-M2", "C4-M1"],
-            "normalizer": {
-                "C3-M2": {
+            "read_mode": "physical", "preprocessors": {"C3-M2": [{
                     "name": "sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer",
                     "fs": 100,
-                },
-                "C4-M1": None,
-            },
+                }], "C4-M1": []},
         }
     )
 
-    assert direct == ChannelConfig("eeg", ["EEG"], unit="uV")
-    assert per_physical.normalizer_for("C3-M2").__class__.__name__ == "EEGFilterNormalizer"
-    assert per_physical.normalizer_for("C4-M1") is None
+    expected = ChannelConfig('eeg', ['EEG'], preprocessors=[ConvertUnit('uV')])
+
+    assert direct.logical_name == expected.logical_name
+
+    assert direct.physical_names == expected.physical_names
+    assert per_physical.preprocessors_for("C3-M2")[0].__class__.__name__ == "EEGFilterNormalizer"
+    assert per_physical.preprocessors_for("C4-M1") == []
 
 
 def test_nested_fully_qualified_callable_is_resolved():
@@ -334,6 +336,22 @@ def test_dry_run_changes_training_not_just_validation(monkeypatch):
     assert run_config.batch_size == 16
     assert run_config.num_workers_dataloader == 0
     assert run_config.use_mlflow is False
+
+
+def test_final_channel_callback_does_not_inject_source_count_into_model(monkeypatch):
+    config = train_tool.read_yaml(REPO_ROOT / "configs" / "train" / "desaturation_hsp.yml")
+    entry = config["data"][0]
+    prototype = entry["channels"][0]
+    entry["channels"] = [{**copy.deepcopy(prototype), "logical_name": f"source{index}"} for index in range(3)]
+    entry["prepare_channels"] = lambda channels: {"SpO2": channels["source0"]}
+    entry["input_channels"] = ["SpO2"]
+    dataset = train_tool.build_dataset(entry)
+    monkeypatch.setattr(train_tool, "initialize_datasets", lambda _config, dry_run, fold=None, model=None: ([dataset], [], []))
+
+    run_config = train_tool.runcfg_from_dict(config, dry_run=True)
+
+    assert len(dataset.channels) == 3
+    assert run_config.model.input_spec()[0][-1] == 1
 
 
 def test_runcfg_from_checkpoint_reuses_serialized_trainer_and_model(tmp_path, monkeypatch):

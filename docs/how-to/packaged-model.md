@@ -18,7 +18,7 @@ When you call `package.predict_patient("night.edf")`, Sleepwalker:
 
 1. clones the saved dataset;
 2. resolves the required signals from the EDF header;
-3. checks and converts physical units;
+3. prepares the recording processors and fits their optional state;
 4. resamples and normalizes the signals;
 5. creates windows with the saved duration and stride;
 6. runs the model in batches; and
@@ -26,7 +26,7 @@ When you call `package.predict_patient("night.edf")`, Sleepwalker:
 
 A fresh dataset clone is used for every call, so initialized patient state is not shared between recordings.
 
-The saved channel configuration distinguishes a logical channel from its accepted EDF names. For example, a model may consume a logical channel named `eeg` while accepting `EEG Fpz-Cz` or `EEG Pz-Oz` from an EDF header. The accepted names are tried in order. The chosen signal is converted to the configured unit before its normalizer runs.
+The saved channel configuration distinguishes a logical channel from its accepted EDF names. For example, a model may consume a logical channel named `eeg` while accepting `EEG Fpz-Cz` or `EEG Pz-Oz` from an EDF header. The accepted names are tried in order. The chosen signal passes through the ordered processor list, including any explicit unit conversion.
 
 ## Output labels and times
 
@@ -40,9 +40,9 @@ The training checkpoint contains trainer state needed to resume optimization. A 
 
 ## Compatibility checks
 
-`predict_dataset()` accepts a separately initialized dataset after `package.assert_compatible(dataset)` checks its logical channels, sampling, window geometry, and preprocessing settings.
+`predict_dataset()` accepts a separately initialized dataset after `package.assert_compatible(dataset)` checks its logical channels, sampling, and window geometry.
 
-`allow_preprocessing_override=True` disables part of that check. Use it only when deliberately evaluating different preprocessing and record the change as part of the experiment. Channel swaps, unit mistakes, and shifted windows can produce plausible numbers while invalidating a comparison.
+Compatibility checks cover input geometry and timing. They do not infer units or compare arbitrary processor functions. Record preprocessing changes as part of the experiment. Channel swaps, unit mistakes, and shifted windows can produce plausible numbers while invalidating a comparison.
 
 ## Loading packages executes serialized code
 

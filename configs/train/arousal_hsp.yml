@@ -4,20 +4,27 @@ data:
   channels:
     - logical_name: EEG
       physical_names: [C3-M2, C4-M1, F3-M2, F4-M1, O1-M2, O2-M1, CZ-M2, CZ-M1, C3-M1, C4-M2, F3-M1, F4-M2, O1-M1, O2-M2]
-      normalizer: &eeg_normalizer
-        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
-        fs: 100
-      unit: uV
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
+        - &eeg_normalizer
+          name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+          fs: 100
     - logical_name: EOG
       physical_names: [E1-M2, E2-M1, E2-M2, E1, E2, Eye Up, Eye Down]
-      normalizer: *eeg_normalizer
-      unit: uV
+      preprocessors: [*eeg_normalizer]
     - logical_name: Chin EMG
       physical_names: [CHIN1-CHIN2, Chin1-Chin2, CHIN1-CHIN3, Chin1-Chin3, CHIN2-CHIN3, Chin2-Chin3, Chin3-Chin2, Chin3, Chin2, CHIN1, CHIN2, CHIN3, CHIN, CHINz, EMG]
-      unit: uV
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
     - logical_name: EKG
       physical_names: [EKG]
-      unit: uV
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "uV"
   sample_frequency: 100
   event_mapping:
     arousal: arousal

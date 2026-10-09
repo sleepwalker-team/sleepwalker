@@ -98,7 +98,7 @@ predictions = package.predict_patient(
 predictions.to_csv("night-predictions.csv", index=False)
 ```
 
-The returned DataFrame has one row per output step: `patient`, `task`, `time`, `prediction_idx`, `prediction`, and one `prob__<class>` column per class. Timing comes from the contract: each step's timestamp is the window start plus `target_offset` plus the step index scaled by the target resolution. A fresh dataset clone is used per call, so patient state never leaks between recordings, and missing channels or bad units fail during initialization — before the model runs. The full walkthrough is in [Predict sleep stages](predict-patient.md).
+The returned DataFrame has one row per output step: `patient`, `task`, `time`, `prediction_idx`, `prediction`, and one `prob__<class>` column per class. Timing comes from the contract: each step's timestamp is the window start plus `target_offset` plus the step index scaled by the target resolution. A fresh dataset clone is used per call, so patient state never leaks between recordings, and missing source channels fail during initialization. Unit processors reject an alias during recording fitting or window access, depending on where the step runs. The full walkthrough is in [Predict sleep stages](predict-patient.md).
 
 ### Predict a prepared dataset
 
@@ -110,7 +110,7 @@ package.assert_compatible(my_dataset)          # channels, sampling, window geom
 predictions = package.predict_dataset(my_dataset, batch_size=128, device="cuda:0")
 ```
 
-`assert_compatible()` compares logical channel order, sampling frequency, resample type, input duration, stride, and per-channel units/normalizers. `allow_preprocessing_override=True` skips the unit/normalizer checks — use it only when you deliberately evaluate a preprocessing change and record it as part of the experiment. With `return_received_windows=True` you also get a counter of received vs. expected windows, which is how coverage gaps in long recordings become visible.
+`assert_compatible()` compares logical channel order, sampling frequency, resample type, input duration, and stride. Processor functions can change values and units dynamically; callers are responsible for preprocessing comparability. With `return_received_windows=True` you also get a counter of received vs. expected windows, which is how coverage gaps in long recordings become visible.
 
 !!! warning "Loading a package executes code"
     `model.pt` uses Python/PyTorch serialization with `weights_only=False` because the package contains executable objects: normalizers, callbacks, and the model class itself. The SHA256 digest detects accidental modification but **is not a security mechanism** — an attacker who edits `model.pt` can rewrite the digest. Load packages only from sources you trust, in environments you control.

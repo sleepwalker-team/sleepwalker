@@ -21,3 +21,10 @@ class SaturationFilterNormalizer(SignalFilterNormalizer):
 
     def __init__(self, fs, highcut=0.4, band_order=2, clip_range=(50.0, 100.0), **kwargs):
         super().__init__(fs=fs, highcut=highcut, band_order=band_order, clip_range=clip_range, **kwargs)
+
+    def __call__(self, values, *, unit: str | None, is_recording: bool):
+        # Clipping is meaningful only for physical percentage values. Counts
+        # or an unknown waveform scale need an explicit correction first.
+        if unit not in {"%", "percent"}:
+            return None
+        return super().__call__(values, unit=unit, is_recording=is_recording)

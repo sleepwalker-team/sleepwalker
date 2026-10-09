@@ -1,5 +1,4 @@
-from fastapi import APIRouter, status
-
+from fastapi import APIRouter, Depends, Request, status
 from ..schemas.model import ModelListResponse, ModelResponse
 from ..services.model_registry import ModelInfo, ModelRegistry
 from ..errors import APIError
@@ -9,8 +8,8 @@ router = APIRouter(
     tags=["models"],
 )
 
-registry = ModelRegistry()
-
+def get_model_registry(request: Request) -> ModelRegistry:
+    return request.app.state.model_registry
 
 def to_model_response(model: ModelInfo) -> ModelResponse:
     return ModelResponse( #beschreibt verfügbares Modell, also noch keine Vorhersage
@@ -28,7 +27,9 @@ def to_model_response(model: ModelInfo) -> ModelResponse:
     "",
     response_model=ModelListResponse,
 )
-def list_models() -> ModelListResponse:
+def list_models(
+    registry: ModelRegistry = Depends(get_model_registry),
+) -> ModelListResponse:
     return ModelListResponse(
         models=[
             to_model_response(model)
@@ -40,7 +41,10 @@ def list_models() -> ModelListResponse:
     "/{model_id}",
     response_model=ModelResponse,
 )
-def get_model(model_id: str) -> ModelResponse:
+def get_model(
+    model_id: str,
+    registry: ModelRegistry = Depends(get_model_registry),
+) -> ModelResponse:
     model = registry.get(model_id)
 
     if model is None:

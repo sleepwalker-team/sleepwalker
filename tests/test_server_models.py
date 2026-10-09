@@ -1,13 +1,12 @@
-from fastapi.testclient import TestClient
 from pathlib import Path
-from sleepwalker.server.api import models
+
+from fastapi.testclient import TestClient
+
 from sleepwalker.server.app import create_app
 from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry
 
 
-def test_list_models_returns_registered_models_sorted_by_id(
-    monkeypatch,
-) -> None:
+def test_list_models_returns_registered_models_sorted_by_id() -> None:
     registry = ModelRegistry(
         [
             ModelInfo(
@@ -18,7 +17,7 @@ def test_list_models_returns_registered_models_sorted_by_id(
                 input_channels=("eeg",),
                 capabilities=("classification",),
                 output_resolution=0.1,
-                package_path=Path("/models/sleep-model.swmodel")
+                package_path=Path("/models/model-z.swmodel"),
             ),
             ModelInfo(
                 id="model-a",
@@ -28,14 +27,12 @@ def test_list_models_returns_registered_models_sorted_by_id(
                 input_channels=("eeg",),
                 capabilities=("classification",),
                 output_resolution=30.0,
-                package_path=Path("/models/sleep-model.swmodel")
+                package_path=Path("/models/model-a.swmodel"),
             ),
         ]
     )
 
-    monkeypatch.setattr(models, "registry", registry)
-
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(model_registry=registry)) as client:
         response = client.get("/api/v1/models")
 
     assert response.status_code == 200
@@ -61,8 +58,9 @@ def test_list_models_returns_registered_models_sorted_by_id(
             },
         ]
     }
-    
-def test_get_model_returns_registered_model(monkeypatch) -> None:
+
+
+def test_get_model_returns_registered_model() -> None:
     model = ModelInfo(
         id="sleep-model",
         name="Sleep Stage Model",
@@ -71,15 +69,12 @@ def test_get_model_returns_registered_model(monkeypatch) -> None:
         input_channels=("eeg",),
         capabilities=("classification",),
         output_resolution=30.0,
-        package_path=Path("/models/sleep-model.swmodel")
-    )
-    monkeypatch.setattr(
-        models,
-        "registry",
-        ModelRegistry([model]),
+        package_path=Path("/models/sleep-model.swmodel"),
     )
 
-    with TestClient(create_app()) as client:
+    with TestClient(
+        create_app(model_registry=ModelRegistry([model]))
+    ) as client:
         response = client.get("/api/v1/models/sleep-model")
 
     assert response.status_code == 200
@@ -91,15 +86,12 @@ def test_get_model_returns_registered_model(monkeypatch) -> None:
         "n3",
         "rem",
     ]
-    
-def test_get_unknown_model_returns_not_found(monkeypatch) -> None:
-    monkeypatch.setattr(
-        models,
-        "registry",
-        ModelRegistry(),
-    )
 
-    with TestClient(create_app()) as client:
+
+def test_get_unknown_model_returns_not_found() -> None:
+    with TestClient(
+        create_app(model_registry=ModelRegistry())
+    ) as client:
         response = client.get("/api/v1/models/unknown")
 
     assert response.status_code == 404

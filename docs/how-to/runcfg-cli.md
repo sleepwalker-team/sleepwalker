@@ -83,7 +83,6 @@ The `sleepwalker` command dispatches to subcommands:
 | `split` | `INPUT_DIR OUTPUT_FILE [--fractions T V T \| --folds N] [--seed S] [--filter-config YML] [--workers N]` | Build a deterministic, subject-level split manifest (holdout or ≥3-fold CV). |
 | `evaluate` | `[--overwrite] CONFIG` | Evaluate a packaged classifier on EDF manifests → JSONL metrics. |
 | `evaluate-system` | `[--overwrite] CONFIG` | Evaluate a dependency-aware system of packaged classifiers. |
-| `foundation-model` | `download MODEL ROOT` / `convert MODEL MODEL_ROOT DEST` | Fetch and convert pinned external encoders (`sleepfm`, `sleepgpt`, `osf`) into `PackagedEmbeddingModel` packages. |
 | `mirror-edf` | `SOURCE DEST CONFIG [...]` | Copy an EDF repo keeping only the channels/rate a config needs. |
 
 There is **no `sleepwalker predict` command**; prediction from the CLI goes through `evaluate`, and single-recording prediction is a Python call (`package.predict_patient`, see [Predict sleep stages](predict-patient.md)). <!-- TODO: add a `sleepwalker predict` command. See the [roadmap](../roadmap.md#stabilize-command-line-prediction-and-evaluation). -->

@@ -73,6 +73,7 @@ The available preprocessors (`Spectrogram`, `WindowedSpectrogram`, `Normalize`, 
 | Event tasks at fine resolution (apnea, desaturation) | `UTime` | Per-epoch output via `epoch_len`; used by the breathing configs. |
 | Self-supervised pretraining | `MaskedAutoencoder`, `CLSMaskedAutoencoder` | Reconstruction objectives; modality-keyed inputs (not `BaseModel`). |
 | Reuse a pretrained package as a backbone | `PackagedClassifierModel`, `PackagedSequenceClassifierModel` | Frozen encoder + trainable head; see below. |
+| Released foundation embeddings | `SleepFM`, `OSF` | Native model classes with verified weights; see [Use foundation models](foundation-models.md). |
 | One encoder, several task heads | `MultiTaskClassifierModel` | Shared features with a separate output contract per task; pairs with `MultiLabelTrainer`. |
 | Several packaged experts | `StackedClassifierModel` | Aligns native expert predictions and learns task corrections; pairs with `PairedDataset`. |
 
@@ -93,7 +94,8 @@ model:
 
 A trained or downloaded package can serve as the encoder of a new model instead of retraining from scratch:
 
-- [`PackagedEmbeddingModel`](../reference/models.md#packaged-embedding-model) wraps any encoder as a package — this is what `sleepwalker foundation-model convert` produces for the pinned external encoders (`sleepfm`, `sleepgpt`, `osf`).
+- [`SleepFM`](../reference/models.md#sleepfm) and [`OSF`](../reference/models.md#osf) use the same model interfaces, with optional released checkpoints. Export them with `save_packaged_model()` and a matching dataset; see [Use foundation models](foundation-models.md).
+- [`PackagedEmbeddingModel`](../reference/models.md#packaged-embedding-model) adapts other external encoders to the embedding API.
 - [`PackagedClassifierModel`](../reference/models.md#packaged-classifier-model) slides the package's native window over a longer input, calls `encoder.features()` per window (frozen by default), concatenates, and trains a linear or MLP head to `[B, S, K]` logits.
 - [`PackagedSequenceClassifierModel`](../reference/models.md#packaged-sequence-classifier-model) applies a position-wise head over the encoder's token sequence for per-step predictions.
 

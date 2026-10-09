@@ -8,7 +8,6 @@ from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.models.PackagedClassifierModel import PackagedClassifierModel
 from sleepwalker.models.PackagedEmbeddingModel import PackagedEmbeddingModel
 from sleepwalker.models.PackagedSequenceClassifierModel import PackagedSequenceClassifierModel
-from sleepwalker.cli.foundation_models import SleepFMClinicalEncoder, trace_encoder
 
 
 class WindowEmbedding(BaseModel, EmbeddingModel):
@@ -32,25 +31,6 @@ class WindowEmbedding(BaseModel, EmbeddingModel):
 class ChannelFirstEncoder(torch.nn.Module):
     def forward(self, x):
         return x.mean(dim=-1)
-
-
-class ParameterizedEncoder(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.projection = torch.nn.Linear(2, 3)
-
-    def forward(self, x):
-        return self.projection(x)
-
-
-class MaskAwareBackbone(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.scale = torch.nn.Parameter(torch.ones(()))
-
-    def forward(self, x, mask):
-        contextual_embeddings = (x + mask.to(dtype=x.dtype).unsqueeze(-1)) * self.scale
-        return contextual_embeddings.mean(dim=1), contextual_embeddings
 
 
 class OrderedTokenEmbedding(BaseModel, EmbeddingModel):
@@ -139,22 +119,3 @@ def test_traced_imported_embedding_package_is_self_contained(tmp_path):
 
     loaded = PackagedModel.load(path)
     assert loaded.model.features(torch.ones(2, 60, 1)).shape == (2, 1)
-
-
-def test_foundation_trace_keeps_state_as_movable_parameters():
-    traced, embedding_dim = trace_encoder(ParameterizedEncoder(), torch.zeros(1, 2))
-
-    assert embedding_dim == 3
-    assert list(traced.parameters())
-    traced.to(dtype=torch.float64)
-    assert all(parameter.dtype == torch.float64 for parameter in traced.parameters())
-    assert traced(torch.zeros(1, 2, dtype=torch.float64)).dtype == torch.float64
-
-
-def test_sleepfm_trace_creates_padding_masks_on_the_input_device():
-    encoder = SleepFMClinicalEncoder(MaskAwareBackbone(), [[0], [1], [2], [3]])
-    traced, embedding_dim = trace_encoder(encoder, torch.zeros(1, 4, 2))
-
-    assert embedding_dim == 8
-    traced.to(device="meta")
-    assert traced(torch.zeros(2, 4, 2, device="meta")).shape == (2, 8)

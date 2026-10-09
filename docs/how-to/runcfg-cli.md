@@ -174,9 +174,9 @@ For independent systems, `data.datasets` provides each task's complete labelled
 dataset; each package evaluates its own entry, without a reference dataset.
 
 Each specification names `channels`, `sample_frequency`, `total_input`, `stride`,
-`resample_type`, `z_normalize`, `assume_units_if_missing`, `edf_unit_overrides`
+`resample_type`
 and `event_mapping`. Each channel declares its logical name, physical aliases,
-unit and normalizer explicitly. Optional callbacks remain normal constructor
+`read_mode` and `preprocessors` explicitly. Optional callbacks remain normal constructor
 arguments. YAML anchors may reuse definitions explicitly within a file.
 Older evaluation configs that relied on package inheritance must supply these
 fields; incomplete input specs fail before EDF initialization.
@@ -188,8 +188,12 @@ classification contract and the entry's `target` options; do not specify a
 separate dataset `prepare_target`. Existing evaluation pipelines and dependency
 scoring remain explicit configuration.
 
-Unit conversion remains strict. Supply `edf_unit_overrides` for verified header
-corrections rather than guessing units or silently bypassing conversion.
+Unit conversion remains strict. Put documented dataset unit corrections in the
+channel processor list before `ConvertUnit`. Declare all sources in `channels`.
+Use `prepare_channels` to map their processed logical names to a dictionary of
+model inputs, `{name: (values, unit)}`. With this callback, supply the dataset's
+`input_channels` list to select and order the model channels. The CLI derives
+model channel count from that list; see [derived channels](data.md#derived-channels-and-rereferencing).
 
 ## Typical command sequences
 

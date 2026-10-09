@@ -1,5 +1,6 @@
 import torch
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel
@@ -48,7 +49,7 @@ class OrderedTokenEmbedding(BaseModel, EmbeddingModel):
 
 def make_embedding_package():
     dataset = UnlabelledDataset(
-        channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
+        channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])],
         sample_frequency=2,
         total_input="30s",
         stride="10s",
@@ -58,7 +59,7 @@ def make_embedding_package():
 
 def test_dataset_sample_count_is_exact_at_256_hz():
     dataset = UnlabelledDataset(
-        channels=[ChannelConfig("EEG", ["EEG"], unit="uV")],
+        channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])],
         sample_frequency=256,
         total_input="150s",
     )

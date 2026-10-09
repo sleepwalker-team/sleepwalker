@@ -44,7 +44,7 @@ Compare them with the EDF header. Add a physical alternative while configuring a
 
 ## A physical unit is missing or incompatible
 
-Sleepwalker checks EDF units before normalization. Correct the source header when possible. For source data that genuinely lacks unit metadata, configure `assume_units_if_missing=True` while creating the dataset and document the assumed units. This setting is saved in exported packages.
+A `ConvertUnit` step returns `None` when the source unit is unknown or incompatible. Add the documented dataset correction function before `ConvertUnit` in the processor list. If calibration is unknown, use a processor that supports relative signals or digital loading. A unit label alone cannot recover an unknown gain.
 
 ## Package payload hash mismatch
 

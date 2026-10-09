@@ -4,10 +4,14 @@ data:
     channels:
       - logical_name: eeg
         physical_names: [EEG Fpz-Cz, EEG Pz-Oz]
-        normalizer: &eeg_normalizer
-          name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
-          fs: 100
-        unit: uV
+        preprocessors:
+          - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+            target: "uV"
+          - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+            target: "uV"
+          - &eeg_normalizer
+            name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+            fs: 100
     sample_frequency: 100
     event_mapping:
       sleep stage w: wake
@@ -18,9 +22,6 @@ data:
       sleep stage r: rem
     total_input: 630s
     stride: 30s
-    rereference:
-      - [EEG Fpz-Cz, EEG Pz-Oz]
-    assume_units_if_missing: false
     output_classes: [wake, n1, n2, n3, rem]
     prepare_patient:
       name: sleepwalker.training.callbacks.trim_patient_to_events
@@ -43,8 +44,7 @@ data:
     channels:
       - logical_name: eeg
         physical_names: [C3-M2, C4-M1, F3-M2, F4-M1, O1-M2, O2-M1, CZ-M2, CZ-M1, C3-M1, C4-M2, F3-M1, F4-M2, O1-M1, O2-M2]
-        normalizer: *eeg_normalizer
-        unit: uV
+        preprocessors: [*eeg_normalizer]
     sample_frequency: 100
     event_mapping:
       wake: wake
@@ -54,7 +54,6 @@ data:
       rem: rem
     total_input: 630s
     stride: 30s
-    assume_units_if_missing: false
     output_classes: [wake, n1, n2, n3, rem]
     prepare_patient:
       name: sleepwalker.training.callbacks.trim_patient_to_events

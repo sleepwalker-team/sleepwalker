@@ -96,8 +96,8 @@ def build_factory(spec: Mapping[str, Any], dependency: str) -> Any:
 
 def build_channel(spec: Mapping[str, Any]) -> ChannelConfig:
     arguments = dict(spec)
-    if "normalizer" in arguments:
-        arguments["normalizer"] = build_value(arguments["normalizer"])
+    if "preprocessors" in arguments:
+        arguments["preprocessors"] = build_value(arguments["preprocessors"])
     return ChannelConfig(**arguments)
 
 

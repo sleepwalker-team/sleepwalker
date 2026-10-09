@@ -4,7 +4,19 @@ The building blocks that sit between an EDF file and a model tensor: normalizers
 
 ## Normalizers
 
-A normalizer maps a raw `[N, 1]` physical-channel array to a processed array of the same shape. It is attached to a [`ChannelConfig`](api.md#channel-config) and runs after the channel is read and unit-converted. See [Load and prepare data](../how-to/data.md) for where normalizers sit in the pipeline.
+A normalizer receives an `[N, 1]` channel array, its current unit, and the `is_recording` argument. It returns an array/unit pair or `None` to exclude the input. Place normalizers in the ordered [`ChannelConfig`](api.md#channel-config) `preprocessors` list. Steps implementing `fit` learn their parameters during recording preparation; every window calls the processor with `unit` and `is_recording=False`. See [loading data](../how-to/data.md#recording-and-window-normalization) for processing order, independent channel statistics and Python examples.
+
+### Unit conversion
+
+::: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+
+### Recording and fixed scaling
+
+::: sleepwalker.datasets.normalizer.RecordingNormalizer.RecordingZScore
+
+::: sleepwalker.datasets.normalizer.RecordingNormalizer.RecordingRobustScale
+
+::: sleepwalker.datasets.normalizer.FixedScale.FixedScale
 
 ### `Normalizer` {#normalizer}
 

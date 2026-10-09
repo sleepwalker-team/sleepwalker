@@ -25,7 +25,10 @@ import pyedflib
 import yaml
 
 from sleepwalker.core.signal import edf_to_df
-from sleepwalker.datasets.Basedataset import ChannelConfig, unit_conversion_factor
+from sleepwalker.datasets.Basedataset import ChannelConfig
+from sleepwalker.core.signal import unit_conversion_factor
+from sleepwalker.datasets.normalizer import ConvertUnit
+from sleepwalker.config import build_channel
 from sleepwalker.datasets.utils import get_edf_files_in_repo
 from sleepwalker.utils import logger
 
@@ -174,12 +177,14 @@ def mirror_repository(source: str | Path, destination: str | Path, channels: Seq
     channels_to_copy: dict[str, str | None] = {}
     for channel in channels:
         for physical_name in channel.physical_names:
-            if physical_name not in channels_to_copy:
-                channels_to_copy[physical_name] = channel.unit
-            if channel.unit is not None:
-                if channels_to_copy[physical_name] not in {None, channel.unit}:
-                    raise ValueError(f"Conflicting target units for {physical_name}")
-                channels_to_copy[physical_name] = channel.unit
+            steps = channel.preprocessors_for(physical_name)
+            # Mirroring can honor an explicit leading conversion. It does not
+            # execute model filters, scalers, repairs, or arbitrary functions.
+            target = steps[0].target if steps and isinstance(steps[0], ConvertUnit) else None
+            if target is not None and channels_to_copy.get(physical_name) not in {None, target}:
+                raise ValueError(f"Conflicting target units for {physical_name}")
+            if target is not None or physical_name not in channels_to_copy:
+                channels_to_copy[physical_name] = target
             quality_name = channel.quality_name_for(physical_name)
             if quality_name is not None:
                 channels_to_copy.setdefault(quality_name, None)
@@ -270,7 +275,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     channels: list[ChannelConfig] = []
     configured_rates: set[float] = set()
     configured_assumptions: set[bool] = set()
-    unit_overrides: dict[str, str] = {}
     for entry in data_entries:
         channel_specs = entry.get("channels") or []
         if not isinstance(channel_specs, list) or any(not isinstance(spec, Mapping) for spec in channel_specs):
@@ -278,18 +282,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         for spec in channel_specs:
             if "logical_name" not in spec or "physical_names" not in spec:
                 raise ValueError("Every channel needs logical_name and physical_names")
-            channels.append(ChannelConfig(logical_name=str(spec["logical_name"]), physical_names=spec["physical_names"], quality_name=spec.get("quality_name"), unit=spec.get("unit")))
+            configured_steps = spec.get("preprocessors", [])
+            if not isinstance(configured_steps, Mapping):
+                configured_steps = {name: configured_steps for name in spec["physical_names"]}
+            conversion_steps = {}
+            for name, steps in configured_steps.items():
+                first = steps[0] if steps else None
+                conversion_steps[name] = [first] if isinstance(first, Mapping) and first.get("name") == "sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit" else []
+            channels.append(build_channel({"logical_name": spec["logical_name"], "physical_names": spec["physical_names"], "quality_name": spec.get("quality_name"), "preprocessors": conversion_steps}))
         if entry.get("sample_frequency") is not None:
             configured_rates.add(float(entry["sample_frequency"]))
         configured_assumptions.add(bool(entry.get("assume_units_if_missing", False)))
-        configured_overrides = entry.get("edf_unit_overrides") or {}
-        if not isinstance(configured_overrides, Mapping):
-            raise ValueError("Expected data.edf_unit_overrides to be a mapping")
-        for channel, unit in configured_overrides.items():
-            channel, unit = str(channel), str(unit)
-            if channel in unit_overrides and unit_overrides[channel] != unit:
-                raise ValueError(f"Conflicting unit overrides for {channel}")
-            unit_overrides[channel] = unit
 
     max_sample_rate = args.max_sample_rate
     if max_sample_rate is None:
@@ -302,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("Conflicting assume_units_if_missing values")
         assume_units_if_missing = next(iter(configured_assumptions), False)
 
-    mirror_repository(args.source, args.destination, channels, max_sample_rate, exact_sampling=args.exact_sampling, resample_method=args.resample_method, convert_units=args.convert_units, unit_overrides=unit_overrides, assume_units_if_missing=assume_units_if_missing, overwrite=args.overwrite, workers=args.workers)
+    mirror_repository(args.source, args.destination, channels, max_sample_rate, exact_sampling=args.exact_sampling, resample_method=args.resample_method, convert_units=args.convert_units, assume_units_if_missing=assume_units_if_missing, overwrite=args.overwrite, workers=args.workers)
     return 0
 
 

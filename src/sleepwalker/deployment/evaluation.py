@@ -128,13 +128,13 @@ def validate_dataset_entry(entry: Mapping[str, Any]) -> None:
 
 def build_explicit_dataset(spec: Mapping[str, Any]):
     """Construct YAML preprocessing directly; never inherit package settings."""
-    required = {"name", "channels", "sample_frequency", "total_input", "stride", "resample_type", "z_normalize", "assume_units_if_missing", "edf_unit_overrides"}
+    required = {"name", "channels", "sample_frequency", "total_input", "stride", "resample_type"}
     missing = sorted(required - set(spec))
     if missing:
         raise ValueError(f"Evaluation dataset must explicitly specify {missing}.")
     for channel in spec["channels"]:
-        if not {"logical_name", "physical_names", "unit", "normalizer"} <= set(channel):
-            raise ValueError("Evaluation channels must explicitly specify logical_name, physical_names, unit and normalizer.")
+        if not {"logical_name", "physical_names", "read_mode", "preprocessors"} <= set(channel):
+            raise ValueError("Evaluation channels must explicitly specify logical_name, physical_names, read_mode and preprocessors.")
     dataset_name, arguments = build_dataset_arguments(spec)
     if not arguments.get("event_mapping"):
         raise ValueError("Evaluation dataset must provide event_mapping.")
@@ -165,7 +165,7 @@ def prepare_dataset(package: PackagedModel, entry: Mapping[str, Any]):
     if not hasattr(dataset, "set_rejection_strategy"):
         raise TypeError(f"Evaluation dataset {dataset.__class__.__name__} does not support rejection strategies.")
     dataset.set_rejection_strategy("none")
-    package.assert_compatible(dataset, allow_preprocessing_override=True)
+    package.assert_compatible(dataset)
     patients, selected_fold = resolve_entry_files(package, entry)
     if entry.get("patient_filter") is not None:
         original_count = len(patients)
@@ -257,7 +257,7 @@ def predict_package(package: PackagedModel, data: Mapping[str, Any], test: Mappi
     if dataset.get_n_patients() == 0 or len(dataset) == 0:
         raise ValueError(f"Package '{package.name}' produced no evaluable windows.")
     expected = expected_windows_by_patient(dataset)
-    predictions, received = package.predict_dataset(dataset, batch_size=int(test.get("batch_size", 64)), num_workers=int(test.get("num_workers_dataloader", 0)), n_repeat=1, device=device, seed=seed, rejection_strategy="none", allow_preprocessing_override=True, progress=True, progress_label=progress_label, return_received_windows=True)
+    predictions, received = package.predict_dataset(dataset, batch_size=int(test.get("batch_size", 64)), num_workers=int(test.get("num_workers_dataloader", 0)), n_repeat=1, device=device, seed=seed, rejection_strategy="none", progress=True, progress_label=progress_label, return_received_windows=True)
     if prediction_output is not None:
         write_prediction_feather(prediction_output, predictions)
     coverage = {}

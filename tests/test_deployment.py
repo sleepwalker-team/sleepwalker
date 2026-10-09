@@ -5,11 +5,13 @@ import pandas as pd
 import pytest
 import torch
 
-from sleepwalker.datasets.Basedataset import ChannelConfig, unit_conversion_factor
-from sleepwalker.datasets.HSP import HSP, get_channels as get_hsp_channels
+from sleepwalker.datasets.normalizer import ConvertUnit
+from sleepwalker.datasets.Basedataset import ChannelConfig, EDFFile
+from sleepwalker.core.signal import unit_conversion_factor
+from sleepwalker.datasets.HSP import HSP, get_channels as get_hsp_channels, correct_hsp_saturation
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-from sleepwalker.datasets.normalizer import EEGFilterNormalizer
+from sleepwalker.datasets.normalizer import EEGFilterNormalizer, RecordingZScore
 from sleepwalker.deployment import PackagedModel, save_packaged_model
 from sleepwalker.deployment.predictions import format_prediction_batch
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
@@ -31,14 +33,12 @@ class MeanClassifier(BaseModel, ClassifierModel):
         return (1, 600, 1), {"layout": "BTC", "ts_len": 600, "n_channels": 1}
 
 
-def make_dataset(*, unit: str | None = "uV", assume_units_if_missing: bool = False, normalizer=None, z_normalize: bool = False):
+def make_dataset(*, unit: str | None = "uV", correction=(), preprocessors=()):
     return UnlabelledDataset(
-        channels=[ChannelConfig("EEG", ["EEG"], unit=unit, normalizer=normalizer)],
+        channels=[ChannelConfig('EEG', ['EEG'], preprocessors=list(correction) + ([] if unit is None else [ConvertUnit(unit)]) + list(preprocessors))],
         sample_frequency=10,
         total_input="60s",
         stride="60s",
-        z_normalize=z_normalize,
-        assume_units_if_missing=assume_units_if_missing,
     )
 
 
@@ -75,29 +75,32 @@ def test_online_retry_configuration_only_exposes_budget():
 
 def test_hsp_header_correction_survives_unlabelled_clone():
     channels = get_hsp_channels(["spo2"], grouped=True, normalize=False, sample_frequency=100)
-    dataset = HSP(channels=channels, sample_frequency=100, event_mapping={"desaturation": "desaturation"}, z_normalize=True)
+    dataset = HSP(channels=channels, sample_frequency=100, event_mapping={"desaturation": "desaturation"})
 
-    assert channels == [ChannelConfig("SpO2", ["SaO2", "SpO2", "SPO2"], normalizer=None, unit="%")]
-    assert dataset.edf_unit_overrides["SaO2"] == "%"
-    assert UnlabelledDataset.from_dataset(dataset).edf_unit_overrides["SaO2"] == "%"
-    assert UnlabelledDataset.from_dataset(dataset).z_normalize is True
+    expected = [ChannelConfig('SpO2', ['SaO2', 'SpO2', 'SPO2'], preprocessors={name: [ConvertUnit('%')] for name in ['SaO2', 'SpO2', 'SPO2']})]
+
+    assert channels[0].logical_name == expected[0].logical_name
+
+    assert channels[0].physical_names == expected[0].physical_names
+    assert dataset.channels[0].preprocessors_for("SaO2")[0] is correct_hsp_saturation
+    assert UnlabelledDataset.from_dataset(dataset).channels[0].preprocessors_for("SaO2")[0] is correct_hsp_saturation
 
 
 def test_missing_unit_bypass_is_available_during_dataset_initialization(monkeypatch):
-    import sleepwalker.datasets.Basedataset as basedataset_module
-
-    original = basedataset_module.read_edf_meta
+    original = EDFFile.from_edf
 
     def without_units(path):
-        meta = original(path)
-        meta["units"] = {**meta["units"], "EEG": ""}
-        return meta
+        file = original(path)
+        file.units["EEG"] = None
+        return file
 
-    monkeypatch.setattr(basedataset_module, "read_edf_meta", without_units)
+    monkeypatch.setattr(EDFFile, "from_edf", staticmethod(without_units))
     path = DATA / "signals_01.edf"
-    with pytest.raises(ValueError, match="no unit metadata"):
-        make_dataset().initialize([path], num_workers=0, strict=True)
-    assumed_dataset = make_dataset(assume_units_if_missing=True)
+    unknown = make_dataset()
+    unknown.initialize([path], num_workers=0, strict=True)
+    assert unknown.get_item(unknown.edf_files[0], unknown.edf_files[0].start_date) is None
+    assume_uv = lambda values, *, unit, is_recording: (values, "uV" if unit is None else unit)
+    assumed_dataset = make_dataset(correction=[assume_uv])
     assumed_dataset.initialize([path], num_workers=0, strict=True)
     assert assumed_dataset.get_n_patients() == 1
 
@@ -136,7 +139,7 @@ def test_loading_legacy_package_moves_target_resolution_out_of_the_dataset(tmp_p
 
 
 def test_packaging_discards_label_pipeline(tmp_path):
-    labelled = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    labelled = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
     packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=labelled)
 
     assert isinstance(packaged.dataset, UnlabelledDataset)
@@ -144,8 +147,8 @@ def test_packaging_discards_label_pipeline(tmp_path):
 
 
 def test_packaging_uses_first_component_of_multidataset(tmp_path):
-    first = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
-    second = HSP(channels=[ChannelConfig("EEG", ["EEG"], unit="uV")], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    first = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    second = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
     first.initialized = True
     second.initialized = True
 
@@ -155,20 +158,10 @@ def test_packaging_uses_first_component_of_multidataset(tmp_path):
     assert packaged.dataset.get_input_channels() == first.get_input_channels()
 
 
-def test_package_rejects_incompatible_preprocessing():
-    with pytest.raises(ValueError, match="Expected units"):
-        make_package().assert_compatible(make_dataset(unit="mV"))
-
-
-def test_package_rejects_changed_normalizer_configuration():
-    package = make_package(make_dataset(normalizer=EEGFilterNormalizer(fs=100)))
-    with pytest.raises(ValueError, match="Normalizer configuration"):
-        package.assert_compatible(make_dataset(normalizer=EEGFilterNormalizer(fs=100, lowcut=0.5)))
-
-
-def test_package_rejects_changed_recording_z_normalization():
-    with pytest.raises(ValueError, match="z_normalize"):
-        make_package(make_dataset(z_normalize=True)).assert_compatible(make_dataset())
+def test_package_leaves_processor_comparability_to_the_caller():
+    package = make_package()
+    package.assert_compatible(make_dataset(unit="mV"))
+    package.assert_compatible(make_dataset(preprocessors=[RecordingZScore()]))
 
 
 def test_loaded_package_predicts_raw_edf(tmp_path):
@@ -227,17 +220,14 @@ def test_multitask_predictions_include_centered_task_offset():
     assert frame.loc[frame["task"] == "arousal", "time"].iloc[-1] == start + pd.Timedelta("39s")
 
 
-def test_stored_missing_unit_policy_does_not_hide_conflicts(monkeypatch, tmp_path):
-    import sleepwalker.datasets.Basedataset as basedataset_module
-
-    original = basedataset_module.read_edf_meta
-
+def test_conversion_rejection_survives_package_reload(monkeypatch, tmp_path):
+    original = EDFFile.from_edf
     def conflicting_units(path):
-        meta = original(path)
-        meta["units"] = {**meta["units"], "EEG": "%"}
-        return meta
+        file = original(path)
+        file.units["EEG"] = "%"
+        return file
 
-    monkeypatch.setattr(basedataset_module, "read_edf_meta", conflicting_units)
-    package = PackagedModel.load(make_package(make_dataset(assume_units_if_missing=True)).save(tmp_path / "package"))
-    with pytest.raises(ValueError, match="Incompatible"):
-        package.predict_patient(DATA / "signals_01.edf")
+    monkeypatch.setattr(EDFFile, "from_edf", staticmethod(conflicting_units))
+    package = PackagedModel.load(make_package().save(tmp_path / "package"))
+    file = package.dataset.prepare_patient(DATA / "signals_01.edf", raise_errors=True)
+    assert package.dataset.get_item(file, file.start_date) is None

@@ -7,10 +7,12 @@ data:
     channels:
       - logical_name: SpO2
         physical_names: [SaO2, SpO2, SPO2]
-        normalizer:
-          name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+        preprocessors:
+        - sleepwalker.datasets.HSP.correct_hsp_saturation
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: '%'
+        - name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
           fs: 100
-        unit: '%'
     sample_frequency: 100
     event_mapping:
       n1: sleep
@@ -20,7 +22,6 @@ data:
       desaturation: desaturation
     total_input: 100s
     stride: 2s
-    assume_units_if_missing: false
     output_classes: [desaturation, no desaturation]
     prepare_patient:
       name: sleepwalker.training.callbacks.trim_patient_to_events

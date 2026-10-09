@@ -4,28 +4,34 @@ data:
   channels:
     - logical_name: RIP Flow
       physical_names: [RIP Flow]
-      normalizer: &respiration_normalizer
-        name: sleepwalker.datasets.normalizer.RespirationFilterNormalizer.RespirationFilterNormalizer
-        fs: 25
-      unit: V/s
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "V"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "V"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "V"
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "V/s"
+        - &respiration_normalizer
+          name: sleepwalker.datasets.normalizer.RespirationFilterNormalizer.RespirationFilterNormalizer
+          fs: 25
     - logical_name: RIP Sum
       physical_names: [RIP Sum]
-      normalizer: *respiration_normalizer
-      unit: V
+      preprocessors: [*respiration_normalizer]
     - logical_name: Chest
       physical_names: [Chest]
-      normalizer: *respiration_normalizer
-      unit: V
+      preprocessors: [*respiration_normalizer]
     - logical_name: Abdomen
       physical_names: [Abdomen]
-      normalizer: *respiration_normalizer
-      unit: V
+      preprocessors: [*respiration_normalizer]
     - logical_name: Saturation
       physical_names: [Saturation]
-      normalizer:
-        name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
-        fs: 25
-      unit: '%'
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: "%"
+        - name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+          fs: 25
   sample_frequency: 25
   event_mapping:
     entsättigung: desaturation

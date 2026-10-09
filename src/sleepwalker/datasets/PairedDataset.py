@@ -15,9 +15,9 @@ from sleepwalker.utils import logger
 
 
 def initialization_key(dataset):
-    """Identify datasets that prepare identical EDF metadata and recording statistics."""
+    """Identify datasets that prepare identical source inputs and recording fits."""
     options = dataset.dataset_kwargs()
-    for name in ("stride", "prepare_sample", "online_max_tries", "rejection_strategy", "n_views"):
+    for name in ("stride", "prepare_channels", "input_channels", "prepare_sample", "online_max_tries", "rejection_strategy", "n_views"):
         options.pop(name, None)
     return cloudpickle.dumps(options, protocol=5)
 
@@ -35,8 +35,8 @@ class PairedDataset(Dataset):
 
     The paired dataset plans timestamps but delegates all signal I/O and
     preprocessing to each component's ``BaseDataset.get_items`` method.
-    Experts with an identical serialized sample contract share one call, so
-    their timestamps can be served by one native EDF envelope read.
+    Experts with an identical serialized sample contract share window requests
+    and reuse the resulting prepared samples.
     """
 
     def __init__(self, datasets, *, base, input_offsets):
@@ -70,7 +70,8 @@ class PairedDataset(Dataset):
         return {name: dataset.get_input_channels() for name, dataset in self.datasets.items()}
 
     def input_spec(self):
-        return {name: (1, len(self.input_offsets[name]), dataset.get_timeseries_len(), len(dataset.get_input_channels())) for name, dataset in self.datasets.items()}
+        channels = self.get_input_channels()
+        return {name: (1, len(self.input_offsets[name]), dataset.get_timeseries_len(), len(channels[name])) for name, dataset in self.datasets.items()}
 
     def get_n_patients(self):
         return len(self.edf_files)
@@ -112,11 +113,11 @@ class PairedDataset(Dataset):
         for name, dataset in self.datasets.items():
             source = dataset if isinstance(dataset, UnlabelledDataset) else UnlabelledDataset.from_dataset(dataset)
             if channels:
-                expected = source.get_input_channels()
+                expected = [channel.logical_name for channel in source.channels]
                 actual = [channel.logical_name for channel in channels]
                 if actual != expected:
                     raise ValueError(f"Evaluation channels for expert '{name}' must be {expected}, got {actual}.")
-                datasets[name] = source.clone(channels=copy.deepcopy(channels), assume_units_if_missing=labelled_dataset.assume_units_if_missing)
+                datasets[name] = source.clone(channels=copy.deepcopy(channels))
             else:
                 datasets[name] = source.clone()
         return PairedDataset(datasets, base=labelled_dataset, input_offsets=self.input_offsets)
@@ -144,7 +145,7 @@ class PairedDataset(Dataset):
                 dataset.initialize(patients, num_workers=num_workers, strict=strict, multiprocessing_start_method=start_method)
                 prepared_files[key] = {str(file.path): file for file in dataset.edf_files}
             else:
-                logger.info(f"Reusing prepared EDF metadata for expert '{name}'.")
+                logger.info(f"Reusing prepared EDF channels for expert '{name}'.")
             self.component_files[name] = prepared_files[key]
         common_paths = set(str(file.path) for file in self.base.edf_files)
         for files in self.component_files.values():
@@ -284,7 +285,7 @@ class PairedDataset(Dataset):
         return None
 
     def __getitems__(self, indices):
-        """Fetch one evaluation batch using one native envelope per patient and sample contract."""
+        """Fetch one evaluation batch, sharing requests by patient and sample contract."""
         indices = list(indices)
         if not self.initialized:
             raise ValueError("PairedDataset is not initialized.")

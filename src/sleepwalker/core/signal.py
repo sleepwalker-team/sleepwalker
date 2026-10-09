@@ -23,6 +23,67 @@ from scipy.signal import resample_poly
 
 from sleepwalker.utils import logger
 
+
+UNIT_DEFINITIONS = {
+    "v": ("voltage", 1.0),
+    "mv": ("voltage", 1e-3),
+    "uv": ("voltage", 1e-6),
+    "v/s": ("voltage_rate", 1.0),
+    "mv/s": ("voltage_rate", 1e-3),
+    "uv/s": ("voltage_rate", 1e-6),
+    "%": ("percentage", 1.0),
+    "percent": ("percentage", 1.0),
+    "uvolt": ("voltage", 1e-6),
+    "microvolt": ("voltage", 1e-6),
+    "pa": ("pressure", 1.0),
+    "kpa": ("pressure", 1e3),
+    "cmh2o": ("pressure", 98.0665),
+    "l/min": ("volume_flow", 1.0 / 60),
+    "l/s": ("volume_flow", 1.0),
+    "ml/s": ("volume_flow", 1e-3),
+    "relative": ("relative", 1.0),
+    "counts": ("counts", 1.0),
+    "1": ("dimensionless", 1.0),
+    "dimensionless": ("dimensionless", 1.0),
+}
+
+
+def normalize_unit(unit: str) -> str:
+    return unit.strip().replace("µ", "u").replace("μ", "u").lower()
+
+
+def unit_conversion_factor(
+    source_unit: Optional[str],
+    target_unit: str,
+    *,
+    assume_if_missing: bool,
+) -> float:
+    """Return the multiplier from an EDF physical unit to ``target_unit``."""
+    source = "" if source_unit is None else normalize_unit(source_unit)
+    target = normalize_unit(target_unit)
+    if target not in UNIT_DEFINITIONS:
+        raise ValueError(f"Unsupported target channel unit '{target_unit}'.")
+    if source in {"", "."} and target == "relative":
+        return 1.0  # Explicitly accepted unknown amplitude, not an inferred physical unit.
+    if source in {"", "."}:
+        if assume_if_missing:
+            return 1.0
+        raise ValueError(
+            f"EDF channel has no unit metadata; expected '{target_unit}'. "
+            "Correct the source label only when the stored values are known to "
+            "already use the expected unit."
+        )
+    if source not in UNIT_DEFINITIONS:
+        raise ValueError(f"Unsupported EDF channel unit '{source_unit}'.")
+    source_kind, source_scale = UNIT_DEFINITIONS[source]
+    target_kind, target_scale = UNIT_DEFINITIONS[target]
+    if source_kind != target_kind:
+        raise ValueError(
+            f"Incompatible channel units '{source_unit}' and '{target_unit}'."
+        )
+    return source_scale / target_scale
+
+
 def fix_edf_header(path_in: str, path_out: Optional[str] = None, dry: bool = False) -> Tuple[bool, List[str]]:
     """
     Attempt to repair common header and consistency issues in an EDF file.
@@ -327,6 +388,35 @@ def read_edf_meta(
             except Exception:
                 pass
 
+def edf_calibration(header: Mapping) -> tuple[float, float]:
+    """Calculate the physical gain and offset from the EDF header extrema.
+
+    EDF FAQ Q6 permits negative gains; Q8 describes uncalibrated signals.
+    https://www.edfplus.info/specs/edffaq.html
+    Physical decoding cannot recover a missing calibration. Digital decoding
+    retains the accepted gain's sign so recording-scaled inputs have the same
+    orientation as the corresponding physical representation.
+    """
+    pmin, pmax = float(header["physical_min"]), float(header["physical_max"])
+    dmin, dmax = float(header["digital_min"]), float(header["digital_max"])
+    if not np.isfinite([pmin, pmax, dmin, dmax]).all() or dmax == dmin:
+        raise ValueError("EDF calibration requires finite extrema and nonzero digital span.")
+    gain = (pmax - pmin) / (dmax - dmin)
+    offset = pmin - gain * dmin
+    if not np.isfinite([gain, offset]).all() or gain == 0:
+        raise ValueError("EDF calibration requires finite nonzero gain and finite offset.")
+    return gain, offset
+
+
+def edf_digital_polarity(header: Mapping) -> float:
+    """Use known orientation; unknown physical calibration leaves codes intact."""
+    try:
+        gain, _ = edf_calibration(header)
+        return float(np.sign(gain))
+    except (ValueError, KeyError, TypeError):
+        return 1.0
+
+
 def polyphase_resample_frame(frame: pd.DataFrame, source_frequency: float, target_frequency: float) -> pd.DataFrame:
     """Resample uniformly sampled channels with an antialiasing polyphase filter."""
     if frame.empty:
@@ -347,6 +437,8 @@ def read_edf_native(
     start: Optional[pd.Timestamp],
     end: Optional[pd.Timestamp],
     verbose: bool = False,
+    *,
+    read_mode: str | Mapping[str, str] = "physical",
 ) -> dict[float, pd.DataFrame]:
     """Read one EDF interval without changing any channel's sampling rate.
 
@@ -392,7 +484,15 @@ def read_edf_native(
                 stop = max(int((end_date - file_start) / period), first + 1)
                 arrays = {}
                 for channel, index in group:
-                    values = reader.readSignal(index, start=first, n=stop - first, digital=False)
+                    mode = read_mode[channel] if isinstance(read_mode, Mapping) else read_mode
+                    if mode not in {"physical", "digital"}:
+                        raise ValueError(f"Unknown EDF read mode {mode!r} for {channel!r}.")
+                    if mode == "physical":
+                        values = reader.readSignal(index, start=first, n=stop - first, digital=False)
+                    else:
+                        header = reader.getSignalHeader(index)
+                        values = np.asarray(reader.readSignal(index, start=first, n=stop - first, digital=True), dtype=float)
+                        values *= edf_digital_polarity(header)
                     if len(values) > 0:
                         arrays[channel] = values
                 if not arrays:
@@ -403,32 +503,7 @@ def read_edf_native(
                 result[frequency] = pd.DataFrame(arrays, index=pd.date_range(start=native_start, periods=length, freq=period))
             return result
     except Exception as error:
-        if not isinstance(edf, str):
-            return {}
-        if verbose:
-            logger.warning(f"pyEDFlib failed to read {edf}: {error} - falling back to mne backend")
-
-        raw = mne.io.read_raw_edf(edf, preload=False, verbose="ERROR")
-        available = [channel for channel in channels if channel in raw.ch_names]
-        if not available:
-            if verbose:
-                logger.warning(f"No requested channels found in {edf}")
-            return {}
-
-        frequency = float(raw.info["sfreq"])
-        measurement_date = raw.info.get("meas_date")
-        if isinstance(measurement_date, tuple):
-            measurement_date = measurement_date[0]
-        file_start = pd.Timestamp(measurement_date or pd.Timestamp.now()).tz_localize(None)
-        file_end = file_start + pd.to_timedelta(raw.n_times / frequency, unit="s")
-        start_date = file_start if start is None else pd.Timestamp(start)
-        end_date = file_end if end is None else pd.Timestamp(end)
-        first = max(int((start_date - file_start).total_seconds() * frequency), 0)
-        stop = min(max(int((end_date - file_start).total_seconds() * frequency), first + 1), raw.n_times)
-        data = raw.get_data(picks=available, start=first, stop=stop)
-        native_start = file_start + pd.to_timedelta(first / frequency, unit="s")
-        frame = pd.DataFrame(data.T, index=pd.date_range(start=native_start, periods=data.shape[1], freq=pd.to_timedelta(1.0 / frequency, unit="s")), columns=available)
-        return {frequency: frame}
+        raise ValueError(f"Controlled EDF decoding requires pyEDFlib for {edf}: {error}") from error
     finally:
         if close_after and reader is not None:
             try:

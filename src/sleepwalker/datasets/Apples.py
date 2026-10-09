@@ -11,6 +11,58 @@ from datetime import datetime, timedelta
 import pandas as pd
 from .Basedataset import BaseDataset  
 
+def correct_apples_eeg(values, *, unit, is_recording):
+    """Apply NSRR's microvolt assumption to missing APPLES EEG/EOG units.
+
+    NSRR's reproducible APPLES documentation, sections 1, 7 and 10, describes
+    Alice4 acquisition and this assumption for missing EEG/EOG dimensions:
+    https://gitlab-scm.partners.org/zzz-public/nsrr/-/blob/master/studies/apples/README.md
+    Keep the EDF physical amplitude mapping. This only supplies a unit label;
+    already labelled inputs and digital counts retain their units.
+    """
+    return values, "uV" if unit is None else unit
+
+
+def correct_apples_waveform(values, *, unit, is_recording):
+    """Declare missing APPLES ECG/EMG/respiratory dimensions as relative.
+
+    NSRR reports ECG/EMG/LEG offsets around 100 and variable respiratory/EMG
+    scales between and within sites; it establishes no universal voltage gain:
+    https://gitlab-scm.partners.org/zzz-public/nsrr/-/blob/master/studies/apples/README.md
+    Do not infer calibration from a 0..255 range. Preserve physical decoding,
+    labelled variants and digital counts. Later processors may center or scale
+    these values explicitly, but cannot claim a recovered voltage calibration.
+    """
+    return values, "relative" if unit is None else unit
+
+
+def correct_apples_saturation(values, *, unit, is_recording):
+    """Declare missing APPLES SpO2/SaO2 dimensions as percent.
+
+    Local October 2026 audit: 20 files have '.' dimensions. Sixteen have 0..255
+    identity mappings; four have non-identity ranges near -13..111/115 with
+    samples consistent with percent. This explicit recipe assumes percent,
+    without replacing either EDF gain/offset mapping or inferring sensor volts.
+    Acquisition context: NSRR's APPLES Alice4 processing documentation:
+    https://gitlab-scm.partners.org/zzz-public/nsrr/-/blob/master/studies/apples/README.md
+    Preserve labelled variants and digital counts. This is a unit correction,
+    not a signal-quality or physiological range check.
+    """
+    return values, "%" if unit is None else unit
+
+
+def get_preprocessors(channel_name):
+    """Return explicit unit-label corrections for one APPLES source channel."""
+    name = channel_name.casefold()
+    if name in {"c3_m2", "c4_m1", "o1_m2", "o2_m1", "c3-m2", "c4-m1", "o1-m2", "o2-m1", "loc", "roc"}:
+        return [correct_apples_eeg]
+    if name in {"emg", "ecg", "leg", "abdomen", "thorax", "thermistor", "nasal_pres", "flow_patient", "flow_patient.1"}:
+        return [correct_apples_waveform]
+    if name in {"spo2", "sao2"}:
+        return [correct_apples_saturation]
+    return []
+
+
 def convert_to_datetime(row, start_date):
     """Convert APPLES time strings into absolute datetimes."""
     fmt = "%H:%M:%S.%f" if "." in row else "%H:%M:%S"

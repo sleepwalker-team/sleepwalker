@@ -46,7 +46,7 @@ flowchart LR
 !!! warning "Data loading pressures I/O bandwidth"
     Keep recordings on local NVMe/SSD storage rather than on a network share. The same pipeline that saturates a local SSD can stall for orders of magnitude longer on NFS with millisecond-level latency per open and read. See also the warning in [loading data](data.md).
 
-Initialization has its own cost profile. `initialize()` reads only EDF headers and annotation files, which is cheap and parallelized across `num_workers` processes. The exception is `z_normalize=True`: the dataset then loads every complete recording once during initialization to compute per-recording mean and standard deviation. For large cohorts, that single full pass can dominate startup; filter patients with [`get_patient_stats()`](../reference/api.md#base-dataset) first if you only need a subset.
+Initialization has its own cost profile. `initialize()` reads only EDF headers and annotation files, which is cheap and parallelized across `num_workers` processes. Processors implementing `fit`, such as `RecordingZScore`, additionally read complete recordings during initialization to learn their parameters after preceding transforms. For large cohorts, that single full pass can dominate startup; filter patients with [`get_patient_stats()`](../reference/api.md#base-dataset) first if you only need a subset.
 
 <!-- TODO: `EDFFile` carries a `handle` field, but `get_x` passes the file *path* to `edf_to_df`, so every window access opens and closes a new `pyedflib.EdfReader`. Reusing one open handle per worker would remove the per-window open/close overhead. See the [roadmap](../roadmap.md#reuse-open-edf-reader-handles). -->
 

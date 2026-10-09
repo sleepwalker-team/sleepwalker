@@ -19,6 +19,7 @@ import torch
 from sleepwalker.datasets.Basedataset import batch_collate
 from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.MultiDataset import MultiDataset
+from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.predictions import format_prediction_batch
 from sleepwalker.models.BaseModel import ClassifierModel, EmbeddingModel
@@ -61,44 +62,16 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def normalizer_details(normalizer: Any) -> Any:
-    if normalizer is None:
-        return None
-    return {"class": class_name(normalizer), "config": json_ready(vars(normalizer))}
-
-
-def group_contract(dataset: Any) -> dict[str, dict[str, Any]]:
-    groups: dict[str, dict[str, Any]] = {}
-    for config in dataset.channels:
-        entry = groups.setdefault(config.logical_name, {"units": set(), "normalizers": set()})
-        entry["units"].add(config.unit)
-        for physical_name in config.physical_names:
-            normalizer = normalizer_details(config.normalizer_for(physical_name))
-            entry["normalizers"].add(None if normalizer is None else json.dumps(normalizer, sort_keys=True))
-    return groups
-
-
-def assert_single_dataset_compatible(expected_dataset: Any, actual_dataset: Any, *, allow_preprocessing_override: bool) -> None:
+def assert_single_dataset_compatible(expected_dataset: Any, actual_dataset: Any) -> None:
     expected_inputs = list(expected_dataset.get_input_channels())
     actual_inputs = list(actual_dataset.get_input_channels())
     if actual_inputs != expected_inputs:
         raise ValueError(f"Expected logical input channels {expected_inputs}, got {actual_inputs}.")
-    for attribute in ["sample_frequency", "resample_type", "total_input", "stride", "z_normalize"]:
+    for attribute in ["sample_frequency", "resample_type", "total_input", "stride"]:
         expected = str(getattr(expected_dataset, attribute))
         actual = str(getattr(actual_dataset, attribute))
         if actual != expected:
             raise ValueError(f"Expected dataset {attribute}={expected}, got {actual}.")
-    if allow_preprocessing_override:
-        return
-    expected_groups = group_contract(expected_dataset)
-    actual_groups = group_contract(actual_dataset)
-    for group in expected_inputs:
-        expected = expected_groups[group]
-        actual = actual_groups[group]
-        if not actual["units"].issubset(expected["units"]):
-            raise ValueError(f"Expected units {expected['units']} for '{group}', got {actual['units']}.")
-        if not actual["normalizers"].issubset(expected["normalizers"]):
-            raise ValueError(f"Normalizer configuration for '{group}' does not match the package's stored preprocessing.")
 
 
 @dataclass
@@ -169,28 +142,25 @@ class PackagedModel:
             capabilities.append("classification")
         return capabilities
 
-    def assert_compatible(self, dataset: Any, *, allow_preprocessing_override: bool = False) -> None:
+    def assert_compatible(self, dataset: Any) -> None:
         """Raise when ``dataset`` cannot supply this model package.
 
         Logical channel order, sampling frequency, resampling, input duration,
-        stride, normalization, units, and per-channel normalizers are checked.
-        Paired graph datasets are checked node by node. The preprocessing
-        override is intended only for controlled cross-dataset evaluation; it
-        makes the caller responsible for scientific comparability.
+        and stride are checked. Paired datasets are checked node by node.
+        Caller-supplied processors can include arbitrary functions; this method
+        does not infer their output units or compare their behavior.
         """
-        expected_inputs = self.dataset.get_input_channels()
-        actual_inputs = dataset.get_input_channels()
-        if isinstance(expected_inputs, dict):
-            if not isinstance(actual_inputs, dict) or set(actual_inputs) != set(expected_inputs):
-                raise ValueError(f"Expected paired dataset inputs {sorted(expected_inputs)}, got {actual_inputs}.")
+        if isinstance(self.dataset, PairedDataset):
+            if not isinstance(dataset, PairedDataset) or set(dataset.datasets) != set(self.dataset.datasets):
+                raise ValueError(f"Expected paired dataset inputs {sorted(self.dataset.datasets)}.")
             if self.dataset.stride != dataset.stride:
                 raise ValueError("Paired datasets must use the same stride.")
-            for name in expected_inputs:
-                assert_single_dataset_compatible(self.dataset.datasets[name], dataset.datasets[name], allow_preprocessing_override=allow_preprocessing_override)
+            for name in self.dataset.datasets:
+                assert_single_dataset_compatible(self.dataset.datasets[name], dataset.datasets[name])
             return
-        assert_single_dataset_compatible(self.dataset, dataset, allow_preprocessing_override=allow_preprocessing_override)
+        assert_single_dataset_compatible(self.dataset, dataset)
 
-    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", allow_preprocessing_override: bool = False, progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False, edf_cache_patients: int = 3, pin_memory: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False, edf_cache_patients: int = 3, pin_memory: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
         """Run this classifier on an initialized compatible dataset.
 
         The dataset must already contain its patient cohort. Predictions are
@@ -201,7 +171,7 @@ class PackagedModel:
         """
         if self.classification_contract is None:
             raise TypeError(f"Package '{self.name}' has no classification contract.")
-        self.assert_compatible(dataset, allow_preprocessing_override=allow_preprocessing_override)
+        self.assert_compatible(dataset)
         if not hasattr(dataset, "set_rejection_strategy"):
             raise TypeError(f"{dataset.__class__.__name__} does not support rejection strategies.")
         if edf_cache_patients < 0:

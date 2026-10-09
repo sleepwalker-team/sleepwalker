@@ -1,27 +1,102 @@
-# Example: train a five-epoch sleep-staging head on a converted SleepFM package.
-# First run: python tools/foundation_models.py download sleepfm /path/to/downloads
-# Then run:  python tools/foundation_models.py convert sleepfm /path/to/downloads/sleepfm /path/to/packages/sleepfm
-
 seed: 17
 data:
   name: sleepwalker.datasets.HSP.HSP
   sample_frequency: 128
   resample_type: polyphase
-  z_normalize: true
   channels:
-    - {logical_name: ECG, physical_names: [ECG, ECG-LA, ECG-RA]}
-    - {logical_name: EMG_Chin, physical_names: [CHIN1-CHIN2, Chin1-Chin2, CHIN, EMG]}
-    - {logical_name: EMG_LLeg, physical_names: [LAT, LLEG+, LLEG-, L LEG]}
-    - {logical_name: EMG_RLeg, physical_names: [RAT, RLEG+, RLEG-, R LEG]}
-    - {logical_name: ABD, physical_names: [ABD, ABDOMEN, Abdomen]}
-    - {logical_name: THX, physical_names: [CHEST, THORAX, Chest]}
-    - {logical_name: NP, physical_names: [PTAF, AIRFLOW, AirFlow, THERMISTOR, Thermistor, Flow]}
-    - {logical_name: SpO2, physical_names: [SaO2, SpO2, SPO2]}
-    - {logical_name: SN, physical_names: [SN, Snore, SNORE, Snoring]}
-    - {logical_name: EOG_E1_A2, physical_names: [E1-M2]}
-    - {logical_name: EOG_E2_A1, physical_names: [E2-M1, E2-M2, E2]}
-    - {logical_name: EEG_C3_A2, physical_names: [C3-M2]}
-    - {logical_name: EEG_C4_A1, physical_names: [C4-M1]}
+  - logical_name: ECG
+    physical_names:
+    - ECG
+    - ECG-LA
+    - ECG-RA
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EMG_Chin
+    physical_names:
+    - CHIN1-CHIN2
+    - Chin1-Chin2
+    - CHIN
+    - EMG
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EMG_LLeg
+    physical_names:
+    - LAT
+    - LLEG+
+    - LLEG-
+    - L LEG
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EMG_RLeg
+    physical_names:
+    - RAT
+    - RLEG+
+    - RLEG-
+    - R LEG
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: ABD
+    physical_names:
+    - ABD
+    - ABDOMEN
+    - Abdomen
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: THX
+    physical_names:
+    - CHEST
+    - THORAX
+    - Chest
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: NP
+    physical_names:
+    - PTAF
+    - AIRFLOW
+    - AirFlow
+    - THERMISTOR
+    - Thermistor
+    - Flow
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: SpO2
+    physical_names:
+    - SaO2
+    - SpO2
+    - SPO2
+    preprocessors:
+    - sleepwalker.datasets.HSP.correct_hsp_saturation
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: SN
+    physical_names:
+    - SN
+    - Snore
+    - SNORE
+    - Snoring
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EOG_E1_A2
+    physical_names:
+    - E1-M2
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EOG_E2_A1
+    physical_names:
+    - E2-M1
+    - E2-M2
+    - E2
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EEG_C3_A2
+    physical_names:
+    - C3-M2
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
+  - logical_name: EEG_C4_A1
+    physical_names:
+    - C4-M1
+    preprocessors:
+    - name: sleepwalker.datasets.normalizer.RecordingZScore
   event_mapping:
     wake: wake
     n1: n1
@@ -30,19 +105,21 @@ data:
     rem: rem
   total_input: 300s
   stride: 300s
-  assume_units_if_missing: true
-  output_classes: &classes [wake, n1, n2, n3, rem]
+  output_classes: &id001
+  - wake
+  - n1
+  - n2
+  - n3
+  - rem
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
     target_resolution: 300s
     target_offset: 0s
-    target_classes: *classes
+    target_classes: *id001
     sequence_len: 10
-  # Supply an HSP patient manifest in the format created by sleepwalker split.
   files: /path/to/hsp-patients.yml
   label: HSP
   num_workers: 16
-
 model:
   name: sleepwalker.models.PackagedSequenceClassifierModel.PackagedSequenceClassifierModel
   package: /path/to/packages/sleepfm
@@ -51,7 +128,6 @@ model:
   modality_count: 4
   head: linear
   freeze_encoder: true
-
 trainer:
   name: sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer
   target_resolution: 300s
@@ -64,7 +140,6 @@ trainer:
     weight_decay: 1e-4
   loss_function: torch.nn.functional.cross_entropy
   early_stopping: 10
-
 run:
   experiment_name: sleepfm-hsp-head
   batch_size: 32

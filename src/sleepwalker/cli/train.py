@@ -10,9 +10,9 @@ fully qualified ``name`` and put constructor arguments directly beside it::
       channels:
         - logical_name: SpO2
           physical_names: [SaO2, SpO2, SPO2]
-          normalizer:
-            name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
-            fs: 100
+          preprocessors:
+            - name: sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer
+              fs: 100
       files:
         train:
           name: sleepwalker.datasets.HSP.get_annotated_hsp_edf_files
@@ -117,7 +117,7 @@ def build_dataset(entry: Mapping[str, Any]):
     spec = {key: value for key, value in entry.items() if key not in DATA_FIELDS}
     if "channels" in spec:
         spec["channels"] = [build_channel(channel) for channel in spec["channels"]]
-    for callback_name in ("prepare_patient", "prepare_target", "prepare_sample"):
+    for callback_name in ("prepare_patient", "prepare_target", "prepare_sample", "prepare_channels"):
         if callback_name in spec:
             spec[callback_name] = build_callback(spec[callback_name])
     dataset = build_component(spec)

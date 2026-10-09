@@ -35,10 +35,11 @@ data:
   channels:
     - logical_name: eeg
       physical_names: [EEG Fpz-Cz]
-      unit: uV
-      normalizer:
-        name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
-        fs: 100
+      preprocessors:
+        - name: sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit
+          target: uV
+        - name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
+          fs: 100
   sample_frequency: 100
   event_mapping:
     sleep stage w: wake

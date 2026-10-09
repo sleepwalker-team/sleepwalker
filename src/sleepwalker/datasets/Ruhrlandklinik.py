@@ -12,6 +12,7 @@ import os
 import traceback
 from sleepwalker.utils import logger
 
+from sleepwalker.datasets.normalizer import ConvertUnit
 import pandas as pd
 import xlrd
 
@@ -123,7 +124,7 @@ def ruhrland_group_name(subgroup: str, grouped: bool) -> str | None:
     return None
 
 
-def resolve_normalizer(
+def get_preprocessors(
     channel_name: str,
     group_name: str | None,
     normalize: bool,
@@ -134,15 +135,24 @@ def resolve_normalizer(
 
     Exact channel overrides win over group overrides. When no override matches,
     ``normalize`` controls whether the inferred Ruhrland default is used.
+
+    October 2026 local audit of train-test-2023 and val-2024: diagnostic airflow
+    can be cmH2O, voltage inputs V, and RIP Flow V/s. Keep these measurement
+    families distinct; no device gain table supports pressure-to-voltage repair.
+    EDF calibration definition: https://www.edfplus.info/specs/edf.html
+    The malformed val-2024/ORION-UNITAS-305999-PSG1.edf saturation is labelled
+    uV and stuck at 32767. ConvertUnit("%") rejects that incompatible source
+    before saturation clipping, without a separate header-pattern rejection rule.
     """
+    value = ruhrland_normalizer(channel_name, sample_frequency) if normalize else None
     if override_normalize is not None:
         if channel_name in override_normalize:
-            return override_normalize[channel_name]
-        if group_name is not None and group_name in override_normalize:
-            return override_normalize[group_name]
-    if not normalize:
-        return None
-    return ruhrland_normalizer(channel_name, sample_frequency)
+            value = override_normalize[channel_name]
+        elif group_name is not None and group_name in override_normalize:
+            value = override_normalize[group_name]
+    target = ruhrland_unit(channel_name)
+    conversion = [] if target is None else [ConvertUnit(target)]
+    return conversion + ([] if value is None else [value])
 
 
 def resolve_quality(
@@ -257,8 +267,8 @@ def get_channels(
                 if not physical_names:
                     continue
                 if logical_group is not None:
-                    normalizers = {
-                        channel_name: resolve_normalizer(
+                    processors = {
+                        channel_name: get_preprocessors(
                             channel_name=channel_name,
                             group_name=subgroup,
                             normalize=normalize,
@@ -280,17 +290,12 @@ def get_channels(
                         ChannelConfig(
                             logical_name=logical_group,
                             physical_names=physical_names,
-                            normalizer=(
-                                None
-                                if all(value is None for value in normalizers.values())
-                                else normalizers
-                            ),
+                            preprocessors=processors,
                             quality_name=(
                                 None
                                 if all(value is None for value in quality_names.values())
                                 else quality_names
                             ),
-                            unit=ruhrland_unit(physical_names[0]),
                         )
                     )
                 else:
@@ -298,7 +303,7 @@ def get_channels(
                         ChannelConfig(
                             logical_name=channel_name,
                             physical_names=[channel_name],
-                            normalizer=resolve_normalizer(
+                            preprocessors=get_preprocessors(
                                 channel_name=channel_name,
                                 group_name=subgroup,
                                 normalize=normalize,
@@ -311,7 +316,6 @@ def get_channels(
                                 include_quality=include_quality,
                                 override_quality=override_quality,
                             ),
-                            unit=ruhrland_unit(channel_name),
                         )
                         for channel_name in physical_names
                     )
@@ -325,7 +329,7 @@ def get_channels(
             ChannelConfig(
                 logical_name=channel_name,
                 physical_names=[channel_name],
-                normalizer=resolve_normalizer(
+                preprocessors=get_preprocessors(
                     channel_name=channel_name,
                     group_name=None,
                     normalize=normalize,
@@ -338,7 +342,6 @@ def get_channels(
                     include_quality=include_quality,
                     override_quality=override_quality,
                 ),
-                unit=ruhrland_unit(channel_name),
             )
         )
 

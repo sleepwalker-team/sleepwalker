@@ -173,6 +173,28 @@ def test_job_service_cancels_active_job(start_running: bool) -> None:
     assert service.has_active_job(job.session_id) is False
 
 
+def test_job_service_rejects_cancelling_cancelled_job_and_allows_replacement() -> None:
+    service = JobService(JobStore())
+    job = service.create_if_session_idle(
+        session_id="sess-test",
+        job_type="inference",
+    )
+
+    service.request_cancel(job.id)
+    service.mark_cancelled(job.id)
+
+    with pytest.raises(ValueError, match="cannot transition from cancelled to cancelling"):
+        service.request_cancel(job.id)
+
+    replacement = service.create_if_session_idle(
+        session_id="sess-test",
+        job_type="inference",
+    )
+
+    assert replacement.id != job.id
+    assert replacement.state == JobState.QUEUED
+
+
 def test_job_service_detects_active_jobs() -> None:
     service = JobService(JobStore())
     job = service.create(

@@ -57,3 +57,33 @@ def get_job(
         )
 
     return to_job_response(job)
+
+
+@router.post(
+    "/{job_id}/cancel",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def cancel_job(
+    job_id: str,
+    service: JobService = Depends(get_job_service),
+) -> JobResponse:
+    try:
+        job = service.request_cancel(job_id)
+    except KeyError as exc:
+        raise APIError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="JOB_NOT_FOUND",
+            message="Job not found.",
+        ) from exc
+    except ValueError as exc:
+        job = service.get(job_id)
+        details = {"state": job.state.value} if job is not None else None
+        raise APIError(
+            status_code=status.HTTP_409_CONFLICT,
+            code="INVALID_JOB_STATE",
+            message="Job cannot be cancelled in its current state.",
+            details=details,
+        ) from exc
+
+    return to_job_response(job)

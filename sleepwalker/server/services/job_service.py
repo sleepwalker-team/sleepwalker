@@ -132,7 +132,7 @@ class JobService:
     def request_cancel(self, job_id: str) -> Job:
         job = self._get_required(job_id)
 
-        if job.state in {JobState.CANCELLING, JobState.CANCELLED}:
+        if job.state == JobState.CANCELLING:
             return job
 
         if job.state not in {JobState.QUEUED, JobState.RUNNING}:

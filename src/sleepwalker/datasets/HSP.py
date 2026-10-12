@@ -2136,8 +2136,12 @@ class HSP(BaseDataset):
         df = pd.read_csv(annot_path)
         df = df.rename(columns={'event': 'Label', 'time': 'Starttime', 'duration': 'Duration'})
         df['Label'] = df['Label'].str.lower()
-        if self.sane_labels:
-            df = self._map_to_sane_labels(df)
+
+        # Some HSP exports leave the duration column blank but retain event
+        # durations in the text, e.g. "Respiratory Event - Dur: 14.6 sec.".
+        # Read these before mapping labels, and keep explicit CSV durations.
+        embedded_duration = df['Label'].str.extract(r'\bdur:\s*([0-9]+(?:\.[0-9]+)?)\s*sec\b', expand=False)
+        df['Duration'] = df['Duration'].fillna(pd.to_numeric(embedded_duration))
 
         base_date = f'{start_datetime._date_repr}'
         df['Starttime'] = pd.to_datetime(base_date + ' ' + df['Starttime'])
@@ -2147,7 +2151,19 @@ class HSP(BaseDataset):
         rollover_mask = df['Starttime'] < df['Starttime'].iloc[0]
         df.loc[rollover_mask, 'Starttime'] += pd.Timedelta(days=1)
 
+        # "Stage - ..." rows without durations mark stage changes, not one
+        # epoch each. A stage lasts until the next stage row, including
+        # "Stage - No Stage", which ends scoring. Do not extend the final
+        # stage without a known boundary or use unrelated events as boundaries.
+        stage_labels = ['stage - w', 'stage - n1', 'stage - n2', 'stage - n3', 'stage - r', 'stage - no stage']
+        stage_starts = df.loc[df['Label'].isin(stage_labels), 'Starttime'].sort_values()
+        stage_durations = (stage_starts.shift(-1) - stage_starts).dt.total_seconds()
+        df.loc[stage_starts.index, 'Duration'] = df.loc[stage_starts.index, 'Duration'].fillna(stage_durations)
+
         df['Endtime'] = df['Starttime'] + pd.to_timedelta(df['Duration'], unit='s')
+
+        if self.sane_labels:
+            df = self._map_to_sane_labels(df)
 
         return df[['Label', 'Starttime', 'Endtime', 'Duration']]
 

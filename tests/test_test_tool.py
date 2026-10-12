@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -148,6 +150,31 @@ def test_annotation_filter_uses_union_of_requested_labels():
     selected = prediction_transforms.filter_annotation(frame, "patient.edf", [], labels=["n1", "n2"], minimum_coverage=0.5)
 
     assert selected.index.tolist() == [0]
+
+
+@pytest.mark.parametrize("invalid_target", [None, 0])
+def test_evaluation_skips_patients_with_no_valid_targets(monkeypatch, invalid_target):
+    package = make_package()
+    dataset = SimpleNamespace(edf_files=[SimpleNamespace(path=path) for path in ["unscored.edf", "scored.edf"]], get_n_patients=lambda: 2)
+    monkeypatch.setattr(evaluate_tool, "read_edf_meta", lambda path: {"signals": ["EEG"]})
+    predictions = pd.DataFrame({
+        "patient": ["unscored.edf", "scored.edf"],
+        "task": ["event", "event"],
+        "time": pd.to_datetime(["2025-01-01", "2025-01-01"]),
+        "valid": [False, True],
+        "target": [invalid_target, 0],
+        "prob__event": [0.9, 0.9],
+        "prob__no event": [0.1, 0.1],
+    })
+    output = StringIO()
+
+    evaluate_tool.evaluate_predictions(output, package, dataset, predictions, [("resolved", [prediction_transforms.resolve_overlaps])], dataset_label="test", fold=None, n_patients_requested=2)
+
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [record["patient"] for record in records if record["record_type"] == "patient"] == ["scored.edf"]
+    aggregate = next(record for record in records if record["record_type"] == "aggregate")
+    assert aggregate["n_patients_evaluated"] == 1
+    assert aggregate["metrics"]["n_windows"] == 1
 
 
 def test_overlap_resolution_smoothing_and_metrics():

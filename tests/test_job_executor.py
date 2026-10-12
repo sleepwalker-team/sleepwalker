@@ -1,3 +1,6 @@
+import pytest
+import torch
+
 from sleepwalker.server.services.job_executor import JobExecutionError, LocalJobExecutor
 from sleepwalker.server.services.job_service import JobService
 from sleepwalker.server.stores.job_store import JobPhase, JobState, JobStore
@@ -62,6 +65,30 @@ def test_executor_hides_unexpected_error_details() -> None:
     assert job.error is not None
     assert job.error.code == "INTERNAL_ERROR"
     assert "secret implementation detail" not in job.error.message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [MemoryError("allocator detail"), torch.OutOfMemoryError("CUDA allocator detail")],
+    ids=["memory-error", "torch-out-of-memory"],
+)
+def test_executor_reports_resource_exhaustion(error: Exception) -> None:
+    service = JobService(JobStore())
+    job = service.create(session_id="sess-test", job_type="inference")
+    executor = LocalJobExecutor(service)
+
+    def operation(_report_progress, _check_cancelled) -> None:
+        raise error
+
+    executor.execute(job.id, operation)
+
+    assert job.state == JobState.FAILED
+    assert job.error is not None
+    assert job.error.code == "RESOURCE_EXHAUSTED"
+    assert job.error.message == (
+        "Inference could not be completed because compute memory was exhausted."
+    )
+    assert str(error) not in job.error.message
 
 
 def test_executor_acknowledges_cancellation_without_storing_success() -> None:

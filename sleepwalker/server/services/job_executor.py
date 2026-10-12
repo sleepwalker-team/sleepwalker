@@ -80,9 +80,21 @@ class LocalJobExecutor:
                 job_id,
                 JobError(code=exc.code, message=exc.message, details=exc.details),
             )
-        except Exception:
+        except Exception as exc:
             if self.job_service.is_cancellation_requested(job_id):
                 return self.job_service.mark_cancelled(job_id)
+
+            if _is_resource_exhaustion(exc):
+                return self.job_service.mark_failed(
+                    job_id,
+                    JobError(
+                        code="RESOURCE_EXHAUSTED",
+                        message=(
+                            "Inference could not be completed because compute "
+                            "memory was exhausted."
+                        ),
+                    ),
+                )
 
             logger.exception("Unexpected error while executing job %s", job_id)
             return self.job_service.mark_failed(
@@ -100,3 +112,15 @@ class LocalJobExecutor:
                 return self.job_service.mark_cancelled(job_id)
 
             raise
+
+
+def _is_resource_exhaustion(exc: Exception) -> bool:
+    if isinstance(exc, MemoryError):
+        return True
+
+    try:
+        import torch
+    except ImportError:
+        return False
+
+    return isinstance(exc, torch.OutOfMemoryError)

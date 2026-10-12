@@ -193,6 +193,38 @@ def test_invalid_edf_removes_session_and_temporary_files(session_api):
     assert list(storage.root.iterdir()) == []
 
 
+def test_file_too_large_removes_session_and_temporary_files(tmp_path) -> None:
+    store = SessionStore()
+    service = SessionService(store)
+    storage = TemporaryStorage(tmp_path / "uploads", max_file_size_bytes=4)
+    app = create_app(session_service=service, temporary_storage=storage)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files=[
+                (
+                    "files",
+                    ("recording.edf", b"12345", "application/octet-stream"),
+                )
+            ],
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "error": {
+            "code": "FILE_TOO_LARGE",
+            "message": "Uploaded file exceeds the maximum allowed size.",
+            "details": {
+                "filename": "recording.edf",
+                "max_size_bytes": 4,
+            },
+        }
+    }
+    assert not store._sessions
+    assert list(storage.root.iterdir()) == []
+
+
 @pytest.mark.parametrize("filename", ["recording.nif", "recording.ndf"])
 def test_native_nox_study_is_rejected_and_cleaned_up(session_api, filename):
     client, store, storage = session_api

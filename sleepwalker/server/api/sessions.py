@@ -21,7 +21,7 @@ from ..services.job_service import ActiveJobExistsError, JobService
 from ..services.model_registry import ModelRegistry
 from ..services.session_cleanup_service import SessionCleanupService
 from ..services.session_service import SessionService
-from ..storage.temporary_storage import TemporaryStorage
+from ..storage.temporary_storage import FileTooLargeError, TemporaryStorage
 from ..stores.prediction_store import PredictionStore
 from ..stores.session_store import Session, SessionState
 from ..validation import InvalidStudyError, UnsupportedStudyFormatError, validate_study
@@ -108,6 +108,20 @@ async def create_session(
         session.recording_start = study_info.recording_start
         session.signals = study_info.signals
         session.state = SessionState.READY
+
+    except FileTooLargeError as exc:
+        storage.delete_session(session.id)
+        service.delete(session.id)
+
+        raise APIError(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            code="FILE_TOO_LARGE",
+            message="Uploaded file exceeds the maximum allowed size.",
+            details={
+                "filename": exc.filename,
+                "max_size_bytes": exc.max_size_bytes,
+            },
+        ) from exc
 
     except (InvalidStudyError, UnsupportedStudyFormatError) as exc:
         storage.delete_session(session.id)

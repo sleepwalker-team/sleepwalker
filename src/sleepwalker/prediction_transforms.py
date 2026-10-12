@@ -10,11 +10,11 @@ import pandas as pd
 def apply_pipeline(frame: pd.DataFrame, pipeline: list[Any], *, patient: str, signals: Sequence[str]) -> pd.DataFrame:
     current = frame.copy()
     for transform in pipeline:
+        if current.empty:
+            break
         current = transform(current, patient=patient, signals=signals)
         if not isinstance(current, pd.DataFrame):
             raise TypeError(f"Prediction transform {transform} returned {type(current).__name__}, expected DataFrame.")
-        if current.empty:
-            break
     return current
 
 

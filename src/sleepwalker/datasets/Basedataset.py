@@ -247,6 +247,12 @@ class EDFFile:
             cache: Optional process-shared cache of native EDF samples.
         """
         requested_channels = self.channels if channels is None else list(channels)
+        native = self.get_native(start_date, end_date, channels=requested_channels, cache=cache, read_mode=read_mode)
+        return resample_native_signals(native, requested_channels, start_date, end_date, sample_frequency, resample_type)
+
+    def get_native(self, start_date: pd.Timestamp, end_date: pd.Timestamp, channels: Optional[Sequence[str]] = None, cache: Optional[EDFCache] = None, read_mode: str = "physical") -> dict[float, pd.DataFrame]:
+        """Load native samples, using separate cache entries for each channel and read mode."""
+        requested_channels = self.channels if channels is None else list(channels)
         unknown_channels = sorted(set(requested_channels) - set(self.channels))
         if unknown_channels:
             raise ValueError(f"Requested channels not prepared for {self.path}: {unknown_channels}.")
@@ -281,7 +287,7 @@ class EDFFile:
                     frame = entry.copy_window(pd.Timestamp(first), pd.Timestamp(stop), [name])
                     frequency = 1e9 / period
                     native[frequency] = pd.concat([native[frequency], frame], axis=1) if frequency in native else frame
-        return resample_native_signals(native, requested_channels, start_date, end_date, sample_frequency, resample_type)
+        return native
 
     def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
         """Sample the optional secondary target timeline for one window."""
@@ -1009,19 +1015,30 @@ class BaseDataset(Dataset, ABC):
 
         return {"start": start, "end": end, "label_df": df, "label_extra_df": df_additional, "classes": classes, "extra_classes": extra_classes}
 
-    def read_channels(self, file, start, end, selected_channels):
-        """Read and resample selected sources and their companion quality channels."""
+    def read_channels(self, file, start, end, selected_channels, index=None):
+        """Read all source modes onto one shared grid before channel processing."""
         names = {"physical": [], "digital": []}
         for cfg, name in selected_channels:
             names[cfg.read_mode_for(name)].append(name)
         if self.group_sampling_strategy in {"first", "random"}:
             names["physical"].extend(cfg.quality_name_for(name) for cfg, name in selected_channels if cfg.quality_name_for(name) in file.channels)
+        native = defaultdict(dict)
+        requested = []
+        for mode, channels in names.items():
+            if channels:
+                channels = list(dict.fromkeys(channels))
+                requested.extend((mode, name) for name in channels)
+                for frequency, frame in file.get_native(start, end, channels=channels, cache=self.edf_cache, read_mode=mode).items():
+                    native[frequency][mode] = frame
+        # Keep mode in the column key: one EDF source can be used in both forms.
+        # Resample together so the existing boundary fill also spans read modes.
+        native = {frequency: pd.concat(frames, axis=1) for frequency, frames in native.items()}
+        aligned = resample_native_signals(native, requested, start, end, self.sample_frequency, self.resample_type, index=index)
         result = {}
         for mode, channels in names.items():
             if channels:
-                data = file.get_x(start, end, self.sample_frequency, self.resample_type, channels=list(dict.fromkeys(channels)), cache=self.edf_cache, read_mode=mode)
-                units = {name: "counts" if mode == "digital" else file.units.get(name) for name in data.columns}
-                result[mode] = data, units
+                data = aligned[mode]
+                result[mode] = data, {name: "counts" if mode == "digital" else file.units.get(name) for name in data.columns}
         return result
 
     def fit_recording_preprocessors(self, file):
@@ -1046,14 +1063,25 @@ class BaseDataset(Dataset, ABC):
         selected source uses the shared window read; fallback aliases load on
         demand. None excludes the window without changing recording state.
         """
-        names = [selected_name]
+        alternatives = []
         if self.group_sampling_strategy != "none":
             alternatives = [name for name in cfg.physical_names if name != selected_name and (cfg.logical_name, name) in file.preprocessors]
             if self.group_sampling_strategy == "random":
                 np.random.shuffle(alternatives)
-            names.extend(alternatives)
-        for name in names:
-            source = raw if name == selected_name else self.read_channels(file, start_date, start_date + self.total_input, [(cfg, name)])
+        selected_mode = cfg.read_mode_for(selected_name)
+        selected_frame, _ = raw[selected_mode]
+        window_index = selected_frame.index
+
+        def sources():
+            yield selected_name, raw
+            for name in alternatives:
+                source = self.read_channels(
+                    file, start_date, start_date + self.total_input,
+                    [(cfg, name)], index=window_index,
+                )
+                yield name, source
+
+        for name, source in sources():
             data, units = source[cfg.read_mode_for(name)]
             processed = apply_preprocessors(data[[name]].to_numpy(), units[name], file.preprocessors[(cfg.logical_name, name)], is_recording=False)
             if processed is None:
@@ -1395,9 +1423,10 @@ class BaseDataset(Dataset, ABC):
 
         Notes:
             Target preparation and channel selection happen separately for
-            each request and before signal I/O. ``EDFFile.get_x`` performs
-            resampling and optionally serves the requested interval from a
-            native-sample cache.
+            each request and before signal I/O. ``read_channels`` combines
+            native physical and digital samples before shared resampling.
+            ``EDFFile.get_native`` optionally serves the requested interval
+            from the native-sample cache.
 
             ``PairedDataset`` uses this method to load the native calls needed
             by one or more compatible packaged experts. Ordinary datasets use

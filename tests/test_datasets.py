@@ -10,7 +10,6 @@ import torch
 from torch.utils.data import DataLoader
 
 from sleepwalker.datasets.normalizer import ConvertUnit
-from sleepwalker.core.signal import resample_native_signals
 from sleepwalker.datasets.normalizer import RecordingZScore
 from sleepwalker.datasets.Basedataset import ChannelConfig, BaseDataset, EDFFile, EventIndex, batch_collate
 from sleepwalker.datasets.CAP import CAP
@@ -143,7 +142,7 @@ def test_get_item_rejects_before_loading_signal():
         ),
     )
     file = create_dummy_file()
-    file.get_x = Mock(side_effect=AssertionError("signal should not be loaded"))
+    file.get_native = Mock(side_effect=AssertionError("signal should not be loaded"))
     import random
     original_random = random.random
     random.random = lambda: 0.5
@@ -153,7 +152,7 @@ def test_get_item_rejects_before_loading_signal():
         random.random = original_random
 
     assert item is None
-    file.get_x.assert_not_called()
+    file.get_native.assert_not_called()
 
 
 def test_get_item_loads_signal_after_label_precheck():
@@ -184,11 +183,11 @@ def test_get_item_loads_signal_after_label_precheck():
         {"EEG": np.arange(30, dtype=np.float32)},
         index=pd.date_range(file.start_date, periods=30, freq="1s"),
     )
-    file.get_x = Mock(return_value=signal)
+    file.get_native = Mock(return_value={1.0: signal})
 
     item = dataset.get_item(file, file.start_date)
 
-    file.get_x.assert_called_once()
+    file.get_native.assert_called_once()
     assert item is not None
     assert torch.equal(item["data"], torch.from_numpy(signal.values).float())
     assert item["target"].shape == (1, 1, 1)
@@ -207,7 +206,7 @@ def test_get_item_timestamp_is_input_window_start():
         {"EEG": np.arange(60, dtype=np.float32)},
         index=pd.date_range(file.start_date, periods=60, freq="1s"),
     )
-    file.get_x = Mock(return_value=signal)
+    file.get_native = Mock(return_value={1.0: signal})
     file.get_y = Mock(return_value=pd.DataFrame({"wake": np.ones(60)}, index=signal.index))
 
     item = dataset.get_item(file, file.start_date)
@@ -258,7 +257,7 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
 
     file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=signal.index[0], length=1)
     file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
-    file.get_x = lambda *args, **kwargs: signal.copy()
+    file.get_native = lambda *args, **kwargs: {1.0: signal.copy()}
     selected_channels = dataset.select_channels(file.channels)
     processed, quality = dataset.transform_window(file, signal.index[0], selected_channels)
     built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, processed, quality)
@@ -294,12 +293,12 @@ def test_get_item_reads_only_selected_physical_aliases_and_quality_channels():
     file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=start, length=1)
     reads = []
 
-    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None, read_mode="physical"):
+    def get_native(start_date, end_date, channels=None, cache=None, read_mode="physical"):
         reads.append(list(channels))
-        return signal.loc[:, channels].copy()
+        return {1.0: signal.loc[:, channels].copy()}
 
     file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
-    file.get_x = get_x
+    file.get_native = get_native
     item = dataset.get_item(file, start)
 
     assert len(reads) == 1 and set(reads[0]) == {"C3-M2", "E1-M2", "C3 quality"}
@@ -314,13 +313,12 @@ def test_get_items_matches_separate_reads(resample_type):
     file = EDFFile(channels=["EEG"], path="patient.edf", start_date=start, length=1, preprocessors={("eeg", "EEG"): [CenterNormalizer()]})
     reads = []
 
-    def get_x(start_date, end_date, sample_frequency, resample_type, channels=None, cache=None, read_mode="physical"):
+    def get_native(start_date, end_date, channels=None, cache=None, read_mode="physical"):
         reads.append((start_date, end_date))
-        native = {20.0: signal.loc[(signal.index >= start_date) & (signal.index < end_date), channels].copy()}
-        return resample_native_signals(native, channels, start_date, end_date, sample_frequency, resample_type)
+        return {20.0: signal.loc[(signal.index >= start_date) & (signal.index < end_date), channels].copy()}
 
     file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
-    file.get_x = get_x
+    file.get_native = get_native
     starts = [start, start + pd.Timedelta("2s"), start + pd.Timedelta("4s")]
     separate = [dataset.get_item(file, value)["data"] for value in starts]
     reads.clear()
@@ -344,7 +342,7 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
 
     file = EDFFile(channels=list(signal.columns), path="patient.edf", start_date=signal.index[0], length=1)
     file.preprocessors = {(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names}
-    file.get_x = lambda *args, **kwargs: signal.copy()
+    file.get_native = lambda *args, **kwargs: {1.0: signal.copy()}
     selected_channels = dataset.select_channels(file.channels)
     processed, quality = dataset.transform_window(file, signal.index[0], selected_channels)
     built = dataset.run_build_sample({"patient": "p", "time": signal.index[0]}, processed, quality)
@@ -357,7 +355,7 @@ def test_shared_sources_can_use_independent_units_and_recording_scalers():
     dataset = DummyDataset(channels=channels, sample_frequency=1, total_input="3s", event_mapping=None)
     signal = pd.DataFrame({"signal": [0., 1., 2., 3.]}, index=pd.date_range("2024-01-01", periods=4, freq="1s"))
     file = EDFFile(channels=["signal"], path="patient.edf", start_date=signal.index[0], end_date=signal.index[-1], units={"signal": "uV"}, preprocessors={(cfg.logical_name, "signal"): cfg.preprocessors_for("signal") for cfg in channels})
-    file.get_x = lambda *args, **kwargs: signal.copy()
+    file.get_native = lambda *args, **kwargs: {1.0: signal.copy()}
     dataset.fit_recording_preprocessors(file)
     first, second = (file.preprocessors[(name, "signal")][-1] for name in ("a", "b"))
     assert first is not second and np.isclose(first.std, second.std * 1000)
@@ -443,7 +441,7 @@ def test_recording_fitting_uses_source_processors_and_final_mapping_runs_only_on
 
     dataset = DummyDataset(channels=[ChannelConfig('A', ['A'], preprocessors=[ConvertUnit('uV'), OffsetNormalizer(10), RecordingZScore()]), ChannelConfig('B', ['B'], preprocessors=[ConvertUnit('uV'), RecordingZScore()])], sample_frequency=1, total_input="2s", prepare_channels=reference, input_channels=["referenced"])
     file = EDFFile(channels=["A", "B"], path="recording.edf", start_date=start, end_date=start + pd.Timedelta("4s"), units={"A": "uV", "B": "uV"}, preprocessors={(cfg.logical_name, name): cfg.preprocessors_for(name) for cfg in dataset.channels for name in cfg.physical_names})
-    file.get_x = lambda begin, finish, *args, channels=None, **kwargs: signal.loc[(signal.index >= begin) & (signal.index < finish), channels].copy()
+    file.get_native = lambda begin, finish, channels=None, **kwargs: {1.0: signal.loc[(signal.index >= begin) & (signal.index < finish), channels].copy()}
     dataset.fit_recording_preprocessors(file)
     assert calls == []
     assert file.preprocessors[("A", "A")][-1].mean == 13.

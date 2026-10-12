@@ -11,7 +11,7 @@ from ..services.annotation_service import (
 )
 from ..services.session_service import SessionService
 from ..stores.annotation_store import AnnotationEdit, AnnotationOperation
-from ..stores.prediction_store import PredictionResult, PredictionStore
+from ..stores.prediction_store import PredictionKind, PredictionResult, PredictionStore
 from ..stores.session_store import SessionState
 
 
@@ -99,6 +99,8 @@ def create_annotation(
             details={"task_id": task_id},
         )
 
+    _validate_operation_kind(payload.operation, task)
+
     if payload.operation == AnnotationOperation.SET_LABEL:
         start = _required_number(payload.start, "start")
         label = _valid_label(payload.label, task)
@@ -144,6 +146,27 @@ def create_annotation(
         )
 
     return to_annotation_response(edit)
+
+
+def _validate_operation_kind(
+    operation: AnnotationOperation,
+    task: PredictionResult,
+) -> None:
+    if operation == AnnotationOperation.SET_LABEL:
+        allowed_kinds = {PredictionKind.EPOCH}
+    else:
+        allowed_kinds = {PredictionKind.CONTINUOUS, PredictionKind.EVENT}
+
+    if task.kind not in allowed_kinds:
+        raise APIError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="INVALID_REQUEST",
+            message="Annotation operation is incompatible with the task kind.",
+            details={
+                "operation": operation.value,
+                "task_kind": task.kind.value,
+            },
+        )
 
 
 def _required(value: str | None, field: str) -> str:

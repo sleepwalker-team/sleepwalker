@@ -7,6 +7,7 @@ import pandas as pd
 from .inference_runner import InferenceRunner
 from .job_executor import CancellationCheck, JobExecutionError, ProgressCallback
 from .model_registry import ModelInfo
+from .prediction_mapper import validate_prediction_result
 from ..stores.job_store import JobPhase
 from ..stores.prediction_store import PredictionResult, PredictionStore
 from ..stores.session_store import Session
@@ -72,6 +73,12 @@ class PackageInferenceRunner(InferenceRunner):
                 },
             )
 
+        if session.recording_start is None:
+            raise JobExecutionError(
+                code="MODEL_INCOMPATIBLE",
+                message="Session is missing recording start metadata.",
+            )
+
         source_path = session.source_files[0]
         results: list[PredictionResult] = []
 
@@ -111,17 +118,29 @@ class PackageInferenceRunner(InferenceRunner):
                     details={"model_id": model.id},
                 )
 
-            results.append(
-                PredictionResult(
-                    session_id=session.id,
-                    model_id=model.id,
-                    task=model.task,
-                    classes=model.classes,
-                    resolution=model.output_resolution,
-                    frame=frame,
-                    kind=model.output_kind,
-                )
+            result = PredictionResult(
+                session_id=session.id,
+                model_id=model.id,
+                task=model.task,
+                classes=model.classes,
+                resolution=model.output_resolution,
+                frame=frame,
+                kind=model.output_kind,
             )
+
+            try:
+                validate_prediction_result(result, session.recording_start)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise JobExecutionError(
+                    code="MODEL_INCOMPATIBLE",
+                    message="Model returned predictions in an incompatible format.",
+                    details={
+                        "model_id": model.id,
+                        "output_kind": model.output_kind.value,
+                    },
+                ) from exc
+
+            results.append(result)
             report_progress(
                 JobPhase.POSTPROCESSING,
                 (index + 1) / len(models),

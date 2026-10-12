@@ -37,6 +37,18 @@ class EventPrediction:
     probabilities: dict[str, float]
 
 
+def validate_prediction_result(
+    result: PredictionResult,
+    recording_start: datetime,
+) -> None:
+    if result.kind == PredictionKind.EPOCH:
+        map_epoch_predictions(result, recording_start)
+    elif result.kind == PredictionKind.CONTINUOUS:
+        map_continuous_predictions(result, recording_start)
+    else:
+        map_event_predictions(result, recording_start)
+
+
 def map_epoch_predictions(
     result: PredictionResult,
     recording_start: datetime,

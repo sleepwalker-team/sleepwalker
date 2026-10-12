@@ -39,6 +39,7 @@ def create_session(source_path: Path) -> Session:
         source_files=[source_path],
         state=SessionState.READY,
         format=StudyFormat.EDF,
+        recording_start=datetime(2025, 1, 1),
     )
 
 
@@ -62,7 +63,16 @@ def create_model(
 def test_package_runner_stores_predictions_after_success(tmp_path) -> None:
     source_path = tmp_path / "recording.edf"
     package_path = tmp_path / "model.swmodel"
-    package = FakePackage(pd.DataFrame({"prediction": ["wake"], "prob__wake": [0.9]}))
+    package = FakePackage(
+        pd.DataFrame(
+            {
+                "time": [15.0],
+                "prediction": ["wake"],
+                "prob__wake": [0.9],
+                "prob__n1": [0.1],
+            }
+        )
+    )
     loaded: list[tuple[Path, str]] = []
 
     def load_fake(path: Path, device: str) -> FakePackage:
@@ -123,6 +133,54 @@ def test_package_runner_preserves_model_output_kind(tmp_path) -> None:
     result = store.get("sess-test", "sleep-model")
     assert result is not None
     assert result.kind == PredictionKind.CONTINUOUS
+
+
+@pytest.mark.parametrize(
+    ("output_kind", "frame"),
+    [
+        (
+            PredictionKind.CONTINUOUS,
+            pd.DataFrame({"time": [1.0], "prob__wake": [0.9]}),
+        ),
+        (
+            PredictionKind.EVENT,
+            pd.DataFrame(
+                {
+                    "time": [1.0],
+                    "prob__wake": [0.9],
+                    "prob__n1": [0.1],
+                }
+            ),
+        ),
+    ],
+    ids=["continuous", "event"],
+)
+def test_package_runner_rejects_output_that_does_not_match_declared_kind(
+    tmp_path,
+    output_kind: PredictionKind,
+    frame: pd.DataFrame,
+) -> None:
+    source_path = tmp_path / "recording.edf"
+    store = PredictionStore()
+    runner = PackageInferenceRunner(
+        store,
+        package_loader=lambda _path, _device: FakePackage(frame),
+    )
+
+    with pytest.raises(JobExecutionError) as error:
+        runner.run(
+            create_session(source_path),
+            [create_model(tmp_path / "model.swmodel", output_kind)],
+            lambda *_args: None,
+            lambda: None,
+        )
+
+    assert error.value.code == "MODEL_INCOMPATIBLE"
+    assert error.value.details == {
+        "model_id": "sleep-model",
+        "output_kind": output_kind.value,
+    }
+    assert store.list_for_session("sess-test") == []
 
 
 def test_package_runner_rejects_non_edf_session(tmp_path) -> None:

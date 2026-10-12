@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 from fractions import Fraction
 import io
 import os
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -514,16 +514,19 @@ def read_edf_native(
 
 def resample_native_signals(
     signals: Mapping[float, pd.DataFrame],
-    channels: Sequence[str],
+    channels: Sequence[Hashable],
     start: pd.Timestamp,
     end: pd.Timestamp,
     frequency: float,
     how: str = "nearest",
+    index: Optional[pd.DatetimeIndex] = None,
 ) -> pd.DataFrame:
     """Slice one logical window from native signals and resample it.
 
     Slicing happens before resampling so the result is independent of other
     windows that happened to share the same native EDF read.
+    ``index`` can keep a fallback source on the grid of the other channels.
+    Exact model input length is handled after channel processing.
     """
     if how not in {"nearest", "mean", "max", "polyphase"}:
         raise ValueError(f"Unknown EDF resampling mode {how!r}.")
@@ -558,6 +561,8 @@ def resample_native_signals(
     if not frames:
         return pd.DataFrame()
     output = frames[0] if len(frames) == 1 else pd.concat(frames, axis=1, join="outer").ffill().bfill()
+    if index is not None:
+        output = output.reindex(index, method="ffill")
     return output[[channel for channel in channels if channel in output.columns]]
 
 

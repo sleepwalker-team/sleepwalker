@@ -10,14 +10,14 @@ Questions about the project and access to research models can be sent to [sleepw
     <strong>Dr. rer. nat. Sebastian Buschjäger</strong>
     <span>Computer scientist and AI expert</span>
   </a>
-  <a class="person-card" href="https://www.linkedin.com/in/dr-rer-medic-sarah-dietz-terjung-a45976209/" target="_blank" rel="noopener">
+  <a class="person-card" href="https://www.linkedin.com/in/sarah-dietz-terjung-a45976209/" target="_blank" rel="noopener">
     <img src="../assets/images/people/sarah-dietz-terjung.jpg" alt="Sarah Dietz-Terjung">
     <strong>Dr. rer. medic. Sarah Dietz-Terjung</strong>
     <span>Biologist and medical physicist</span>
   </a>
   <a class="person-card" href="https://www.linkedin.com/in/matthias-jakobs-319115223/" target="_blank" rel="noopener">
     <img src="../assets/images/people/matthias-jakobs.jpg" alt="Matthias Jakobs">
-    <strong>MSc. Matthias Jakobs</strong>
+    <strong>Dr. rer. nat. Matthias Jakobs</strong>
     <span>Computer scientist and AI expert</span>
   </a>
 </div>

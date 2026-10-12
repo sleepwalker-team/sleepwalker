@@ -1,6 +1,7 @@
 """EDF decoding, independent fitted state and recording/window processing."""
 
 from datetime import datetime
+from contextlib import nullcontext
 from unittest.mock import Mock
 
 import cloudpickle
@@ -13,7 +14,7 @@ import torch
 
 from sleepwalker.datasets.normalizer import ConvertUnit
 from sleepwalker.config import build_channel
-from sleepwalker.core.signal import edf_calibration, read_edf_meta, read_edf_native
+from sleepwalker.core.signal import edf_calibration, read_edf_meta, read_edf_native, resample_native_signals
 from sleepwalker.datasets.Apples import Apples, get_preprocessors as apples_preprocessors, correct_apples_eeg, correct_apples_waveform, correct_apples_saturation
 from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, EDFFile
 from sleepwalker.core.signal import unit_conversion_factor
@@ -30,12 +31,12 @@ from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
 
 def write_edf(path, specifications, frequency=20, seconds=20):
     headers, signals = [], []
-    time = np.arange(frequency * seconds) / frequency
     for specification in specifications:
         specification = dict(specification)
         samples = specification.pop("samples", None)
         header = dict(label="A", dimension="uV", physical_min=-100, physical_max=100, digital_min=-32768, digital_max=32767, transducer="", prefilter="", sample_frequency=frequency)
         header.update(specification)
+        time = np.arange(header["sample_frequency"] * seconds) / header["sample_frequency"]
         signals.append(np.round(1500 * np.sin(time * 2.1) + 900 * np.cos(time * .7) + 120).astype(np.int32) if samples is None else np.full(len(time), samples, dtype=np.int32))
         headers.append(header)
     with pyedflib.EdfWriter(str(path), len(headers)) as writer:
@@ -565,6 +566,69 @@ def test_final_channel_callback_combines_physical_and_digital_sources(recording)
     assert calls == [{"physical": "dimensionless", "digital": "dimensionless"}]
 
 
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("resample_type", ["nearest", "polyphase"])
+def test_mixed_read_modes_align_before_fitting_processing_and_mapping(tmp_path, cached, mapped, resample_type):
+    path = write_edf(tmp_path / "mixed.edf", [
+        {"label": "A", "sample_frequency": 32, "physical_min": 100, "physical_max": -100, "digital_min": -32767},
+        {"label": "SpO2", "sample_frequency": 16, "dimension": "%", "physical_min": 0, "physical_max": 100},
+    ])
+    calls = []
+
+    class FiniteSignal:
+        def fit(self, values, *, unit, is_recording):
+            assert is_recording and np.isfinite(values).all()
+            self.length = len(values)
+            return self
+
+        def __call__(self, values, *, unit, is_recording):
+            assert np.isfinite(values).all()
+            return values, unit
+
+    def reference(channels):
+        digital, digital_unit = channels["digital"]
+        saturation, saturation_unit = channels["saturation"]
+        assert digital.shape == saturation.shape
+        assert digital_unit == "dimensionless"
+        assert saturation_unit == "%"
+        calls.append(len(saturation))
+        return {"reference": (np.where(saturation > 50, digital, 0), digital_unit), "saturation": (saturation, saturation_unit)}
+
+    data = UnlabelledDataset(channels=[
+        ChannelConfig("digital", ["A"], read_mode="digital", preprocessors=[FiniteSignal(), RecordingZScore()]),
+        ChannelConfig("saturation", ["SpO2"], preprocessors=[FiniteSignal()]),
+    ], sample_frequency=100, total_input="5s", resample_type=resample_type,
+        prepare_channels=reference if mapped else None, input_channels=["reference", "saturation"] if mapped else None)
+    with EDFCache(max_patients=2, directory=tmp_path / "cache") if cached else nullcontext() as cache:
+        data.set_edf_cache(cache)
+        file = data.prepare_patient(path, raise_errors=True)
+        assert calls == []
+        assert file.preprocessors[("digital", "A")][0].length == file.preprocessors[("saturation", "SpO2")][0].length
+        for offset in (0, 3):
+            start = file.start_date + pd.Timedelta(seconds=offset)
+            raw = data.read_channels(file, start, start + data.total_input, data.select_channels(file.channels))
+            physical, physical_units = raw["physical"]
+            digital, digital_units = raw["digital"]
+            pd.testing.assert_index_equal(physical.index, digital.index)
+            assert np.isfinite(physical.to_numpy()).all() and np.isfinite(digital.to_numpy()).all()
+            assert physical_units == {"SpO2": "%"} and digital_units == {"A": "counts"}
+            # Negative EDF gain changes the digital polarity, not its calibration.
+            calibrated = file.get_x(start, start + data.total_input, 100, resample_type, channels=["A"], cache=cache)
+            np.testing.assert_allclose(calibrated.A, digital.A * (100 / 32767), atol=1e-5)
+            saturation = file.get_x(start, start + data.total_input, 100, resample_type, channels=["SpO2"], cache=cache)
+            np.testing.assert_allclose(physical.SpO2.iloc[:len(saturation)], saturation.SpO2, atol=1e-5)
+            if resample_type == "nearest":
+                assert len(saturation) == 494 and len(physical) == 497
+                np.testing.assert_allclose(physical.SpO2.iloc[494:], saturation.SpO2.iloc[-1])
+            values = data.get_item(file, start)["data"].numpy()
+            assert values.shape == (500, 2) and np.isfinite(values).all()
+            np.testing.assert_allclose(values[len(physical):], np.repeat(values[len(physical) - 1:len(physical)], 500 - len(physical), axis=0))
+            if mapped:
+                assert calls[-1] == len(physical)
+            np.testing.assert_allclose(values[:len(physical), 1], physical.SpO2, atol=1e-5)
+
+
 def test_final_channel_callback_receives_counts_but_not_quality_signals(recording):
     calls = []
 
@@ -580,6 +644,34 @@ def test_final_channel_callback_receives_counts_but_not_quality_signals(recordin
     assert calls == [199]
 
 
+@pytest.mark.parametrize(("reference_frequency", "fallback_frequency"), [(32, 16), (16, 32)])
+def test_alias_fallback_keeps_the_shared_grid_before_mapping(tmp_path, reference_frequency, fallback_frequency):
+    path = write_edf(tmp_path / "fallback.edf", [{"label": "reject"}, {"label": "reference"}, {"label": "fallback", "sample_frequency": fallback_frequency}], frequency=reference_frequency)
+
+    def reject(values, *, unit, is_recording):
+        return None
+
+    def difference(channels):
+        reference, unit = channels["reference"]
+        fallback, fallback_unit = channels["signal"]
+        assert unit == "uV" and fallback_unit == "counts"
+        assert reference.shape == fallback.shape
+        assert np.isfinite(reference).all() and np.isfinite(fallback).all()
+        return {"output": (reference - fallback, "relative")}
+
+    data = UnlabelledDataset(channels=[ChannelConfig("reference", ["reference"]), ChannelConfig("signal", ["reject", "fallback"], read_mode={"reject": "physical", "fallback": "digital"}, preprocessors={"reject": [reject], "fallback": []})], sample_frequency=100, total_input="5s", prepare_channels=difference, input_channels=["output"], group_sampling_strategy="first")
+    file = data.prepare_patient(path, raise_errors=True)
+    assert data.get_item(file, file.start_date)["data"].shape == (500, 1)
+
+
+def test_fallback_alignment_preserves_bad_values_inside_the_window():
+    start = pd.Timestamp("2024-01-01")
+    frame = pd.DataFrame({"A": [1., np.nan, 3.]}, index=pd.date_range(start, periods=3, freq="1s"))
+    index = pd.date_range(start, periods=5, freq="1s")
+    aligned = resample_native_signals({1.0: frame}, ["A"], start, start + pd.Timedelta("5s"), 1, index=index)
+    np.testing.assert_allclose(aligned.A, [1., np.nan, 3., 3., 3.])
+
+
 @pytest.mark.parametrize(("length", "expected"), [(3, [-1., 0., 1., 1., 1.]), (7, [-3., -2., -1., 0., 1.])])
 def test_window_processors_see_actual_samples_before_final_padding_or_truncation(length, expected):
     calls = []
@@ -592,9 +684,7 @@ def test_window_processors_see_actual_samples_before_final_padding_or_truncation
     start = pd.Timestamp("2024-01-01")
     frame = pd.DataFrame({"A": np.arange(length, dtype=float)}, index=pd.date_range(start, periods=length, freq="1s"))
     file = EDFFile(channels=["A"], path="recording.edf", start_date=start, preprocessors={("signal", "A"): [center]})
-    file.get_x = lambda *args, **kwargs: frame.copy()
-    raw, _ = data.read_channels(file, start, start + pd.Timedelta("5s"), [(data.channels[0], "A")])["physical"]
-    pd.testing.assert_frame_equal(raw, frame)
+    data.read_channels = lambda *args, **kwargs: {"physical": (frame.copy(), {"A": "uV"})}
     actual = data.get_item(file, start)["data"][:, 0]
     np.testing.assert_allclose(actual, expected)
     assert calls == [length]
@@ -676,7 +766,7 @@ def test_final_callback_runs_after_processors_and_before_padding_or_truncation()
     start = pd.Timestamp("2024-01-01")
     frame = pd.DataFrame({"A": [1., 2., 3.]}, index=pd.date_range(start, periods=3, freq="1s"))
     file = EDFFile(channels=["A"], path="recording.edf", start_date=start, preprocessors={("source", "A"): [WindowCenter()]})
-    file.get_x = lambda *args, **kwargs: frame.copy()
+    data.read_channels = lambda *args, **kwargs: {"physical": (frame.copy(), {"A": "uV"})}
     np.testing.assert_allclose(data.get_item(file, start)["data"][:, 0], [1., 0., 1., 1., 1.])
 
 
@@ -685,7 +775,7 @@ def test_final_callback_can_shorten_values_before_padding():
     start = pd.Timestamp("2024-01-01")
     frame = pd.DataFrame({"A": [1., 2., 3., 4., 5.]}, index=pd.date_range(start, periods=5, freq="1s"))
     file = EDFFile(channels=["A"], path="recording.edf", start_date=start, preprocessors={("source", "A"): []})
-    file.get_x = lambda *args, **kwargs: frame.copy()
+    data.read_channels = lambda *args, **kwargs: {"physical": (frame.copy(), {"A": "uV"})}
     np.testing.assert_allclose(data.get_item(file, start)["data"][:, 0], [1., 2., 3., 3., 3.])
 
 

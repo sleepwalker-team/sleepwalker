@@ -22,6 +22,7 @@ def to_model_response(model: ModelInfo) -> ModelResponse:
         classes=list(model.classes),
         input_channels=list(model.input_channels),
         capabilities=list(model.capabilities),
+        output_kind=model.output_kind,
         output_resolution=model.output_resolution,
     )
 

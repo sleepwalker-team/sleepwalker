@@ -1,6 +1,13 @@
 from dataclasses import dataclass, replace
+from enum import Enum
 
 import pandas as pd
+
+
+class PredictionKind(str, Enum):
+    EPOCH = "epoch"
+    CONTINUOUS = "continuous"
+    EVENT = "event"
 
 
 @dataclass(frozen=True)
@@ -11,6 +18,7 @@ class PredictionResult:
     classes: tuple[str, ...]
     resolution: float
     frame: pd.DataFrame
+    kind: PredictionKind = PredictionKind.EPOCH
 
 
 class PredictionStore:

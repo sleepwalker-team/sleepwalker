@@ -45,6 +45,7 @@ def test_list_models_returns_registered_models_sorted_by_id() -> None:
                 "classes": ["wake", "n1", "n2", "n3", "rem"],
                 "input_channels": ["eeg"],
                 "capabilities": ["classification"],
+                "output_kind": "epoch",
                 "output_resolution": 30.0,
             },
             {
@@ -54,6 +55,7 @@ def test_list_models_returns_registered_models_sorted_by_id() -> None:
                 "classes": ["no_arousal", "arousal"],
                 "input_channels": ["eeg"],
                 "capabilities": ["classification"],
+                "output_kind": "epoch",
                 "output_resolution": 0.1,
             },
         ]
@@ -79,6 +81,7 @@ def test_get_model_returns_registered_model() -> None:
 
     assert response.status_code == 200
     assert response.json()["id"] == "sleep-model"
+    assert response.json()["output_kind"] == "epoch"
     assert response.json()["classes"] == [
         "wake",
         "n1",

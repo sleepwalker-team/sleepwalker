@@ -6,6 +6,8 @@ from json import JSONDecodeError
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
+from ..stores.prediction_store import PredictionKind
+
 
 class InvalidModelPackageError(Exception):
     pass
@@ -21,6 +23,7 @@ class ModelInfo:
     capabilities: tuple[str, ...]
     output_resolution: float
     package_path: Path
+    output_kind: PredictionKind = PredictionKind.EPOCH
 
 
 def _read_non_empty_string(model: dict, field: str) -> str:
@@ -52,6 +55,18 @@ def _read_positive_number(model: dict, field: str) -> float:
     if not math.isfinite(result) or result <= 0:
         raise ValueError(f"Model field '{field}' must be positive.")
     return result
+
+
+def _read_output_kind(model: dict) -> PredictionKind:
+    value = model.get("output_kind", PredictionKind.EPOCH.value)
+
+    try:
+        return PredictionKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Model field 'output_kind' must be one of: "
+            f"{', '.join(kind.value for kind in PredictionKind)}."
+        ) from exc
 
 
 def read_model_manifest(package_path: Path) -> ModelInfo:
@@ -91,6 +106,7 @@ def read_model_manifest(package_path: Path) -> ModelInfo:
             capabilities=_read_string_list(model, "capabilities"),
             output_resolution=_read_positive_number(model, "output_resolution"),
             package_path=package_path,
+            output_kind=_read_output_kind(model),
         )
 
     except (KeyError, TypeError, ValueError) as exc:

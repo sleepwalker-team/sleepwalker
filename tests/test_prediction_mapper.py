@@ -3,8 +3,12 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from sleepwalker.server.services.prediction_mapper import map_epoch_predictions
-from sleepwalker.server.stores.prediction_store import PredictionResult
+from sleepwalker.server.services.prediction_mapper import (
+    map_continuous_predictions,
+    map_epoch_predictions,
+    map_event_predictions,
+)
+from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionResult
 
 
 def test_maps_multiclass_predictions_to_relative_epochs() -> None:
@@ -58,3 +62,56 @@ def test_maps_multitask_steps_and_averages_duplicate_times() -> None:
     assert predictions[0].probabilities == pytest.approx({"no_arousal": 0.6, "arousal": 0.4})
     assert predictions[1].start == 10.0
     assert predictions[1].label == "arousal"
+
+
+def test_maps_continuous_predictions_without_creating_intervals() -> None:
+    result = PredictionResult(
+        session_id="sess-test",
+        model_id="arousal-model",
+        task="arousal",
+        classes=("no_arousal", "arousal"),
+        resolution=1.0,
+        frame=pd.DataFrame(
+            {
+                "time": [5.0, 6.0],
+                "prob__no_arousal": [0.8, 0.1],
+                "prob__arousal": [0.2, 0.9],
+            }
+        ),
+        kind=PredictionKind.CONTINUOUS,
+    )
+
+    predictions = map_continuous_predictions(result, datetime(2025, 1, 1))
+
+    assert [prediction.time for prediction in predictions] == [5.0, 6.0]
+    assert predictions[1].probabilities == {"no_arousal": 0.1, "arousal": 0.9}
+
+
+def test_maps_event_predictions_with_explicit_boundaries() -> None:
+    result = PredictionResult(
+        session_id="sess-test",
+        model_id="arousal-model",
+        task="arousal",
+        classes=("no_arousal", "arousal"),
+        resolution=1.0,
+        frame=pd.DataFrame(
+            {
+                "start": [12.5],
+                "end": [18.0],
+                "prob__no_arousal": [0.08],
+                "prob__arousal": [0.92],
+            }
+        ),
+        kind=PredictionKind.EVENT,
+    )
+
+    predictions = map_event_predictions(result, datetime(2025, 1, 1))
+
+    assert len(predictions) == 1
+    assert predictions[0].start == 12.5
+    assert predictions[0].end == 18.0
+    assert predictions[0].label == "arousal"
+    assert predictions[0].probabilities == {
+        "no_arousal": 0.08,
+        "arousal": 0.92,
+    }

@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+from ..stores.prediction_store import PredictionKind
+
 
 class ModelResponse(BaseModel):
     id: str
@@ -8,6 +10,7 @@ class ModelResponse(BaseModel):
     classes: list[str]
     input_channels: list[str]
     capabilities: list[str]
+    output_kind: PredictionKind
     output_resolution: float
 
 

@@ -4,15 +4,20 @@ from fastapi import APIRouter, Depends, Request, status
 
 from ..errors import APIError
 from ..schemas.prediction import (
+    ContinuousPredictionResponse,
     EpochPredictionResponse,
+    EventPredictionResponse,
     PredictionResponse,
-    TaskKind,
     TaskListResponse,
     TaskResponse,
 )
-from ..services.prediction_mapper import map_epoch_predictions
+from ..services.prediction_mapper import (
+    map_continuous_predictions,
+    map_epoch_predictions,
+    map_event_predictions,
+)
 from ..services.session_service import SessionService
-from ..stores.prediction_store import PredictionResult, PredictionStore
+from ..stores.prediction_store import PredictionKind, PredictionResult, PredictionStore
 from ..stores.session_store import SessionState
 
 
@@ -31,7 +36,7 @@ def to_task_response(result: PredictionResult) -> TaskResponse:
     return TaskResponse(
         id=result.task,
         name=result.task.replace("_", " ").capitalize(),
-        kind=TaskKind.EPOCH,
+        kind=result.kind,
         classes=list(result.classes),
         resolution=result.resolution,
     )
@@ -114,18 +119,28 @@ def get_predictions(
             details={"start": start, "end": range_end},
         )
 
-    predictions = [
-        prediction
-        for prediction in map_epoch_predictions(result, session.recording_start)
-        if prediction.end > start and prediction.start < range_end
-    ]
+    if result.kind == PredictionKind.EPOCH:
+        predictions = [
+            EpochPredictionResponse(**vars(prediction))
+            for prediction in map_epoch_predictions(result, session.recording_start)
+            if prediction.end > start and prediction.start < range_end
+        ]
+    elif result.kind == PredictionKind.CONTINUOUS:
+        predictions = [
+            ContinuousPredictionResponse(**vars(prediction))
+            for prediction in map_continuous_predictions(result, session.recording_start)
+            if start <= prediction.time < range_end
+        ]
+    else:
+        predictions = [
+            EventPredictionResponse(**vars(prediction))
+            for prediction in map_event_predictions(result, session.recording_start)
+            if prediction.end > start and prediction.start < range_end
+        ]
 
     return PredictionResponse(
         task=result.task,
-        kind=TaskKind.EPOCH,
+        kind=result.kind,
         classes=list(result.classes),
-        predictions=[
-            EpochPredictionResponse(**vars(prediction))
-            for prediction in predictions
-        ],
+        predictions=predictions,
     )

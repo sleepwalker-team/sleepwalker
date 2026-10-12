@@ -1,16 +1,15 @@
-from enum import Enum
-
 from pydantic import BaseModel
 
+from ..stores.prediction_store import PredictionKind
 
-class TaskKind(str, Enum):
-    EPOCH = "epoch"
+# Backwards-compatible name used by earlier server code.
+TaskKind = PredictionKind
 
 
 class TaskResponse(BaseModel):
     id: str
     name: str
-    kind: TaskKind
+    kind: PredictionKind
     classes: list[str]
     resolution: float
 
@@ -26,8 +25,24 @@ class EpochPredictionResponse(BaseModel):
     probabilities: dict[str, float]
 
 
+class ContinuousPredictionResponse(BaseModel):
+    time: float
+    probabilities: dict[str, float]
+
+
+class EventPredictionResponse(BaseModel):
+    start: float
+    end: float
+    label: str
+    probabilities: dict[str, float]
+
+
 class PredictionResponse(BaseModel):
     task: str
-    kind: TaskKind
+    kind: PredictionKind
     classes: list[str]
-    predictions: list[EpochPredictionResponse]
+    predictions: list[
+        EpochPredictionResponse
+        | ContinuousPredictionResponse
+        | EventPredictionResponse
+    ]

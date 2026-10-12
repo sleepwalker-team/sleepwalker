@@ -119,6 +119,7 @@ class PackageInferenceRunner(InferenceRunner):
                     classes=model.classes,
                     resolution=model.output_resolution,
                     frame=frame,
+                    kind=model.output_kind,
                 )
             )
             report_progress(

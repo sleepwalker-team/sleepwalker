@@ -1,9 +1,17 @@
-import pytest
-from pathlib import Path
 import json
+from pathlib import Path
 from zipfile import ZipFile
-from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry, read_model_manifest, InvalidModelPackageError
-from sleepwalker.server.services.model_registry import InvalidModelPackageError, ModelInfo, ModelRegistry, load_model_registry, read_model_manifest
+
+import pytest
+
+from sleepwalker.server.services.model_registry import (
+    InvalidModelPackageError,
+    ModelInfo,
+    ModelRegistry,
+    load_model_registry,
+    read_model_manifest,
+)
+from sleepwalker.server.stores.prediction_store import PredictionKind
 
 
 def make_model(model_id: str) -> ModelInfo:
@@ -68,6 +76,7 @@ def test_read_model_manifest_from_swmodel_package(tmp_path) -> None:
 
     model = read_model_manifest(package_path)
 
+    assert model.output_kind == PredictionKind.EPOCH
     assert model == ModelInfo(
         id="sleep-model",
         name="Sleep Stage Model",
@@ -78,6 +87,31 @@ def test_read_model_manifest_from_swmodel_package(tmp_path) -> None:
         output_resolution=30.0,
         package_path=package_path,
     )
+
+
+def test_read_model_manifest_reads_output_kind(tmp_path) -> None:
+    package_path = tmp_path / "continuous-model.swmodel"
+    metadata = make_manifest_metadata()
+    metadata["model"]["output_kind"] = "continuous"
+
+    with ZipFile(package_path, "w") as package:
+        package.writestr("meta.json", json.dumps(metadata))
+
+    model = read_model_manifest(package_path)
+
+    assert model.output_kind == PredictionKind.CONTINUOUS
+
+
+def test_read_model_manifest_rejects_invalid_output_kind(tmp_path) -> None:
+    package_path = tmp_path / "invalid-output-kind.swmodel"
+    metadata = make_manifest_metadata()
+    metadata["model"]["output_kind"] = "interval-ish"
+
+    with ZipFile(package_path, "w") as package:
+        package.writestr("meta.json", json.dumps(metadata))
+
+    with pytest.raises(InvalidModelPackageError, match="Invalid model metadata"):
+        read_model_manifest(package_path)
 
 def test_read_model_manifest_rejects_non_zip_file(tmp_path) -> None:
     package_path = tmp_path / "broken.swmodel"

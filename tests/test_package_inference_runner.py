@@ -8,7 +8,7 @@ from sleepwalker.server.services.job_executor import JobCancelledError, JobExecu
 from sleepwalker.server.services.model_registry import ModelInfo
 from sleepwalker.server.services.package_inference_runner import PackageInferenceRunner
 from sleepwalker.server.stores.job_store import JobPhase
-from sleepwalker.server.stores.prediction_store import PredictionStore
+from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionStore
 from sleepwalker.server.stores.session_store import Session, SessionState
 from sleepwalker.server.validation.study import StudyFormat
 
@@ -42,7 +42,10 @@ def create_session(source_path: Path) -> Session:
     )
 
 
-def create_model(package_path: Path) -> ModelInfo:
+def create_model(
+    package_path: Path,
+    output_kind: PredictionKind = PredictionKind.EPOCH,
+) -> ModelInfo:
     return ModelInfo(
         id="sleep-model",
         name="Sleep model",
@@ -52,6 +55,7 @@ def create_model(package_path: Path) -> ModelInfo:
         capabilities=("classification",),
         output_resolution=30.0,
         package_path=package_path,
+        output_kind=output_kind,
     )
 
 
@@ -79,6 +83,7 @@ def test_package_runner_stores_predictions_after_success(tmp_path) -> None:
     result = store.get("sess-test", "sleep-model")
     assert result is not None
     assert result.task == "sleep_stage"
+    assert result.kind == PredictionKind.EPOCH
     assert result.classes == ("wake", "n1")
     assert result.frame["prediction"].tolist() == ["wake"]
     assert loaded == [(package_path, "cpu")]
@@ -91,10 +96,42 @@ def test_package_runner_stores_predictions_after_success(tmp_path) -> None:
     ]
 
 
+def test_package_runner_preserves_model_output_kind(tmp_path) -> None:
+    source_path = tmp_path / "recording.edf"
+    package = FakePackage(
+        pd.DataFrame(
+            {
+                "time": [1.0],
+                "prob__wake": [0.1],
+                "prob__n1": [0.9],
+            }
+        )
+    )
+    store = PredictionStore()
+    runner = PackageInferenceRunner(
+        store,
+        package_loader=lambda _path, _device: package,
+    )
+
+    runner.run(
+        create_session(source_path),
+        [create_model(tmp_path / "model.swmodel", PredictionKind.CONTINUOUS)],
+        lambda *_args: None,
+        lambda: None,
+    )
+
+    result = store.get("sess-test", "sleep-model")
+    assert result is not None
+    assert result.kind == PredictionKind.CONTINUOUS
+
+
 def test_package_runner_rejects_non_edf_session(tmp_path) -> None:
     session = create_session(tmp_path / "recording.edf")
     session.format = StudyFormat.NOX
-    runner = PackageInferenceRunner(PredictionStore(), package_loader=lambda _path, _device: FakePackage(pd.DataFrame()))
+    runner = PackageInferenceRunner(
+        PredictionStore(),
+        package_loader=lambda _path, _device: FakePackage(pd.DataFrame()),
+    )
 
     with pytest.raises(JobExecutionError) as error:
         runner.run(

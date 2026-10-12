@@ -1,23 +1,18 @@
 from datetime import datetime
-from enum import Enum
 
 from pydantic import BaseModel
 
+from ..stores.job_store import JobPhase, JobState
 from .common import ErrorDetail
 
 
-class JobState(str, Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
+class InferenceRequest(BaseModel):
+    models: list[str]
 
 
-class JobPhase(str, Enum):
-    LOADING = "loading"
-    PREPROCESSING = "preprocessing"
-    INFERENCE = "inference"
-    POSTPROCESSING = "postprocessing"
+class JobAcceptedResponse(BaseModel):
+    job_id: str
+    state: JobState
 
 
 class JobResponse(BaseModel):

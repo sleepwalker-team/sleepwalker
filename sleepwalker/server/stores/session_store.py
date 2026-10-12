@@ -1,8 +1,16 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from ..validation.study import SignalInfo, StudyFormat
+
+
+class SessionState(str, Enum):
+    CREATED = "created"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
 
 
 @dataclass
@@ -12,6 +20,7 @@ class Session:
     expires_at: datetime
     last_accessed_at: datetime
     source_files: list[Path]
+    state: SessionState
 
     format: StudyFormat | None = None
     duration: float | None = None
@@ -20,7 +29,7 @@ class Session:
 
 
 class SessionStore:
-    def __init__(self):
+    def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
 
     def add(self, session: Session) -> None:
@@ -31,3 +40,6 @@ class SessionStore:
 
     def delete(self, session_id: str) -> Session | None:
         return self._sessions.pop(session_id, None)
+
+    def list(self) -> list[Session]:
+        return list(self._sessions.values())

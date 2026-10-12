@@ -1,18 +1,21 @@
 from fastapi import APIRouter, Depends, Request, status
+
+from ..errors import APIError
 from ..schemas.model import ModelListResponse, ModelResponse
 from ..services.model_registry import ModelInfo, ModelRegistry
-from ..errors import APIError
 
 router = APIRouter(
     prefix="/api/v1/models",
     tags=["models"],
 )
 
+
 def get_model_registry(request: Request) -> ModelRegistry:
     return request.app.state.model_registry
 
+
 def to_model_response(model: ModelInfo) -> ModelResponse:
-    return ModelResponse( #beschreibt verfügbares Modell, also noch keine Vorhersage
+    return ModelResponse(
         id=model.id,
         name=model.name,
         task=model.task,
@@ -30,13 +33,9 @@ def to_model_response(model: ModelInfo) -> ModelResponse:
 def list_models(
     registry: ModelRegistry = Depends(get_model_registry),
 ) -> ModelListResponse:
-    return ModelListResponse(
-        models=[
-            to_model_response(model)
-            for model in registry.list()
-        ]
-    )
-    
+    return ModelListResponse(models=[to_model_response(model) for model in registry.list()])
+
+
 @router.get(
     "/{model_id}",
     response_model=ModelResponse,

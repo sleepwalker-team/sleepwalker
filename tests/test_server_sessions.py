@@ -1,12 +1,14 @@
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-
-from sleepwalker.server.api import sessions
 from sleepwalker.server.app import create_app
 from sleepwalker.server.services.session_service import SessionService
 from sleepwalker.server.storage.temporary_storage import TemporaryStorage
+from sleepwalker.server.services.job_service import JobService
+from sleepwalker.server.stores.job_store import JobState, JobStore
+from sleepwalker.server.stores.prediction_store import PredictionResult, PredictionStore
 from sleepwalker.server.stores.session_store import SessionStore
 
 
@@ -14,16 +16,12 @@ DATA_DIR = Path(__file__).parent / "data"
 
 
 @pytest.fixture
-def session_api(tmp_path, monkeypatch):
+def session_api(tmp_path):
     store = SessionStore()
     service = SessionService(store)
     storage = TemporaryStorage(tmp_path / "uploads")
 
-    monkeypatch.setattr(sessions, "store", store)
-    monkeypatch.setattr(sessions, "service", service)
-    monkeypatch.setattr(sessions, "storage", storage)
-
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(session_service=service, temporary_storage=storage)) as client:
         yield client, store, storage
 
 
@@ -47,10 +45,12 @@ def test_session_lifecycle_for_valid_edf(session_api):
     created_session = create_response.json()
     session_id = created_session["id"]
 
+    assert created_session["last_accessed_at"] == created_session["created_at"]
     assert created_session["state"] == "ready"
     assert created_session["format"] == "edf"
     assert created_session["duration"] == 3600.0
     assert created_session["recording_start"] == "2025-01-01T00:00:00"
+    assert created_session["tasks"] == []
     assert created_session["signals"] == [
         {
             "id": "EEG",
@@ -76,7 +76,15 @@ def test_session_lifecycle_for_valid_edf(session_api):
     get_response = client.get(f"/api/v1/sessions/{session_id}")
 
     assert get_response.status_code == 200
-    assert get_response.json() == created_session
+
+    retrieved_session = get_response.json()
+
+    assert retrieved_session["expires_at"] > created_session["expires_at"]
+    assert retrieved_session["last_accessed_at"] >= created_session["last_accessed_at"]
+
+    retrieved_session["expires_at"] = created_session["expires_at"]
+    retrieved_session["last_accessed_at"] = created_session["last_accessed_at"]
+    assert retrieved_session == created_session
 
     delete_response = client.delete(f"/api/v1/sessions/{session_id}")
 
@@ -94,6 +102,76 @@ def test_session_lifecycle_for_valid_edf(session_api):
             "details": None,
         }
     }
+
+
+def test_get_session_returns_current_state(tmp_path) -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    storage = TemporaryStorage(tmp_path / "uploads")
+
+    with TestClient(create_app(session_service=service, temporary_storage=storage)) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "created"
+
+
+def test_delete_session_removes_predictions(tmp_path) -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    storage = TemporaryStorage(tmp_path / "uploads")
+    prediction_store = PredictionStore()
+    prediction_store.add(
+        PredictionResult(
+            session_id=session.id,
+            model_id="model-a",
+            task="sleep_stage",
+            classes=("wake", "n1"),
+            resolution=30.0,
+            frame=pd.DataFrame({"prediction": ["wake"]}),
+        )
+    )
+
+    app = create_app(
+        session_service=service,
+        temporary_storage=storage,
+        prediction_store=prediction_store,
+    )
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 204
+    assert prediction_store.list_for_session(session.id) == []
+
+
+def test_delete_session_requests_active_job_cancellation(tmp_path) -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    storage = TemporaryStorage(tmp_path / "uploads")
+    session_directory = storage.root / session.id
+    session_directory.mkdir()
+    job_service = JobService(JobStore())
+    job = job_service.create(session.id, "inference")
+    app = create_app(
+        session_service=service,
+        temporary_storage=storage,
+        job_service=job_service,
+    )
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 204
+    assert service.store.get(session.id) is None
+    assert job.state == JobState.CANCELLING
+    assert session_directory.exists()
+
+    job_service.mark_cancelled(job.id)
+    app.state.session_cleanup_service.finalize_pending_deletion(session.id)
+
+    assert job_service.get(job.id) is None
+    assert not session_directory.exists()
 
 
 def test_invalid_edf_removes_session_and_temporary_files(session_api):
@@ -152,17 +230,21 @@ def test_missing_files_returns_invalid_request_error(session_api):
 
 
 def test_internal_error_is_hidden_and_session_is_cleaned_up(
-    session_api,
+    tmp_path,
     monkeypatch,
 ):
-    _client, store, storage = session_api
+    store = SessionStore()
+    service = SessionService(store)
+    storage = TemporaryStorage(tmp_path / "uploads")
 
     async def fail_to_save_files(*_args, **_kwargs):
         raise RuntimeError("internal implementation detail")
 
     monkeypatch.setattr(storage, "save_files", fail_to_save_files)
 
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    app = create_app(session_service=service, temporary_storage=storage)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/api/v1/sessions",
             files=[
@@ -184,3 +266,39 @@ def test_internal_error_is_hidden_and_session_is_cleaned_up(
     assert "implementation detail" not in response.text
     assert not store._sessions
     assert list(storage.root.iterdir()) == []
+
+
+def test_get_session_includes_prediction_tasks(tmp_path) -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    prediction_store = PredictionStore()
+    prediction_store.add(
+        PredictionResult(
+            session_id=session.id,
+            model_id="sleep-model",
+            task="sleep_stage",
+            classes=("wake", "n1"),
+            resolution=30.0,
+            frame=pd.DataFrame({"prediction": ["wake"]}),
+        )
+    )
+
+    app = create_app(
+        session_service=service,
+        temporary_storage=TemporaryStorage(tmp_path / "uploads"),
+        prediction_store=prediction_store,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"] == [
+        {
+            "id": "sleep_stage",
+            "name": "Sleep stage",
+            "kind": "epoch",
+            "classes": ["wake", "n1"],
+            "resolution": 30.0,
+        }
+    ]

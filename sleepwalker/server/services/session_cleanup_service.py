@@ -4,6 +4,7 @@ from .annotation_service import AnnotationService
 from .job_service import JobService
 from .session_service import SessionService
 from ..storage.temporary_storage import TemporaryStorage
+from ..stores.export_store import ExportStore
 from ..stores.prediction_store import PredictionStore
 
 
@@ -16,12 +17,14 @@ class SessionCleanupService:
         storage: TemporaryStorage,
         prediction_store: PredictionStore,
         annotation_service: AnnotationService,
+        export_store: ExportStore,
     ) -> None:
         self.session_service = session_service
         self.job_service = job_service
         self.storage = storage
         self.prediction_store = prediction_store
         self.annotation_service = annotation_service
+        self.export_store = export_store
         self._pending_deletions: set[str] = set()
         self._lock = RLock()
 
@@ -88,4 +91,5 @@ class SessionCleanupService:
         self.storage.delete_session(session_id)
         self.prediction_store.delete_session(session_id)
         self.annotation_service.delete_session(session_id)
+        self.export_store.delete_session(session_id)
         self.job_service.delete_session(session_id)

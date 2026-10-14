@@ -26,6 +26,7 @@ class Session:
     duration: float | None = None
     recording_start: datetime | None = None
     signals: list[SignalInfo] | None = None
+    model_provenance: list[dict] | None = None
 
 
 class SessionStore:

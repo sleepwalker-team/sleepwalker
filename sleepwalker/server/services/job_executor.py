@@ -34,7 +34,12 @@ class LocalJobExecutor:
     def __init__(self, job_service: JobService) -> None:
         self.job_service = job_service
 
-    def execute(self, job_id: str, operation: JobOperation) -> Job:
+    def execute(
+        self,
+        job_id: str,
+        operation: JobOperation,
+        success_message: str = "Inference completed",
+    ) -> Job:
         if self.job_service.is_cancellation_requested(job_id):
             return self.job_service.mark_cancelled(job_id)
 
@@ -106,7 +111,7 @@ class LocalJobExecutor:
             )
 
         try:
-            return self.job_service.mark_succeeded(job_id)
+            return self.job_service.mark_succeeded(job_id, success_message)
         except ValueError:
             if self.job_service.is_cancellation_requested(job_id):
                 return self.job_service.mark_cancelled(job_id)

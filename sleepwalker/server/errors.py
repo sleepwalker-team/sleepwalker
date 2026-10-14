@@ -52,7 +52,7 @@ async def request_validation_exception_handler(
         status_code=status.HTTP_400_BAD_REQUEST,
         code="INVALID_REQUEST",
         message="Request validation failed.",
-        details={"errors": exc.errors()},
+        details={"errors": jsonable_encoder(exc.errors(), custom_encoder={Exception: str})},
     )
 
 

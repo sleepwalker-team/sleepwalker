@@ -19,6 +19,8 @@ class JobPhase(str, Enum):
     PREPROCESSING = "preprocessing"
     INFERENCE = "inference"
     POSTPROCESSING = "postprocessing"
+    EXPORTING = "exporting"
+    IMPORTING = "importing"
 
 
 @dataclass(frozen=True)

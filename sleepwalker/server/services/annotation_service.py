@@ -119,6 +119,9 @@ class AnnotationService:
 
         return list(current.values())
 
+    def list_edits(self, session_id: str) -> list[AnnotationEdit]:
+        return self.store.list_for_session(session_id)
+
     def _reverted_edit_ids(self, session_id: str) -> set[str]:
         return {
             edit.reverted_edit_id

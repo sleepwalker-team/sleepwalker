@@ -1,6 +1,10 @@
+import hashlib
+import json
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import UploadFile
 
@@ -80,3 +84,78 @@ class TemporaryStorage:
     def delete_session(self, session_id: str) -> None:
         session_dir = self.root / session_id
         shutil.rmtree(session_dir, ignore_errors=True)
+
+    def write_json_export(
+        self,
+        session_id: str,
+        export_id: str,
+        payload: dict,
+    ) -> Path:
+        export_directory = self.root / session_id / "exports"
+        export_directory.mkdir(parents=True, exist_ok=True)
+        destination = export_directory / f"{export_id}.json"
+        temporary_path = export_directory / f".{export_id}.tmp"
+
+        try:
+            with temporary_path.open("w", encoding="utf-8") as target:
+                json.dump(payload, target, ensure_ascii=False, allow_nan=False)
+
+            temporary_path.replace(destination)
+            return destination
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+    def write_workspace_export(
+        self,
+        session_id: str,
+        export_id: str,
+        documents: dict,
+        sources: dict[str, Path],
+        check_cancelled: Callable[[], None],
+    ) -> Path:
+        export_directory = self.root / session_id / "exports"
+        export_directory.mkdir(parents=True, exist_ok=True)
+        destination = export_directory / f"{export_id}.sleepwalker.zip"
+        temporary_path = export_directory / f".{export_id}.tmp"
+        checksums = {}
+
+        try:
+            with ZipFile(temporary_path, "w", compression=ZIP_DEFLATED) as archive:
+                for name, document in documents.items():
+                    if name == "manifest.json":
+                        continue
+
+                    check_cancelled()
+                    data = json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                    archive.writestr(name, data)
+                    checksums[name] = hashlib.sha256(data).hexdigest()
+
+                for name, path in sources.items():
+                    checksum = hashlib.sha256()
+                    check_cancelled()
+                    with path.open("rb") as source, archive.open(name, "w", force_zip64=True) as target:
+                        while chunk := source.read(UPLOAD_CHUNK_SIZE):
+                            check_cancelled()
+                            target.write(chunk)
+                            checksum.update(chunk)
+
+                    checksums[name] = checksum.hexdigest()
+
+                manifest = {**documents["manifest.json"], "checksums": checksums}
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+                )
+
+            check_cancelled()
+            temporary_path.replace(destination)
+            return destination
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+    def delete_export(self, session_id: str, export_id: str) -> None:
+        directory = self.root / session_id / "exports"
+        for suffix in (".json", ".sleepwalker.zip"):
+            (directory / f"{export_id}{suffix}").unlink(missing_ok=True)

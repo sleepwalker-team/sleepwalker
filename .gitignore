@@ -38,3 +38,7 @@ embeddings
 logs
 checkpoint.pt
 wandb
+
+#server
+/results.json
+/study.sleepwalker.zip

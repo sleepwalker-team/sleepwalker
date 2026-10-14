@@ -10,6 +10,7 @@ from sleepwalker.server.services.session_cleanup_service import SessionCleanupSe
 from sleepwalker.server.services.session_service import SessionService
 from sleepwalker.server.storage.temporary_storage import TemporaryStorage
 from sleepwalker.server.stores.annotation_store import AnnotationStore
+from sleepwalker.server.stores.export_store import Export, ExportState, ExportStore
 from sleepwalker.server.stores.job_store import JobPhase, JobState, JobStore
 from sleepwalker.server.stores.prediction_store import PredictionResult, PredictionStore
 from sleepwalker.server.stores.session_store import SessionStore
@@ -81,6 +82,7 @@ def test_cleanup_removes_expired_session_but_keeps_session_with_active_job(
         storage=storage,
         prediction_store=prediction_store,
         annotation_service=annotation_service,
+        export_store=ExportStore(),
     )
 
     assert cleanup_service.cleanup_expired() == [removable_session.id]
@@ -114,6 +116,7 @@ def test_requested_delete_waits_for_active_job_before_removing_resources(
         storage=storage,
         prediction_store=prediction_store,
         annotation_service=annotation_service,
+        export_store=ExportStore(),
     )
 
     assert cleanup_service.request_delete(session.id) is True
@@ -142,6 +145,7 @@ def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
         storage=storage,
         prediction_store=PredictionStore(),
         annotation_service=AnnotationService(AnnotationStore()),
+        export_store=ExportStore(),
     )
     operation_was_called = False
 
@@ -161,3 +165,38 @@ def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
     assert operation_was_called is False
     assert job_service.get(job.id) is None
     assert not session_directory.exists()
+
+
+def test_cleanup_removes_export_metadata_and_file(tmp_path) -> None:
+    session_service = SessionService(SessionStore())
+    job_service = JobService(JobStore())
+    storage = TemporaryStorage(tmp_path / "uploads")
+    export_store = ExportStore()
+    session = session_service.create(source_files=[])
+    export_path = storage.write_json_export(session.id, "export-test", {"test": True})
+    export_store.add(
+        Export(
+            id="export-test",
+            session_id=session.id,
+            job_id="job-test",
+            state=ExportState.READY,
+            format="json",
+            mode="results",
+            created_at=session.created_at,
+            expires_at=session.expires_at,
+            size=export_path.stat().st_size,
+            path=export_path,
+        )
+    )
+    cleanup_service = SessionCleanupService(
+        session_service=session_service,
+        job_service=job_service,
+        storage=storage,
+        prediction_store=PredictionStore(),
+        annotation_service=AnnotationService(AnnotationStore()),
+        export_store=export_store,
+    )
+
+    assert cleanup_service.delete_session(session.id) is True
+    assert export_store.get("export-test") is None
+    assert not export_path.exists()

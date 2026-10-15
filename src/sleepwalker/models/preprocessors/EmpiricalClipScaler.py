@@ -17,8 +17,8 @@ class EmpiricalClipScaler(Preprocessor):
         
     def __init__(self, q=0.9, scale=1, channels=None, **kwargs):
         super().__init__(channels=channels)
-        self.mins = None
-        self.maxs = None
+        self.register_buffer("mins", None)
+        self.register_buffer("maxs", None)
         self.q = q
         self.scale = scale
 

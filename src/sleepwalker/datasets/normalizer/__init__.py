@@ -4,6 +4,6 @@ from .EEGFilterNormalizer import EEGFilterNormalizer
 from .RespirationFilterNormalizer import RespirationFilterNormalizer
 from .SaturationFilterNormalizer import SaturationFilterNormalizer
 from .PulseFilterNormalizer import PulseFilterNormalizer
-from .RecordingNormalizer import RecordingZScore, RecordingRobustScale
+from .RecordingNormalizer import RecordingZScore, RecordingRobustScale, RecordingMeanTrimmedZScore
 from .FixedScale import FixedScale
 from .ConvertUnit import ConvertUnit

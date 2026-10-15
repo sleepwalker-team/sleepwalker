@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from sleepwalker.deployment.evaluation import condition_endpoint, read_prediction_feather, validate_dependencies, write_prediction_feather
-from sleepwalker.cli.evaluate_system import analyze_patient
+from sleepwalker.deployment.evaluation import analyze_patient
 import sleepwalker.cli.evaluate_system as system_cli
 
 

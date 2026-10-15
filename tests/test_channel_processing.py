@@ -23,10 +23,12 @@ from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.Ruhrlandklinik import get_preprocessors as ruhrland_preprocessors
 from sleepwalker.datasets.SHHS import correct_shhs_waveform, correct_shhs_saturation
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-from sleepwalker.datasets.normalizer import FixedScale, RecordingRobustScale, RecordingZScore, RespirationFilterNormalizer, SaturationFilterNormalizer
+from sleepwalker.datasets.normalizer import FixedScale, RecordingMeanTrimmedZScore, RecordingRobustScale, RecordingZScore, RespirationFilterNormalizer, SaturationFilterNormalizer
 from sleepwalker.deployment.package import assert_single_dataset_compatible
 from sleepwalker.deployment import PackagedModel
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
+from sleepwalker.training.callbacks import map_events
+from functools import partial
 
 
 def write_edf(path, specifications, frequency=20, seconds=20):
@@ -117,8 +119,9 @@ def test_shared_source_has_independent_units_and_scalers(recording):
 
 
 @pytest.mark.parametrize("resample_type", ["nearest", "polyphase"])
-def test_recording_scaler_is_reused_for_overlapping_windows(recording, resample_type):
-    data = dataset([ChannelConfig("signal", ["A"], preprocessors=[RecordingZScore()])], resample_type=resample_type)
+@pytest.mark.parametrize("scaler_type", [RecordingZScore, RecordingMeanTrimmedZScore])
+def test_recording_scaler_is_reused_for_overlapping_windows(recording, resample_type, scaler_type):
+    data = dataset([ChannelConfig("signal", ["A"], preprocessors=[scaler_type()])], resample_type=resample_type)
     file = data.prepare_patient(recording, raise_errors=True)
     first = data.get_item(file, file.start_date + pd.Timedelta("2s"))["data"]
     second = data.get_item(file, file.start_date + pd.Timedelta("4s"))["data"]
@@ -190,17 +193,20 @@ def test_read_mode_can_differ_between_aliases(recording):
 
 
 class AnnotatedDataset(BaseDataset):
+    def supported_events(self):
+        return ["keep", "drop"]
+
     def get_event_df(self, edf_path, start_datetime):
         return pd.DataFrame({"Label": ["keep", "drop"], "Starttime": [start_datetime, start_datetime + pd.Timedelta("10s")], "Endtime": [start_datetime + pd.Timedelta("10s"), start_datetime + pd.Timedelta("20s")]})
 
 
-def test_annotation_callback_does_not_change_recording_fitting_interval(recording):
+def test_annotation_callback_sets_retained_bounds_before_recording_fitting(recording):
     means = []
     for label in ("keep", "drop"):
-        data = AnnotatedDataset(channels=[ChannelConfig("signal", ["A"], preprocessors=[RecordingZScore()])], sample_frequency=40, total_input="5s", stride="1s", event_mapping={"keep": "keep", "drop": "drop"}, prepare_patient=lambda label_df, label_extra_df, patient: (label_df[label_df.Label == label], label_extra_df))
+        data = AnnotatedDataset(channels=[ChannelConfig("signal", ["A"], preprocessors=[RecordingZScore()])], sample_frequency=40, total_input="5s", stride="1s", annotation_labels=['keep', 'drop'], prepare_events=partial(map_events, mapping={'keep': 'keep', 'drop': 'drop'}, remove_unmapped=True), prepare_patient=lambda label_df, label_extra_df, patient: (label_df[label_df.Label == label], label_extra_df))
         file = data.prepare_patient(recording, raise_errors=True)
         means.append(file.preprocessors[("signal", "A")][0].mean)
-    assert means[0] == means[1]
+    assert not np.isclose(means[0], means[1])
 
 
 def test_invalid_unused_alias_keeps_valid_source(recording):
@@ -253,7 +259,7 @@ def test_unit_corrections_only_supply_missing_labels(processor, expected):
 
 def test_corrections_survive_inference_cloning_and_reload(tmp_path):
     path = write_edf(tmp_path / "apples.edf", [{"label": "LOC", "dimension": "."}])
-    source = Apples(channels=[ChannelConfig('eog', ['LOC'], preprocessors=[*apples_preprocessors('LOC'), ConvertUnit('uV'), RecordingZScore()])], sample_frequency=40, total_input="5s")
+    source = Apples(load_annotations=False, channels=[ChannelConfig('eog', ['LOC'], preprocessors=[*apples_preprocessors('LOC'), ConvertUnit('uV'), RecordingZScore()])], sample_frequency=40, total_input="5s")
     for inference in (source, UnlabelledDataset.from_dataset(source), UnlabelledDataset.from_dataset(source).clone()):
         loaded = cloudpickle.loads(cloudpickle.dumps(inference))
         file = loaded.prepare_patient(path, raise_errors=True)
@@ -263,7 +269,7 @@ def test_corrections_survive_inference_cloning_and_reload(tmp_path):
 
 def test_spo2_decoding_retains_nonidentity_mapping_and_absolute_percent(tmp_path):
     path = write_edf(tmp_path / "spo2.edf", [{"label": "SpO2", "dimension": ".", "physical_min": -13, "physical_max": 115, "digital_min": 0, "digital_max": 255, "samples": 205}])
-    source = Apples(channels=[ChannelConfig('saturation', ['SpO2'], preprocessors=[*apples_preprocessors('SpO2'), ConvertUnit('%'), SaturationFilterNormalizer(fs=40, normalize=False)])], sample_frequency=40, total_input="5s")
+    source = Apples(load_annotations=False, channels=[ChannelConfig('saturation', ['SpO2'], preprocessors=[*apples_preprocessors('SpO2'), ConvertUnit('%'), SaturationFilterNormalizer(fs=40, normalize=False)])], sample_frequency=40, total_input="5s")
     file = source.prepare_patient(path, raise_errors=True)
     expected = 205 * 128/255 - 13
     np.testing.assert_allclose(source.get_item(file, file.start_date)["data"], expected, atol=1e-4)
@@ -347,7 +353,7 @@ class ProcessingClassifier(BaseModel, ClassifierModel):
 
 def test_new_processing_package_predictions_survive_save_reload(tmp_path):
     path = write_edf(tmp_path / "apples.edf", [{"label": "LOC", "dimension": "."}])
-    source = Apples(channels=[ChannelConfig('EOG', ['LOC'], preprocessors=[*apples_preprocessors('LOC'), ConvertUnit('uV'), RecordingZScore()])], sample_frequency=40, total_input="5s", stride="5s")
+    source = Apples(load_annotations=False, channels=[ChannelConfig('EOG', ['LOC'], preprocessors=[*apples_preprocessors('LOC'), ConvertUnit('uV'), RecordingZScore()])], sample_frequency=40, total_input="5s", stride="5s")
     contract = {"type": "single-head-multiclass", "classes": ["positive", "negative"], "sequence_len": 1, "target_resolution": "5s"}
     package = PackagedModel(name="processing", model=ProcessingClassifier(), dataset=UnlabelledDataset.from_dataset(source), task="test", classification_contract=contract)
     before = package.predict_patient(path, progress=False)
@@ -503,10 +509,13 @@ def test_sparse_annotation_gaps_do_not_change_loaded_data_or_fitting(tmp_path):
     path = write_edf(tmp_path / "sparse.edf", [{"label": "A"}], seconds=60)
 
     class SparseDataset(BaseDataset):
+        def supported_events(self):
+            return ["keep"]
+
         def get_event_df(self, edf_path, start_datetime):
             return pd.DataFrame({"Label": ["keep", "keep"], "Starttime": [start_datetime, start_datetime + pd.Timedelta("55s")], "Endtime": [start_datetime + pd.Timedelta("5s"), start_datetime + pd.Timedelta("60s")]})
 
-    data = SparseDataset(channels=[ChannelConfig("signal", ["A"], preprocessors=[RecordingZScore()])], sample_frequency=40, total_input="5s", stride="1s", event_mapping={"keep": "keep"})
+    data = SparseDataset(channels=[ChannelConfig("signal", ["A"], preprocessors=[RecordingZScore()])], sample_frequency=40, total_input="5s", stride="1s", annotation_labels=['keep'], prepare_events=partial(map_events, mapping={'keep': 'keep'}, remove_unmapped=True))
     file = data.prepare_patient(path, raise_errors=True)
     raw = file.get_x(file.start_date, file.end_date, 40, "nearest")
     scaler = file.preprocessors[("signal", "A")][0]

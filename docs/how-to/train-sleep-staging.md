@@ -22,6 +22,7 @@ from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
 from sleepwalker.models.AttnSleep import AttnSleep
 from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
 from sleepwalker.trainer.Run import RunCfg, run
+from sleepwalker.training.callbacks import map_events
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 
 
@@ -31,14 +32,8 @@ def make_dataset():
     return SleepEDFx(
         channels=[ChannelConfig("eeg", ["EEG Fpz-Cz"], preprocessors=[EEGFilterNormalizer(fs=100)], unit="uV")],
         sample_frequency=100,
-        event_mapping={
-            "sleep stage w": "wake",
-            "sleep stage 1": "n1",
-            "sleep stage 2": "n2",
-            "sleep stage 3": "n3",
-            "sleep stage 4": "n3",
-            "sleep stage r": "rem",
-        },
+        annotation_labels=classes,
+        prepare_events=partial(map_events, mapping={label: label for label in classes}),
         total_input="30s",
         stride="30s",
         prepare_target=partial(prepare_multiclass_target, target_classes=classes, target_resolution="30s"),

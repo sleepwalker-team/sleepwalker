@@ -63,7 +63,7 @@ class UnlabelledDataset(BaseDataset):
             "input_channels": input_channels,
             "group_sampling_strategy": group_sampling_strategy,
         }
-        super().__init__(**self._init_kwargs, event_mapping=None, prepare_target=None, force_one_day=False)
+        super().__init__(**self._init_kwargs, load_annotations=False, force_one_day=False)
         if input_channels is not None:
             self._init_kwargs["input_channels"] = list(self.input_channels)
 
@@ -73,7 +73,7 @@ class UnlabelledDataset(BaseDataset):
         if not isinstance(dataset, BaseDataset):
             raise TypeError(f"Cannot derive raw-EDF inference preprocessing from {type(dataset).__name__}.")
         return cls(
-            channels=dataset.channels,
+            channels=copy.deepcopy(dataset.channels),
             sample_frequency=dataset.sample_frequency,
             resample_type=dataset.resample_type,
             total_input=dataset.total_input,
@@ -105,3 +105,6 @@ class UnlabelledDataset(BaseDataset):
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Signal that unlabelled datasets do not provide event annotations."""
         raise ValueError("UnlabelledDataset does not provide labels.")
+
+    def supported_events(self) -> list[str]:
+        return []

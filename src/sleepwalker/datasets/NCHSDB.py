@@ -3,6 +3,10 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from .Basedataset import BaseDataset  
+from sleepwalker.datasets.events import decode_event_labels
+
+
+NCHSDB_EVENT_LABELS = {'sleep stage w': 'wake', 'sleep stage 1': 'n1', 'sleep stage n1': 'n1', 'sleep stage 2': 'n2', 'sleep stage n2': 'n2', 'sleep stage 3': 'n3', 'sleep stage n3': 'n3', 'sleep stage r': 'rem', 'sleep stage rem': 'rem', 'sleep stage ?': 'unscored'}
 
 
 class NCHSDB(BaseDataset):
@@ -188,6 +192,9 @@ class NCHSDB(BaseDataset):
         self.label_should_contain = label_should_contain
         super().__init__(**kwargs)
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*NCHSDB_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """
         Load TSV annotations for the NCHSDB dataset.
@@ -227,4 +234,4 @@ class NCHSDB(BaseDataset):
             df.loc[~df["Label"].str.contains(self.label_should_contain, na=False), :] = None
             df = df.dropna()
 
-        return df[["Label", "Starttime", "Endtime", "Duration"]] 
+        return decode_event_labels(df[["Label", "Starttime", "Endtime", "Duration"]], mapping=NCHSDB_EVENT_LABELS)

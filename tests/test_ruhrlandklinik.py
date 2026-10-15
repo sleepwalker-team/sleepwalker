@@ -8,8 +8,8 @@ def make_dataset() -> Ruhrlandklinik:
     return Ruhrlandklinik(
         channels=[],
         sample_frequency=1,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
 
 
@@ -106,8 +106,8 @@ def test_get_channels_grouped_keeps_candidates_but_exposes_grouped_inputs():
         channels=channels,
         sample_frequency=100,
         total_input="30s",
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
 
     assert dataset.get_input_channels() == ["EEG", "Chin EMG"]

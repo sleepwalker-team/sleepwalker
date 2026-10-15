@@ -250,7 +250,7 @@ def test_checkpoint_resume_preserves_previous_measurements(tmp_path, monkeypatch
     checkpoint = tmp_path / "final/checkpoint.pt"
     checkpoint.parent.mkdir()
     (tmp_path / "hparams.yml").write_text(yaml.safe_dump(config))
-    monkeypatch.setattr(train_cli.BaseTrainer, "load_checkpoint", lambda path: (cfg.trainer, cfg.model))
+    monkeypatch.setattr(train_cli, "load_checkpoint", lambda path: (cfg.trainer, cfg.model))
     monkeypatch.setattr(train_cli, "initialize_datasets", lambda *args, **kwargs: (cfg.train_datasets, cfg.val_datasets, cfg.test_datasets))
 
     restored = train_cli.runcfg_from_checkpoint(checkpoint)

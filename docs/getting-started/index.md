@@ -24,7 +24,6 @@ sleepwalker --help
 Install additional dependencies only when you need them:
 
 ```bash
-python -m pip install -e ".[datasets]"     # spreadsheet and archive-backed datasets
 python -m pip install -e ".[tracking]"     # MLflow and Weights & Biases
 python -m pip install -e ".[dev,docs]"     # tests and documentation
 ```

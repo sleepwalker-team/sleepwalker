@@ -463,7 +463,6 @@ def normalize_multitask_config(task_config: dict[str, dict]):
             raise ValueError(f"Task '{task}' is missing sequence_len.")
 
     normalized = OrderedDict()
-    used_classes = set()
     for task, config in task_config.items():
         labels = list(config["labels"])
         if len(labels) == 0:
@@ -480,10 +479,8 @@ def normalize_multitask_config(task_config: dict[str, dict]):
         if sequence_len < 1:
             raise ValueError(f"Task '{task}' sequence_len must be at least 1.")
 
-        for label in labels:
-            if label in used_classes:
-                raise ValueError(f"Class '{label}' occurs in multiple tasks.")
-            used_classes.add(label)
+        if len(set(labels)) != len(labels):
+            raise ValueError(f"Task '{task}' has duplicate labels.")
         if default is not None and default not in labels:
             raise ValueError(f"Default label '{default}' is not part of task '{task}'.")
         if not 0 < percentage <= 1:

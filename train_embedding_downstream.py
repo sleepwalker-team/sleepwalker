@@ -156,28 +156,25 @@ def get_datasets():
         ChannelConfig('LEG-EMG', ['Left Leg', 'Right Leg'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None)),
         ChannelConfig('ECG', ['ECG'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45)),
     ]
-    event_mapping = {
-        'wach': 'wake',
+    mapping = {
+        'wake': 'wake',
         'n1': 'n1',
         'n2': 'n2',
         'n3': 'n3',
         'rem': 'rem',
         'arousal': 'arousal',
-        'a. gemischt': 'apnea',
-        'a. obstruktiv': 'apnea',
-        'a. zentral': 'apnea',
-        'apnoe': 'apnea',
-        'h. obstruktiv': 'hypopnea',
-        'h. zentral': 'hypopnea',
-        'hypopnea-gemischt': 'hypopnea',
-        'hypopnoe': 'hypopnea',
-        'lm': 'lm',
+        'mixed_apnea': 'apnea',
+        'obstructive_apnea': 'apnea',
+        'central_apnea': 'apnea',
+        'apnea': 'apnea',
+        'hypopnea': 'hypopnea',
+        'limb_movement': 'lm',
     }
 
     logger.context('TRAIN')
     train_ds = Ruhrlandklinik(
         channels=channels, 
-        event_mapping=event_mapping,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=mapping, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -192,7 +189,7 @@ def get_datasets():
     logger.context('VAL')
     val_ds = Ruhrlandklinik(
         channels=channels, 
-        event_mapping=event_mapping,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=mapping, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -207,7 +204,7 @@ def get_datasets():
     logger.context('TEST')
     test_ds = Ruhrlandklinik(
         channels=channels, 
-        event_mapping=event_mapping,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=mapping, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -256,6 +253,7 @@ def get_dataloader(train_ds, val_ds, test_ds):
     return train_loader, val_loader, test_loader
 
 from sleepwalker.models.utils import AttentionPooling
+from sleepwalker.training.callbacks import prepare_sleep_events
 
 class AttentionClassifier(nn.Module):
 

@@ -116,6 +116,8 @@ sleepwalker train configs/examples/sleep_edfx_tutorial.yml   # the real run
 
 See [Train from the CLI](https://sleepwalker-team.github.io/sleepwalker/how-to/train-from-cli/) for how the Python objects map to YAML.
 
+Paper-specific training recipes live in the [models repository](https://github.com/sleepwalker-team/models/tree/main/literature), organized as `literature/<task>/<method>/`. This framework keeps the small API tutorials in `configs/examples/`.
+
 ## Architecture Overview
 
 Sleepwalker is a layered pipeline. Each layer is a plain Python object you can use on its own:
@@ -172,7 +174,6 @@ sleepwalker --help
 Optional extras are grouped by purpose:
 
 ```bash
-python -m pip install -e ".[datasets]"     # spreadsheet and archive-backed datasets
 python -m pip install -e ".[tracking]"     # MLflow and Weights & Biases
 python -m pip install -e ".[dev,docs]"     # tests and documentation
 ```

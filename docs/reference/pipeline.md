@@ -118,13 +118,13 @@ Random transforms applied to a sample during training and never at inference. Ea
 
 Callbacks hook into dataset preparation. `prepare_patient` runs once per patient at initialization; `prepare_target` runs per window. See [Load and prepare data](../how-to/data.md).
 
-### `trim_patient_to_events()` {#trim-patient-to-events}
+### `prepare_sleep_events()` {#prepare-events}
 
-::: sleepwalker.training.callbacks.trim_patient_to_events
+::: sleepwalker.training.callbacks.prepare_sleep_events
     options:
       show_root_heading: false
 
-### `prepare_patient_events()` {#prepare-patient-events}
+### `prepare_patient_events()` {#prepare-patient}
 
 ::: sleepwalker.training.callbacks.prepare_patient_events
     options:
@@ -213,6 +213,20 @@ Confusion-matrix helpers used by the trainers to report classification quality.
 ### `f1_score_from_confusion_matrix()` {#f1-score-from-confusion-matrix}
 
 ::: sleepwalker.metrics.f1_score_from_confusion_matrix
+    options:
+      show_root_heading: false
+
+### Probability metrics {#probability-metrics}
+
+Confusion matrices describe decisions at the chosen class boundary. AUROC and average precision instead use the complete class probabilities to measure ranking. `probability_metrics(targets, probabilities, classes)` receives integer class IDs `[N]` and a finite probability matrix `[N,C]` in declared class order. Each row must sum to one. It computes one-vs-rest metrics with scikit-learn; average precision weights precision by recall increments, including tied scores, rather than using trapezoidal PR area.
+
+`per_class[label]` contains `auroc`, `average_precision`, positive/negative support and reason fields. With no positives, both values are `None` (JSON `null`). With only positives, AP is 1 and AUROC is undefined. Macros use all declared classes and return `None` if a constituent is undefined; denominator and defined-class counts remain explicit. Positive-class AP is distinct from binary macro AP.
+
+Ordinary evaluation first removes invalid targets, then applies each analysis pipeline to complete patient/task timelines. It writes patient metrics and pools the analyzed targets/probabilities for that analysis/task to calculate aggregate metrics. Pooled AUROC/AP is not the mean of patient curves; `patient_mean_metrics` is reported separately and is undefined if any contributing patient metric is undefined. Overlapping windows remain separate rows unless the analysis explicitly resolves them.
+
+The CLI handles configuration, dataset initialization and prediction. Table analysis and JSONL aggregation live together in `sleepwalker.deployment.evaluation`. Predictions and pooled score columns are held in RAM; evaluation currently has no disk-backed or bounded-memory mode. Select a feasible patient list for large datasets.
+
+::: sleepwalker.metrics.probability_metrics
     options:
       show_root_heading: false
 

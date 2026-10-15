@@ -21,7 +21,8 @@ import pandas as pd
 import torch
 from torch.optim.lr_scheduler import OneCycleLR, CyclicLR
 
-from sleepwalker.deployment.package import CloudpickleAdapter
+from sleepwalker.trainer.utils.disk import CloudpickleAdapter, load_checkpoint
+from sleepwalker.training.loader import build_warmup_loader
 from sleepwalker.utils import logger
 
 def capture_rng_state() -> dict[str, Any]:
@@ -159,14 +160,9 @@ class BaseTrainer(ABC):
     @classmethod
     def load_checkpoint(cls, path: str | os.PathLike, map_location=None):
         """Load and validate a serialized trainer and model."""
-        checkpoint = torch.load(path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
-        if not isinstance(checkpoint, dict) or set(checkpoint) != {"trainer", "model"}:
-            raise TypeError("Expected a checkpoint containing exactly 'trainer' and 'model'.")
-        trainer = checkpoint["trainer"]
-        model = checkpoint["model"]
+        trainer, model = load_checkpoint(path, map_location)
         if not isinstance(trainer, cls):
             raise TypeError(f"Expected a {cls.__name__} checkpoint, got {type(trainer).__name__}.")
-        trainer.validate_training_state(model)
         return trainer, model
 
     def apply_train_transform(self, x: torch.Tensor) -> torch.Tensor:
@@ -207,24 +203,19 @@ class BaseTrainer(ABC):
 
         model.to(device)
         total_batches = len(data_loader)
-        batch_size = data_loader.batch_size
-
-        if batch_size is None:
-            raise ValueError("batch_size should not be None here.")
-
         steps = model.preprocessors
         for idx, step in enumerate(steps):
-            logger.progress_start(total_batches * batch_size, desc=f" {idx}/{len(steps) - 1}", leave=True)
-            if step.requires_warmup():
+            logger.progress_start(total_batches, desc=f" {idx}/{len(steps) - 1}", leave=True)
+            if hasattr(step, "requires_warmup") and step.requires_warmup():
                 for batch in data_loader:
                     if batch is None:
                         continue
                     x = batch["data"].to(device)
                     x = model.apply_preprocessors(x, idx)
                     step.update(x)
-                    logger.progress_advance(batch_size)
+                    logger.progress_advance(1)
             else:
-                logger.progress_advance(total_batches * batch_size)
+                logger.progress_advance(total_batches)
             logger.progress_close()
 
         return model
@@ -259,17 +250,20 @@ class BaseTrainer(ABC):
             raise ValueError("Cannot train with an empty training loader.")
 
         self.validate_training_state(model)
-        if self.optimizer is None:
-            self.set_loader_epoch(train_loader, 0)
-            logger.context("Warmup trainer")
-            try:
-                self.warmup_trainer(train_loader)
-            finally:
-                logger.uncontext()
-
+        initializing = self.optimizer is None
+        self.set_loader_epoch(train_loader, self.completed_epochs)
+        warmup_loader = build_warmup_loader(train_loader)
+        logger.context("Warmup trainer")
+        try:
+            # On resume, owners reuse saved statistics and rebind callbacks to
+            # the reconstructed dataset before any training worker starts.
+            self.warmup_trainer(warmup_loader)
+        finally:
+            logger.uncontext()
+        if initializing:
             logger.context("Warmup preprocessors")
             try:
-                self.warmup_preprocessor(model, train_loader, self.warmup_device)
+                self.warmup_preprocessor(model, warmup_loader, self.warmup_device)
             finally:
                 logger.uncontext()
 

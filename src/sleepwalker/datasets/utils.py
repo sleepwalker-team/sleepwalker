@@ -25,6 +25,8 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import KFold
 
 from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_collate
+from sleepwalker.datasets.events import validate_event_labels
+from sleepwalker.training.callbacks import map_events
 from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.utils import logger
 
@@ -140,7 +142,7 @@ def summarize_dataset(
         raise ValueError("Could not determine a channel name from the provided EDF files.")
 
     # --- (3) Dataset setup ---
-    dataset = dataset_clazz(
+    reader = dataset_clazz(
         channels=[
             ChannelConfig(
                 logical_name=first_channel_name,
@@ -148,13 +150,13 @@ def summarize_dataset(
             )
         ],
         sample_frequency=100,
-        event_mapping={},
-        remove_unmapped_events=False,
+        load_annotations=False,
     )
+    dataset = dataset_clazz(channels=reader.channels, sample_frequency=100, annotation_labels=reader.supported_events())
     dataset.initialize(edf_files, 8)
 
     # always include known class list
-    dataset_classes = getattr(dataset, "classes", None)
+    dataset_classes = list(dataset.label_classes)
 
     # if class frequency estimation is disabled, stop here
     if not estimate_class_frequencies:
@@ -216,93 +218,59 @@ def summarize_dataset(
     }
 
 
+NSRR_EVENT_LABELS = {
+    "wake": "wake", "stage 1 sleep": "n1", "stage 2 sleep": "n2", "stage 3 sleep": "n3", "stage 4 sleep": "n3", "rem sleep": "rem",
+    "unscored": "unscored", "movement": "movement",
+    "arousal": "arousal", "asda arousal": "arousal", "arousal resulting from respiratory effort": "arousal",
+    "arousal resulting from chin emg": "arousal", "external arousal": "arousal", "spontaneous arousal": "arousal",
+    "central apnea": "central_apnea", "obstructive apnea": "obstructive_apnea", "mixed apnea": "mixed_apnea", "apnea": "apnea",
+    "hypopnea": "hypopnea", "spo2 desaturation": "desaturation", "periodic breathing": "periodic_breathing",
+    "respiratory artifact": "respiratory_artifact", "spo2 artifact": "spo2_artifact", "limb movement": "limb_movement",
+}
+
+
 def read_profusion(xml_path):
-    """Read Profusion XML annotations into a normalized event table.
+    """Decode Profusion source labels and reported percentage-point drops."""
+    with open(xml_path, "r") as handle:
+        doc = xtd.parse(handle.read())["CMPStudyConfig"]
+    scored = (doc.get("ScoredEvents") or {}).get("ScoredEvent", []) or []
+    scored = scored if isinstance(scored, list) else [scored]
+    events = pd.DataFrame(scored, columns=list(dict.fromkeys(["Name", "Start", "Duration", *[key for row in scored for key in row]])))
+    events["SourceLabel"] = events["Name"].astype("string")
+    source = events["SourceLabel"].str.strip().str.lower()
+    # Profusion arousal variants explicitly identify their common event type.
+    source = source.mask(source.str.match(r"^arousal(?:\s|$)", na=False), "arousal")
+    events["Label"] = source.map(NSRR_EVENT_LABELS).fillna("other")
+    if "Desaturation" in events:
+        events["desaturation_drop_pp"] = pd.to_numeric(events["Desaturation"], errors="raise").astype("Float64").where(events["Label"] == "desaturation")
+    stages = (doc.get("SleepStages") or {}).get("SleepStage", []) or []
+    stages = stages if isinstance(stages, list) else [stages]
+    stage_df = pd.DataFrame({"SourceLabel": stages, "Start": np.arange(len(stages)) * 30, "Duration": 30})
+    stage_df["Label"] = stage_df["SourceLabel"].astype(str).map({"0": "wake", "1": "n1", "2": "n2", "3": "n3", "4": "n3", "5": "rem", "6": "movement", "9": "unscored"}).fillna("other")
+    return pd.concat([events, stage_df], ignore_index=True)
 
-    Notes:
-        The mapping logic is dataset-specific and currently tailored to the XML
-        structures used by repository dataset adapters such as ``ABC`` and
-        ``SHHS``. The function returns a concatenated event table but does not
-        yet document a stronger schema guarantee beyond observed call sites.
-    """
-    with open(xml_path, "r") as f:
-        doc = xtd.parse(f.read())
-        apnea_df = pd.DataFrame(doc["CMPStudyConfig"]["ScoredEvents"]["ScoredEvent"][1:])
-        apnea_df["Name"] = apnea_df.apply(lambda row: row["Name"].lower().strip(), axis=1)
-        apnea_map = {
-            'arousal ()': "arousal|arousal ()",
-            'arousal (aro res)': "arousal resulting from respiratory effort|arousal (aro res)",
-            'arousal (asda)': "asda arousal|arousal (asda)",
-            'arousal (cheshire)': "arousal resulting from chin emg|arousal (cheshire)",
-            'arousal (external arousal)': "external arousal|arousal (external arousal)",
-            'arousal (standard)': "arousal|arousal (standard)",
-            'central apnea': "central apnea|central apnea",
-            'hypopnea': "hypopnea|hypopnea",
-            'mixed apnea': "mixed apnea|mixed apnea",
-            'obstructive apnea': "obstructive apnea|obstructive apnea",
-            'periodic breathing': "periodic breathing|periodic breathing",
-            'respiratory artifact': "respiratory artifact|respiratory artifact",
-            'spo2 artifact': "spo2 artifact|spo2 artifact",
-            'spo2 desaturation': "spo2 desaturation|spo2 desaturation",
-            'unsure': "unsure|unsure"
-        }
-        apnea_df["Label"] = apnea_df.apply(lambda row: apnea_map.get(row["Name"], None), axis=1)
-        
-        # Profusion mainly exports snoring events (see above), but also contains sleep stages.
-        # These sleep stages are numbered 0-6/9 internally. We match them back to the nsrr annotations here
-        # to make them comparable.
-        sleep_df = pd.DataFrame(doc["CMPStudyConfig"]["SleepStages"])
-        sleep_df["Start"] = sleep_df.index*30
-        sleep_df["Duration"] = 30
-        sleep_map = {
-            "0": "wake|0",
-            "1": "stage 1 sleep|1",
-            "2": "stage 2 sleep|2",
-            "3": "stage 3 sleep|3",
-            "4": "stage 4 sleep|4",
-            "5": "rem sleep|5",
-            "6": "movement|6",
-            "9": "unscored|9"
-        }
-        sleep_df["Label"] = sleep_df.apply(lambda row: sleep_map.get(row["SleepStage"], None), axis=1)
-
-        return pd.concat([apnea_df, sleep_df], ignore_index=True)
 
 def read_nsrr(xml_path):
-    """Read NSRR-style XML annotations into an event table."""
-    with open(xml_path, "r") as f:
-        doc = xtd.parse(f.read())
-        """
-        [
-            'arousal resulting from chin emg|arousal (cheshire)', 
-            'arousal resulting from respiratory effort|arousal (aro res)', 
-            'arousal|arousal ()', 
-            'arousal|arousal (standard)', 
-            'asda arousal|arousal (asda)', 
-            'central apnea|central apnea', 
-            'external arousal|arousal (external arousal)', 
-            'hypopnea|hypopnea', 
-            'mixed apnea|mixed apnea', 
-            'movement|6', 
-            'obstructive apnea|obstructive apnea', 
-            'periodic breathing|periodic breathing', 
-            'rem sleep|5', 
-            'respiratory artifact|respiratory artifact', 
-            'spo2 artifact|spo2 artifact', 
-            'spo2 desaturation|spo2 desaturation', 
-            'stage 1 sleep|1', 
-            'stage 2 sleep|2', 
-            'stage 3 sleep|3', 
-            'stage 4 sleep|4', 
-            'unscored|9', 
-            'unsure|unsure', 
-            'wake|0'
-        ]
-        """
-        xml_df = pd.DataFrame(doc["PSGAnnotation"]["ScoredEvents"]["ScoredEvent"][1:])
-        xml_df["Label"] = xml_df.apply(lambda row: row["EventConcept"].lower().strip(),axis=1)
+    """Decode NSRR concepts and baseline-minus-nadir desaturation drops.
 
-        return xml_df
+    Field definitions: https://github.com/nsrr/edf-editor-translator/wiki/Tutorial-2-EDF-Annotation-Translator
+    Absent measurements omit the standardized field. Missing measurements in
+    an available field remain nullable; no event rows are dropped for them.
+    """
+    with open(xml_path, "r") as handle:
+        doc = xtd.parse(handle.read())
+    scored = (doc["PSGAnnotation"].get("ScoredEvents") or {}).get("ScoredEvent", []) or []
+    scored = scored if isinstance(scored, list) else [scored]
+    events = pd.DataFrame(scored, columns=list(dict.fromkeys(["EventConcept", "Start", "Duration", *[key for row in scored for key in row]])))
+    events["SourceLabel"] = events["EventConcept"].astype("string")
+    source = events["SourceLabel"].str.split("|", n=1).str[0].str.strip().str.lower()
+    events["Label"] = source.map(NSRR_EVENT_LABELS).fillna("other")
+    if {"SpO2Baseline", "SpO2Nadir"} <= set(events):
+        baseline = pd.to_numeric(events["SpO2Baseline"], errors="raise").astype("Float64")
+        nadir = pd.to_numeric(events["SpO2Nadir"], errors="raise").astype("Float64")
+        events["desaturation_drop_pp"] = (baseline - nadir).where(events["Label"] == "desaturation")
+    return events
+
 
 def get_edf_files_in_repo(root: str|os.PathLike, recursive: bool = True, ending: str = ".edf") -> List[str]:
     """List EDF files in a folder (optionally including subfolders).
@@ -377,24 +345,29 @@ def kfold_split(all_patients: list[str],n_splits: int = 5) -> List[Tuple[str,str
 #     pats = [p for p in all_patients if _matches_any(p, include_patterns)]
 #     return [pats], [[]]
 
-def estimate_class_cnts(loader: DataLoader):
+def estimate_class_cnts(loader: DataLoader, classes: Sequence[str] | None = None):
     """Estimate multiclass target counts from a dataloader.
 
     Args:
         loader: Dataloader yielding batches with one-hot ``target`` tensors.
+        classes: Explicit target/output class order. Defaults to the dataset's
+            configured output classes; never use its annotation vocabulary.
 
     Returns:
         A mapping from class name to observed count over one realized pass.
     """
     dataset = loader.dataset
+    classes = validate_event_labels(dataset.get_classes() if classes is None else classes, context="target/output classes for count estimation")
     total_batches = len(loader)
     batch_size = loader.batch_size or 1
-    class_cnts = torch.zeros(len(dataset.get_classes()))
+    class_cnts = torch.zeros(len(classes))
     logger.progress_start(total_batches * batch_size, desc="Estimating class counts", leave=True)
     for batch in loader:
         if batch is None:
             continue
         y = batch["target"]
+        if y.shape[-1] != len(classes):
+            raise ValueError(f"Target width {y.shape[-1]} does not match the {len(classes)} declared output classes.")
         if "target_mask" in batch:
             mask = batch["target_mask"].to(dtype=torch.bool)
             if tuple(mask.shape) != tuple(y.shape[:-1]):
@@ -407,7 +380,7 @@ def estimate_class_cnts(loader: DataLoader):
     logger.progress_close()
 
     return {
-        cname:c.item() for cname,c in zip(dataset.get_classes(), class_cnts)
+        cname:c.item() for cname,c in zip(classes, class_cnts)
     }
 
 def dataloader_to_numpy(loader: DataLoader):

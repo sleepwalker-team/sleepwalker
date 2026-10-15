@@ -4,9 +4,9 @@ import math
 from functools import partial
 
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, SequentialSampler
 
-from sleepwalker.training.samplers import PatientSampler
+from sleepwalker.training.samplers import PatientSampler, RandomSampler
 from sleepwalker.utils import logger
 
 
@@ -100,3 +100,21 @@ def build_loader(dataset, *, batch_size: int, num_workers: int, n_samples: int |
         loader_kwargs["persistent_workers"] = bool(persistent_workers)
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     return DataLoader(**loader_kwargs)
+
+
+def build_warmup_loader(loader):
+    """Reuse the supplied population with parallel, nonpersistent workers.
+
+    Each warmup pass finishes its workers before the next pass or training.
+    Statistics and callback changes belong to the original model/dataset in
+    the main process. Plain iterables already run there and are used directly.
+    """
+    if not isinstance(loader, DataLoader):
+        return loader
+    options = dict(dataset=loader.dataset, batch_sampler=loader.batch_sampler,
+                   collate_fn=loader.collate_fn, num_workers=loader.num_workers,
+                   pin_memory=loader.pin_memory, generator=loader.generator,
+                   worker_init_fn=loader.worker_init_fn, timeout=loader.timeout)
+    if loader.num_workers:
+        options.update(prefetch_factor=loader.prefetch_factor, multiprocessing_context=loader.multiprocessing_context, persistent_workers=False)
+    return DataLoader(**options)

@@ -82,6 +82,7 @@ class MulticlassTrainer(BaseTrainer):
         balance_gamma: float = 1.0,
         sequence_len: int = 1,
         target_offset: str | pd.Timedelta = "0s",
+        log_confusion_figures: bool = True,
     ):
         super().__init__(
             epochs=epochs,
@@ -111,6 +112,7 @@ class MulticlassTrainer(BaseTrainer):
         self.balance_batches = balance_batches
         self.balance_gamma = float(balance_gamma)
         self.sequence_len = int(sequence_len)
+        self.log_confusion_figures = bool(log_confusion_figures)
         if self.sequence_len < 1:
             raise ValueError("sequence_len must be at least 1.")
         self.target_resolution = pd.to_timedelta(target_resolution)
@@ -337,7 +339,7 @@ class MulticlassTrainer(BaseTrainer):
 
         logger.progress_close()
         epoch_loss = loss_sum / max(loss_weight_sum, 1)
-        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm = True)  
+        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm=self.log_confusion_figures)
         
 
         return epoch_loss, cm_sum  

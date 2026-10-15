@@ -2,6 +2,7 @@ import os
 
 import pandas as pd
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.events import decode_event_labels
 from sleepwalker.utils import logger
 from pathlib import Path
 import xmltodict as xtd
@@ -31,7 +32,8 @@ def read_mnc(xml_path: str, start_date: datetime) -> pd.DataFrame:
     df = pd.DataFrame(instances)
 
     # Normalize label & numeric fields
-    df["Label"] = df["@class"].str.lower().str.strip()
+    df["SourceLabel"] = df["@class"].astype("string")
+    df["Label"] = df["SourceLabel"].str.lower().str.strip()
     df["Start"] = df["Start"].astype(float)
     df["Duration"] = df["Duration"].astype(float)
 
@@ -59,7 +61,7 @@ def read_mnc(xml_path: str, start_date: datetime) -> pd.DataFrame:
     df["Starttime"] = timestamps
     df["Endtime"] = df["Starttime"] + pd.to_timedelta(df["Duration"], unit="s")
 
-    return df[["Label", "Starttime", "Endtime", "Duration"]]
+    return df[["Label", "Starttime", "Endtime", "Duration", "SourceLabel"]]
 
 def read_xml(fpath, start_date):
     name = Path(fpath).name.split(".edf")[0]
@@ -68,12 +70,15 @@ def read_xml(fpath, start_date):
     xml_path = os.path.join(folder, f"{name}.xml")
     xml_df = read_mnc(xml_path, start_date)
 
-    xml_df = xml_df[["Label", "Starttime", "Endtime"]].dropna()
+    xml_df = xml_df[["Label", "Starttime", "Endtime", "SourceLabel"]].dropna(subset=["Label", "Starttime", "Endtime"])
 
     if len(xml_df) == 0:
         raise ValueError(f"Cannot read XML file for {xml_path}. File is empty?")
     
     return xml_df
+
+MNC_EVENT_LABELS = {"wake": "wake", "nrem1": "n1", "nrem2": "n2", "nrem3": "n3", "rem": "rem", "9": "unscored"}
+
 
 class MNC(BaseDataset):
     """
@@ -143,21 +148,17 @@ class MNC(BaseDataset):
     """
 
     def __init__(self, 
-            ignore_patients_with_partial_events = False,
             **kwargs
         ): 
-        self.ignore_patients_with_partial_events = ignore_patients_with_partial_events
         super().__init__(**kwargs)
 
     def has_extra_target(self):
         return False
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*MNC_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, fpath, start_date):
         df = read_xml(fpath, start_date)
 
-        if self.ignore_patients_with_partial_events and len(self.event_mapping) > 0:
-            vals = sorted(set([v for k, v in self.event_mapping.items() if k != "default_class"]))
-            labels = sorted(set(df["Label"].unique()))
-            if labels != vals:
-                raise ValueError(f"Patient did not contain at-least one window with one of the events attached. Patient has {labels}, but expected {vals}.")        
-        return df
+        return decode_event_labels(df, mapping=MNC_EVENT_LABELS)

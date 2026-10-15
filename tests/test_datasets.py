@@ -40,16 +40,24 @@ from sleepwalker.training.loader import build_loader
 from dotenv import load_dotenv
 
 from tests.utils import iterate_dataset
+from sleepwalker.training.callbacks import map_events
+from functools import partial
 load_dotenv()  
 
 # TODO: READ NUM_PATIENTS FROM ENVIRONMENT VARIABLE
 
-def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending="edf", event_mapping = {}):
+def build_dataset(dataset_clazz,channel_name, edf_path, num_patients = 5, ending="edf", mapping = None, annotation_labels=None, prepare_events=None):
     edf_files = get_edf_files_in_repo(edf_path, recursive=True, ending=ending)
     assert len(edf_files) > 0
     edf_files = edf_files[:num_patients]
 
-    dataset = dataset_clazz(channels=[ChannelConfig(channel_name, [channel_name])], sample_frequency=100, event_mapping=event_mapping, remove_unmapped_events=False)
+    kwargs = {"channels": [ChannelConfig(channel_name, [channel_name])], "sample_frequency": 100}
+    reader = dataset_clazz(**kwargs, load_annotations=False)
+    if annotation_labels is None:
+        annotation_labels = reader.supported_events() if mapping is None else list(dict.fromkeys(mapping.values()))
+    if prepare_events is None and mapping is not None:
+        prepare_events = partial(map_events, mapping=mapping, remove_unmapped=False)
+    dataset = dataset_clazz(**kwargs, annotation_labels=annotation_labels, prepare_events=prepare_events)
     dataset.initialize(edf_files)
 
     return dataset
@@ -60,6 +68,14 @@ def run_test(dataset_clazz, channel_name, edf_path, num_batches, batch_size = 12
 
 
 class DummyDataset(BaseDataset):
+    def __init__(self, **kwargs):
+        if "annotation_labels" not in kwargs and not any(kwargs.get(name) is not None for name in ("prepare_target", "prepare_patient", "prepare_events")):
+            kwargs.setdefault("load_annotations", False)
+        super().__init__(**kwargs)
+
+    def supported_events(self):
+        return ["wake", "n1", "n2", "n3", "rem"]
+
     def initialize(self, patients, num_workers=4):
         self.edf_files = []
         self.lower_bounds = []
@@ -131,7 +147,7 @@ def test_get_item_rejects_before_loading_signal():
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
-        event_mapping={"wake": "wake"},
+        annotation_labels=['wake'], prepare_events=partial(map_events, mapping={'wake': 'wake'}, remove_unmapped=True),
         prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
             target_extra=target_extra,
@@ -169,7 +185,7 @@ def test_get_item_loads_signal_after_label_precheck():
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="30s",
-        event_mapping={"wake": "wake"},
+        annotation_labels=['wake'], prepare_events=partial(map_events, mapping={'wake': 'wake'}, remove_unmapped=True),
         prepare_target=lambda target, target_extra=None, patient=None, time=None: prepare_multitask_target(
             target=target,
             target_extra=target_extra,
@@ -199,7 +215,7 @@ def test_get_item_timestamp_is_input_window_start():
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=1,
         total_input="60s",
-        event_mapping={"wake": "wake"},
+        annotation_labels=['wake'], prepare_events=partial(map_events, mapping={'wake': 'wake'}, remove_unmapped=True),
     )
     file = create_dummy_file()
     signal = pd.DataFrame(
@@ -244,8 +260,8 @@ def test_grouped_channel_selection_returns_one_channel_per_group():
         ],
         sample_frequency=1,
         total_input="30s",
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
     signal = pd.DataFrame(
         {
@@ -276,7 +292,7 @@ def test_get_item_reads_only_selected_physical_aliases_and_quality_channels():
         ],
         sample_frequency=1,
         total_input="3s",
-        event_mapping=None,
+        load_annotations=False,
         group_sampling_strategy="first",
     )
     start = pd.Timestamp("2024-01-01")
@@ -336,7 +352,7 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
         ],
         sample_frequency=1,
         total_input="3s",
-        event_mapping=None,
+        load_annotations=False,
     )
     signal = pd.DataFrame({"C3-M2": [0.0, 1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1s"))
 
@@ -352,7 +368,7 @@ def test_one_physical_channel_can_feed_distinct_logical_preprocessing():
 
 def test_shared_sources_can_use_independent_units_and_recording_scalers():
     channels = [ChannelConfig('a', ['signal'], preprocessors=[ConvertUnit('uV'), RecordingZScore()]), ChannelConfig('b', ['signal'], preprocessors=[ConvertUnit('mV'), RecordingZScore()])]
-    dataset = DummyDataset(channels=channels, sample_frequency=1, total_input="3s", event_mapping=None)
+    dataset = DummyDataset(channels=channels, sample_frequency=1, total_input="3s", load_annotations=False)
     signal = pd.DataFrame({"signal": [0., 1., 2., 3.]}, index=pd.date_range("2024-01-01", periods=4, freq="1s"))
     file = EDFFile(channels=["signal"], path="patient.edf", start_date=signal.index[0], end_date=signal.index[-1], units={"signal": "uV"}, preprocessors={(cfg.logical_name, "signal"): cfg.preprocessors_for("signal") for cfg in channels})
     file.get_native = lambda *args, **kwargs: {1.0: signal.copy()}
@@ -368,7 +384,7 @@ def test_target_callback_can_discard_an_unusable_extra_target():
         channels=[ChannelConfig("signal", ["signal"])],
         sample_frequency=1,
         total_input="1s",
-        event_mapping=None,
+        annotation_labels=["wake"],
         prepare_target=lambda **kwargs: {"target": torch.tensor([1.0])},
     )
     raw_target = pd.DataFrame({"wake": [1.0]}, index=pd.date_range("2024-01-01", periods=1, freq="1s"))
@@ -415,8 +431,8 @@ def test_dataset_initialization_does_not_load_complete_signals(monkeypatch):
     dataset = SyntheticDataset(
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=100,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
     edf_path = Path(__file__).parent / "data" / "signals_01.edf"
     monkeypatch.setattr(basedataset_module, "read_edf_native", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("initialize loaded the signal")))
@@ -461,8 +477,8 @@ def test_prepare_patient_callback_is_label_only():
     dataset = SyntheticDataset(
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=100,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
         prepare_patient=prepare_patient,
     )
     edf_path = Path(__file__).parent / "data" / "signals_01.edf"
@@ -482,8 +498,8 @@ def test_basedataset_retries_patient_before_switching_global(monkeypatch):
                 channels=[ChannelConfig("EEG", ["EEG"])],
                 sample_frequency=1,
                 total_input="30s",
-                event_mapping={},
-                remove_unmapped_events=False,
+                annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
                 online_max_tries=2,
             )
             self.calls = []
@@ -522,8 +538,8 @@ def test_basedataset_propagates_item_exceptions():
                 channels=[ChannelConfig("EEG", ["EEG"])],
                 sample_frequency=1,
                 total_input="30s",
-                event_mapping={},
-                remove_unmapped_events=False,
+                annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
                 online_max_tries=1,
             )
 
@@ -548,7 +564,7 @@ def test_basedataset_returns_none_without_resampling():
         def get_item(self, file, start_date):
             return None
 
-    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, rejection_strategy="none")
+    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],  rejection_strategy="none")
     dataset.edf_files = [EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1)]
     dataset.lower_bounds = [0]
     dataset.upper_bounds = [1]
@@ -560,7 +576,7 @@ def test_basedataset_returns_none_without_resampling():
 def test_basedataset_repeats_views_atomically_before_fallback(monkeypatch):
     class RepeatedDataset(DummyDataset):
         def __init__(self):
-            super().__init__(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, online_max_tries=1, n_views=2)
+            super().__init__(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],  online_max_tries=1, n_views=2)
             self.calls = []
 
         def get_item(self, file, start_date):
@@ -622,7 +638,7 @@ def test_multidataset_propagates_rejected_samples():
         def get_item(self, file, start_date):
             return None
 
-    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, event_mapping={}, remove_unmapped_events=False, rejection_strategy="none")
+    dataset = RejectingDataset(channels=[ChannelConfig("EEG", ["EEG"])], sample_frequency=1, annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],  rejection_strategy="none")
     dataset.edf_files = [EDFFile(channels=["EEG"], path="p1.edf", start_date=pd.Timestamp("2024-01-01"), length=1)]
     dataset.lower_bounds = [0]
     dataset.upper_bounds = [1]
@@ -1018,27 +1034,14 @@ def test_multi_dataset():
         SyntheticDataset, 
         "EEG", 
         edf_data_dir,
-        event_mapping = {
-            "n1":"n1",
-            "n2":"n2",
-            "n3":"n3",
-            "rem":"rem",
-            "wake":"wake"
-        }
+        annotation_labels=['n1', 'n2', 'n3', 'rem', 'wake'], prepare_events=partial(map_events, mapping={'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'rem': 'rem', 'wake': 'wake'}, remove_unmapped=True)
     )
 
     ds2 = build_dataset(
         CAP, 
         "Fp2-F4", 
         CAP_PATH, 
-        event_mapping = {
-            "s1":"n1",
-            "s2":"n2",
-            "s3":"n3",
-            "s4":"n3",
-            "r":"rem",
-            "w":"wake"
-        }
+        annotation_labels=['n1', 'n2', 'n3', 'rem', 'wake'], prepare_events=partial(map_events, mapping={'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'rem': 'rem', 'wake': 'wake'}, remove_unmapped=True)
     )
 
     ds = MultiDataset([ds1,ds2])
@@ -1070,7 +1073,7 @@ class CacheReadyDataset(DummyDataset):
             channels=[ChannelConfig("eeg", ["eeg"]), ChannelConfig("emg", ["emg"])],
             sample_frequency=2,
             total_input="2s",
-            event_mapping=None,
+            load_annotations=False,
         )
         self.classes = ['wake', 'rem']
         self.label_classes = list(self.classes)
@@ -1135,7 +1138,7 @@ class GroupedCacheDataset(DummyDataset):
             ],
             sample_frequency=1,
             total_input="3s",
-            event_mapping=None,
+            load_annotations=False,
         )
         self.classes = ['wake']
         self.label_classes = list(self.classes)

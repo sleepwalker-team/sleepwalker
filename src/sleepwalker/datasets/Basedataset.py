@@ -34,6 +34,7 @@ from torch.utils.data import Dataset, default_collate
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import read_edf_native, resample_native_signals
 from sleepwalker.datasets.EDFCache import EDFCache
+from sleepwalker.datasets.events import EVENT_COLUMNS, validate_event_labels, validate_event_table
 from sleepwalker.datasets.normalizer import SignalFilterNormalizer
 
 
@@ -386,30 +387,28 @@ class EventIndex:
     Fast indicator sampling for labeled time intervals.
     Semantics: event is active at t iff start <= t < end  (left-closed, right-open).
     All timestamps should be tz-aligned (ideally UTC).
-    """
-    def __init__(self, events: pd.DataFrame): #merge_overlaps: bool = True
-        # expected columns: starttime, endtime, label
-        df = events.copy()
 
-        # self.labels: list = labels #sorted(df["Label"].unique())
+    events retains an independent copy of the fully prepared input DataFrame.
+    Treat it as read-only; copy it before modifying intervals for analysis.
+    """
+    def __init__(self, events: pd.DataFrame):
+        validate_event_table(events)
+        self.events = events.copy()
         self.starts: Dict[str, np.ndarray] = {}
         self.ends:   Dict[str, np.ndarray] = {}
+        # Sorted-end alternative retained for a future speed/memory benchmark:
+        # self.sorted_ends: Dict[str, np.ndarray] = {}
 
-        for lab, g in df.groupby("Label", sort=False):
-            s = g["Starttime"].astype("int64").to_numpy()
-            e = g["Endtime"].astype("int64").to_numpy()
-            # drop empty/invalid intervals
-            keep = e > s
-            s, e = s[keep], e[keep]
-
-            # sort and (optionally) merge overlaps to shrink index size
+        for lab, g in self.events.groupby("Label", sort=False):
+            s = g["Starttime"].dt.as_unit("ns").astype("int64").to_numpy()
+            e = g["Endtime"].dt.as_unit("ns").astype("int64").to_numpy()
+            # Preserve paired endpoints for retained-interval access.
             order = np.argsort(s, kind="mergesort")
             s, e = s[order], e[order]
-            # if merge_overlaps and s.size:
-            #     s, e = self._merge_overlaps(s, e)
 
             self.starts[lab] = s
-            self.ends[lab]   = e  # already sorted after merge
+            self.ends[lab] = e  # paired with starts, retaining individual boundaries
+            # self.sorted_ends[lab] = np.sort(e)
 
     def query(
         self,
@@ -441,17 +440,27 @@ class EventIndex:
         """
         # left-closed, right-open grid to match interval semantics
         idx = pd.date_range(start, end, freq=freq, inclusive="left")
-        t = idx.astype("int64").to_numpy()  # ns since epoch
+        t = idx.as_unit("ns").asi8  # ns since epoch
 
         out = {}
         for lab in labels:
-            s = self.starts.get(lab, np.empty(0, np.int64))
-            e = self.ends.get(lab,   np.empty(0, np.int64))
-            # count how many have started minus how many have ended → active count
-            # active at t if start <= t < end  → use right for starts, left for ends
-            started = np.searchsorted(s, t, side="right")
-            ended   = np.searchsorted(e, t, side="left")
-            active  = (started - ended) > 0
+            # Sorted-end alternative; enable with the commented constructor lines above.
+            # s = self.starts.get(lab, np.empty(0, np.int64))
+            # e = self.sorted_ends.get(lab, np.empty(0, np.int64))
+            # started = np.searchsorted(s, t, side="right")
+            # ended = np.searchsorted(e, t, side="right")
+            # active = (started - ended) > 0
+            # out[lab] = active.astype(dtype)
+
+            s = self.starts.get(lab, ())
+            e = self.ends.get(lab, ())
+            # TODO: Benchmark interval marking against sorted-end counting for query speed and memory.
+            # Search the sorted query grid, preserving paired half-open event boundaries.
+            active = np.zeros(len(t), dtype=bool)
+            for event_start, event_end in zip(s, e):
+                first = np.searchsorted(t, event_start, side="left")
+                last = np.searchsorted(t, event_end, side="left")
+                active[first:last] = True
             out[lab] = active.astype(dtype)
 
         df = pd.DataFrame(out, index=idx)
@@ -631,13 +640,18 @@ class BaseDataset(Dataset, ABC):
         Time between consecutive sampled windows. Defaults to `total_input`.
         Set `stride < total_input` to sample overlapping windows.
 
-    event_mapping
-        Mapping from raw dataset-specific event labels to the labels used by
-        your task, e.g. `{"Sleep stage W": "wake"}`.
+    annotation_labels
+        Ordered, unique allowed labels after event preparation, including masks.
+        Required and non-empty for labelled loading; absent labels keep their columns.
 
-    remove_unmapped_events
-        If `True`, labels that are not found in `event_mapping` are dropped. If
-        `False`, unmapped labels are kept as-is.
+    load_annotations
+        Whether to read and prepare annotations. False requires empty annotation
+        labels and no annotation callbacks; signal/sample processing still runs.
+
+    prepare_events
+        Optional dataset-wide callback applied once to independent copies of both
+        complete reader tables, before trimming and optional-field projection.
+        Return (primary, alternate) or None to reject the recording.
 
     prepare_patient
         Optional callback for whole-patient annotation preparation. It receives
@@ -733,8 +747,9 @@ class BaseDataset(Dataset, ABC):
         resample_type: str = "nearest",
         total_input: str | pd.Timedelta = "30s",
         stride: Optional[str | pd.Timedelta] = None,
-        event_mapping: Optional[Mapping[str, str]] = None, 
-        remove_unmapped_events : bool = True, 
+        annotation_labels: Optional[Sequence[str]] = None,
+        load_annotations: bool = True,
+        prepare_events: Optional[Callable] = None,
         prepare_patient: Optional[Callable[..., Optional[tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]]]] = None,
         prepare_target: Optional[Callable] = None,
         prepare_sample: Callable = prepare_tensor_sample,
@@ -750,8 +765,18 @@ class BaseDataset(Dataset, ABC):
         
         # Config
         self.channels = list(channels)
-        self.event_mapping = event_mapping
-        self.remove_unmapped_events = remove_unmapped_events
+        if not isinstance(load_annotations, bool):
+            raise TypeError("load_annotations must be a boolean.")
+        self.load_annotations = load_annotations
+        self.prepare_events_callback = prepare_events
+        self.label_classes = validate_event_labels(annotation_labels if annotation_labels is not None else [], context="annotation_labels", allow_empty=not load_annotations)
+        self.classes = []  # Classifier outputs are set explicitly by training recipes, never inferred from annotations.
+        self.observed_labels = set()
+        if not load_annotations and (self.label_classes or any(callback is not None for callback in (prepare_events, prepare_patient, prepare_target))):
+            raise ValueError("load_annotations=False requires empty annotation_labels and no prepare_events, prepare_patient or prepare_target callbacks.")
+        for name, callback in (("prepare_events", prepare_events), ("prepare_patient", prepare_patient), ("prepare_target", prepare_target)):
+            if callback is not None and not callable(callback):
+                raise TypeError(f"{name} must be callable.")
         self.sample_frequency = sample_frequency
         self.resample_type = resample_type
         self.total_input = pd.to_timedelta(total_input)
@@ -808,22 +833,13 @@ class BaseDataset(Dataset, ABC):
         self.group_sampling_strategy = group_sampling_strategy
         self.edf_cache: Optional[EDFCache] = None
 
-        # Events/classes
-        if event_mapping is not None:
-            self.event_mapping = {k: v for k, v in event_mapping.items()}
-            self.classes = sorted(list(set(self.event_mapping.values())))
-            self.label_classes = list(self.classes)
-        else:
-            self.event_mapping = None
-            self.classes = []
-            self.label_classes = []
-
-        if self.event_mapping is not None and self.remove_unmapped_events and len(self.event_mapping) == 0:
-            logger.warning(f"You set remove_unmapped_events to true but provided an empty mapping. If you want to not extract any labels, set event_mapping to None. If you want to extract all labels, set event_mapping to an empty dictionary and remove_unmapped_events to false.")
+    def supported_events(self) -> list[str]:
+        """Declare reader event types before preparation, independently of observed rows."""
+        raise NotImplementedError(f"{type(self).__name__} must declare supported_events().")
 
     @abstractmethod
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
-        """Return raw event intervals for one patient recording.
+        """Decode source annotations into common physiological event intervals.
 
         Args:
             edf_path: Path to the patient EDF file.
@@ -834,7 +850,8 @@ class BaseDataset(Dataset, ABC):
             ``Label`` columns.
 
         Notes:
-            Concrete dataset adapters must implement this method.
+            Labels must belong to supported_events(), before any task mapping.
+            Optional standardized metadata remains available to prepare_events.
         """
         ...
 
@@ -852,7 +869,7 @@ class BaseDataset(Dataset, ABC):
         return False
 
     def get_classes(self) -> list[str]:
-        """Return the canonical class labels currently known to the dataset."""
+        """Return explicitly configured classifier outputs, independently of annotation labels."""
         return self.classes
 
     def get_timeseries_len(self) -> int:
@@ -961,59 +978,66 @@ class BaseDataset(Dataset, ABC):
         return np.concatenate(offsets)
 
     def prepare_recording_labels(self, edf_path, start, end):
-        """Prepare annotations and select the interval used for windows and fitting."""
-        classes, extra_classes = set(), set()
-        if self.event_mapping is not None:
-            if self.has_extra_target():
-                df = self.get_event_df(edf_path, start)
-                df_additional = self.get_extra_event_df(edf_path, start)
+        """Read, transform, validate and trim both annotators before indexing."""
+        if not self.load_annotations:
+            return {"start": start, "end": end, "label_df": None, "label_extra_df": None, "classes": set(), "extra_classes": set()}
+        supported = validate_event_labels(self.supported_events(), context=f"{type(self).__name__}.supported_events()", allow_empty=True)
+        try:
+            primary = self.get_event_df(edf_path, start)
+        except Exception as error:
+            raise ValueError(f"{edf_path} primary annotation reader failed: {error}") from error
+        try:
+            alternate = self.get_extra_event_df(edf_path, start) if self.has_extra_target() else None
+        except Exception as error:
+            raise ValueError(f"{edf_path} alternate annotation reader failed: {error}") from error
+        has_alternate = alternate is not None
 
-                if self.remove_unmapped_events:
-                    df_additional["Label"] = df_additional["Label"].apply(
-                        lambda x: self.event_mapping[x] if x in self.event_mapping else None
-                    )
-                else:
-                    df_additional["Label"] = df_additional["Label"].apply(
-                        lambda x: self.event_mapping[x] if x in self.event_mapping else x
-                    )
-                df_additional = df_additional.dropna()
-                extra_classes = set(df_additional["Label"].unique())
-            else:
-                df = self.get_event_df(edf_path, start)
-                df_additional = None
+        def validate_tables(label_df, label_extra_df, allowed, stage):
+            validate_event_table(label_df, allowed_labels=allowed, context=f"{edf_path} primary {stage}")
+            if (label_extra_df is not None) != has_alternate:
+                raise ValueError(f"{edf_path} {stage} changed alternate annotation availability.")
+            if label_extra_df is not None:
+                validate_event_table(label_extra_df, allowed_labels=allowed, context=f"{edf_path} alternate {stage}")
+            for table in (label_df, label_extra_df):
+                if table is not None and table["Starttime"].dt.tz != start.tz:
+                    raise ValueError(f"{edf_path} {stage} must use the recording timezone.")
 
-            if self.remove_unmapped_events:
-                df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
-            else:
-                df["Label"] = df["Label"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else x)
-            df = df.dropna()
-
-            if self.force_one_day and (len(df["Starttime"].dt.date.unique()) > 2 or len(df["Endtime"].dt.date.unique()) > 2):
-                raise ValueError(
-                    f"Edf file: {edf_path} appears to be longer than one entire day. Is this a loading error? If not, set force_one_day = False"
-                )
-
-            classes = set(df["Label"].unique())
-
-            start = max(start, df["Starttime"].min())
-            end = min(end, df["Endtime"].max())
-        else:
-            df = None
-            df_additional = None
-
-        if self.prepare_patient_callback is not None:
-            prepared = self.prepare_patient_callback(
-                label_df=df,
-                label_extra_df=df_additional,
-                patient=edf_path,
-            )
+        validate_tables(primary, alternate, supported, "reader output")
+        primary, alternate = primary.copy(), alternate.copy() if alternate is not None else None
+        if self.prepare_events_callback is not None:
+            try:
+                prepared = self.prepare_events_callback(label_df=primary, label_extra_df=alternate)
+            except Exception as error:
+                raise ValueError(f"{edf_path} prepare_events failed: {error}") from error
             if prepared is None:
+                logger.info(f"Rejected {edf_path} in prepare_events.")
                 return None
-            df, df_additional = prepared
-            if self.event_mapping is not None and (df is None or len(df) == 0):
-                raise ValueError(f"Edf file: {edf_path} was filtered out in prepare_patient")
-
-        return {"start": start, "end": end, "label_df": df, "label_extra_df": df_additional, "classes": classes, "extra_classes": extra_classes}
+            if not isinstance(prepared, tuple) or len(prepared) != 2:
+                raise ValueError(f"{edf_path} prepare_events must return (primary, alternate) or None.")
+            primary, alternate = prepared
+        validate_tables(primary, alternate, self.label_classes, "prepared events")
+        primary = primary[EVENT_COLUMNS].copy()
+        alternate = alternate[EVENT_COLUMNS].copy() if alternate is not None else None
+        if self.prepare_patient_callback is not None:
+            try:
+                prepared = self.prepare_patient_callback(label_df=primary, label_extra_df=alternate, patient=edf_path)
+            except Exception as error:
+                raise ValueError(f"{edf_path} prepare_patient failed: {error}") from error
+            if prepared is None:
+                logger.info(f"Rejected {edf_path} in prepare_patient.")
+                return None
+            if not isinstance(prepared, tuple) or len(prepared) != 2:
+                raise ValueError(f"{edf_path} prepare_patient must return (primary, alternate) or None.")
+            primary, alternate = prepared
+        validate_tables(primary, alternate, self.label_classes, "retained events")
+        if primary.empty:
+            logger.info(f"Rejected {edf_path}: no retained primary annotations.")
+            return None
+        if self.force_one_day and (len(primary["Starttime"].dt.date.unique()) > 2 or len(primary["Endtime"].dt.date.unique()) > 2):
+            raise ValueError(f"{edf_path} annotations span more than one day; set force_one_day=False if intended.")
+        start, end = max(start, primary["Starttime"].min()), min(end, primary["Endtime"].max())
+        return {"start": start, "end": end, "label_df": primary, "label_extra_df": alternate,
+                "classes": set(primary["Label"]), "extra_classes": set(alternate["Label"]) if alternate is not None else set()}
 
     def read_channels(self, file, start, end, selected_channels, index=None):
         """Read all source modes onto one shared grid before channel processing."""
@@ -1172,9 +1196,15 @@ class BaseDataset(Dataset, ABC):
         slow_warning_seconds = 30
         try:
             file = EDFFile.from_edf(edf_path)
-            labels = self.prepare_recording_labels(edf_path, file.start_date, file.end_date)
-            if labels is None:
-                return None
+        except Exception as error:
+            if raise_errors:
+                raise ValueError(f"Cannot read EDF file {edf_path}: {error}") from error
+            logger.warning(f"Cannot read EDF file {edf_path}: {error}")
+            return None
+        labels = self.prepare_recording_labels(edf_path, file.start_date, file.end_date)
+        if labels is None:
+            return None
+        try:
             file.start_date, file.end_date = labels["start"], labels["end"]
             file.start_offsets, file.length = self.build_window_index(labels)
             file.labels = EventIndex(labels["label_df"]) if labels["label_df"] is not None else None
@@ -1250,9 +1280,13 @@ class BaseDataset(Dataset, ABC):
         """Inspect read/resampled physical columns before fitting or transforms."""
         try:
             file = EDFFile.from_edf(edf_path)
-            labels = self.prepare_recording_labels(edf_path, file.start_date, file.end_date)
-            if labels is None:
-                return None
+        except Exception as exc:
+            logger.warning(f"Failed to read patient {edf_path} for summary: {exc}")
+            return None
+        labels = self.prepare_recording_labels(edf_path, file.start_date, file.end_date)
+        if labels is None:
+            return None
+        try:
             selected = {name for cfg in self.channels for name in cfg.physical_names}
             file.channels = [name for name in file.channels if name in selected]
             data_df = file.get_x(file.start_date, file.end_date, self.sample_frequency, self.resample_type)
@@ -1336,10 +1370,7 @@ class BaseDataset(Dataset, ABC):
         self.edf_files = file_handles
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
-
-        if not self.event_mapping:
-            self.classes = sorted(list(all_classes))
-            self.label_classes = list(self.classes)
+        self.observed_labels = set(all_classes)
 
         logger.info(
             f"Dataset initialized with {len(self.edf_files)}/{total_n_patients} patients. "

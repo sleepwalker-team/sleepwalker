@@ -14,8 +14,7 @@ import torch
 
 from sleepwalker.config import build_callback, import_name, read_yaml
 from sleepwalker.deployment import PackagedModel, load_packaged_model
-from sleepwalker.deployment.evaluation import apply_dependency_graph, patient_classification_metrics, predict_package, task_classes, validate_dataset_entry, validate_dependencies, write_prediction_feather, write_record
-from sleepwalker.prediction_transforms import apply_pipeline
+from sleepwalker.deployment.evaluation import analyze_patient, predict_package, task_classes, validate_dataset_entry, validate_dependencies, write_prediction_feather, write_record
 from sleepwalker.telemetry import telemetry_run
 from sleepwalker.trainer.Run import seed_everything
 from sleepwalker.trainer.utils.disk import json_ready
@@ -78,33 +77,6 @@ def system_task_classes(packages: Mapping[str, PackagedModel]) -> dict[str, list
                 raise ValueError(f"System packages both predict task {task!r}.")
             result[task] = classes
     return result
-
-
-def prepare_task_frames(predictions: pd.DataFrame, classes_by_task: Mapping[str, list[str]], pipeline: list, patient: str) -> dict[str, pd.DataFrame]:
-    frames = {}
-    for task in classes_by_task:
-        frame = predictions.loc[predictions["task"] == task].drop(columns=["patient", "task"]).dropna(axis=1, how="all")
-        if frame.empty:
-            raise ValueError(f"Patient predictions are missing task '{task}'.")
-        frame = frame.loc[frame["valid"]].drop(columns="valid").reset_index(drop=True)
-        frame = apply_pipeline(frame, pipeline, patient=patient, signals=[])
-        if frame.empty:
-            raise ValueError(f"Patient has no analyzable predictions for task '{task}'.")
-        frames[task] = frame
-    return frames
-
-
-def analyze_patient(predictions: pd.DataFrame, resolutions: Mapping[str, pd.Timedelta], classes_by_task: Mapping[str, list[str]], pipeline: list, dependencies: list[dict[str, Any]], patient: str = "") -> dict[str, dict]:
-    frames = prepare_task_frames(predictions, classes_by_task, pipeline, patient)
-    frames = apply_dependency_graph(frames, resolutions, dependencies)
-    return {
-        task: {
-            "classes": classes,
-            "metrics": patient_classification_metrics(frames[task], classes),
-            "n_endpoint_windows": len(frames[task]),
-        }
-        for task, classes in classes_by_task.items()
-    }
 
 
 def completed_output(output: Path, system_name: str) -> bool:

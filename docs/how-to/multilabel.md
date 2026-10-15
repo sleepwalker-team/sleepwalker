@@ -38,7 +38,7 @@ The fields per task:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `labels` | required | Class names of this task. A class may appear in **only one** task; `normalize_multitask_config` rejects duplicates. |
+| `labels` | required | Class names of this task. Labels must be unique within each task; multiple heads may share the same labels and targets. |
 | `default` | required | The implicit negative class, or `None`. Its column is dropped before target construction, so "no event" needs no annotation. |
 | `percentage` | `0.5` | A class must cover at least this fraction of a step to win the step, as in [`prepare_multiclass_target`](../reference/api.md#prepare-multiclass-target). |
 | `target_resolution` | required | Real-time duration covered by one output step of this task. |
@@ -106,6 +106,10 @@ dataset = SleepEDFx(
 It returns `{"target": y, "target_mask": m}` per item, plus `annotation` if `annotation_labels` are requested and `target_extra`/`target_extra_mask` when the adapter provides a second annotation timeline. A window is rejected (returns `None`) only if **no** task can be resolved; with `allow_partial=True`, unresolvable tasks keep their zero block and a false mask instead of rejecting the whole window. If `class_cnts` are supplied, the callback also applies frequency-based subsampling: an item is kept with probability \(\min_t \, p_{\min}^{(t)} / p_{y}^{(t)}\), the same balancing idea as `balance_batches` but applied per task.
 
 ## MultiLabelTrainer
+
+`balance_batches=True` enables the same frequency-based acceptance idea as the single-head trainer. The normal trainer warmup estimates missing per-task counts from training only, sharing that pass with loss weighting, and stores them in `task_config[task]["class_counts"]`. It then binds the existing `class_cnts` target-callback argument before training workers start. Supplied counts skip estimation; resumed runs reuse saved counts. Loss weighting remains independently configurable.
+
+Acceptance is one decision per sample, using the smallest acceptance probability across its valid task targets. Identical DRIVEN heads therefore share one decision. This produces approximately balanced acceptance for a shared target, not guaranteed class quotas in each minibatch or independently balanced marginals for arbitrary tasks. Validation and test callbacks are not balanced.
 
 [`MultiLabelTrainer`](../reference/trainers.md#multilabel-trainer) trains one model that emits a **dictionary of logits**, one entry per task:
 

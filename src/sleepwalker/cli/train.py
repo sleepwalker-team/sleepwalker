@@ -2,7 +2,7 @@
 """Run a standard Sleepwalker training configuration.
 
 This tool is a small YAML adapter around the normal Python training API.  The
-canonical example is ``configs/train/desaturation_hsp.yml``.  Components use a
+complete tutorial is ``configs/examples/sleep_edfx_multiclass.yml``.  Components use a
 fully qualified ``name`` and put constructor arguments directly beside it::
 
     data:
@@ -93,10 +93,12 @@ import torch
 
 from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_component, build_factory, build_value, import_name, read_yaml
 from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.events import validate_event_labels
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.utils import random_split
-from sleepwalker.trainer.BaseTrainer import BaseTrainer
+from sleepwalker.trainer.BatchTrainer import BatchTrainer
+from sleepwalker.trainer.utils.disk import load_checkpoint
 from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.utils import logger
@@ -112,17 +114,21 @@ DATA_FIELDS = {
 }
 DRY_RUN_PATIENTS = {"train": 30, "validation": 10, "test": 10}
 
+
 def build_dataset(entry: Mapping[str, Any]):
     """Build the dataset shown in one ``data`` entry."""
     spec = {key: value for key, value in entry.items() if key not in DATA_FIELDS}
     if "channels" in spec:
         spec["channels"] = [build_channel(channel) for channel in spec["channels"]]
-    for callback_name in ("prepare_patient", "prepare_target", "prepare_sample", "prepare_channels"):
+    for callback_name in ("prepare_events", "prepare_patient", "prepare_target", "prepare_sample", "prepare_channels"):
         if callback_name in spec:
             spec[callback_name] = build_callback(spec[callback_name])
     dataset = build_component(spec)
     if "output_classes" in entry:
-        dataset.classes = list(entry["output_classes"])
+        dataset.classes = validate_event_labels(entry["output_classes"], context="output_classes")
+        target_spec = entry.get("prepare_target")
+        if isinstance(target_spec, Mapping) and "target_classes" in target_spec and list(target_spec["target_classes"]) != dataset.classes:
+            raise ValueError("prepare_target.target_classes must match output_classes in declared order.")
     return dataset
 
 
@@ -237,6 +243,7 @@ def run_options_from_dict(config: Mapping[str, Any], dry_run: bool, fold: str | 
         run_options["batch_size"] = min(int(run_options["batch_size"]), 16)
         run_options["n_samples"] = min(int(run_options.get("n_samples") or 512), 512)
         run_options["n_samples_test"] = min(int(run_options.get("n_samples_test") or 256), 256)
+        run_options["n_samples_validation"] = min(int(run_options.get("n_samples_validation") or 256), 256)
         run_options["num_workers_dataloader"] = 0
         run_options["test_repeats"] = [1]
         run_options["use_mlflow"] = False
@@ -265,6 +272,8 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
             "sampling_frequency": context_dataset.sample_frequency,
         })
 
+    trainer_type = import_name(config["trainer"]["name"])
+    batch_fit = isinstance(trainer_type, type) and issubclass(trainer_type, BatchTrainer)
     model = build_component(config["model"], context)
     train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold, model=model)
     training_dataset = combine_datasets(train_datasets)
@@ -274,17 +283,31 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
         if "input_offsets" in input_meta and hasattr(dataset, "set_input_offsets"):
             dataset.set_input_offsets(input_meta["input_offsets"])
     trainer_spec = copy.deepcopy(config["trainer"])
-    trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
+    if batch_fit:
+        if "optimizer" in trainer_spec or "epochs" in trainer_spec or "lr_scheduler" in trainer_spec:
+            raise ValueError("BatchTrainer has no optimizer, scheduler or epoch lifecycle.")
+        if dry_run:
+            trainer_spec.update(store_on_disk=False, feature_path=None)
+    else:
+        trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
     if trainer_spec.get("lr_scheduler") is not None:
         trainer_spec["lr_scheduler"] = build_factory(trainer_spec["lr_scheduler"], "optimizer")
     if "loss_function" in trainer_spec:
         trainer_spec["loss_function"] = build_value(trainer_spec["loss_function"])
-    if dry_run:
+    if dry_run and not batch_fit:
         trainer_spec["epochs"] = 1
         trainer_spec["eval_every"] = 1
         trainer_spec["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
         trainer_spec["warmup_device"] = "cpu"
     trainer = build_component(trainer_spec, context)
+    contract = trainer.classification_contract() if hasattr(trainer, "classification_contract") else None
+    if contract is not None and contract.get("type") == "single-head-multiclass":
+        expected_classes = list(contract["classes"])
+        for entry in entries:
+            if "output_classes" not in entry or list(entry["output_classes"]) != expected_classes:
+                raise ValueError("Every multiclass training dataset must explicitly declare output_classes in trainer order.")
+        if hasattr(model, "classes") and list(model.classes) != expected_classes:
+            raise ValueError("Model classes must match the trainer and data.output_classes in declared order.")
     run_options = run_options_from_dict(config, dry_run, selected_fold)
 
     return RunCfg(
@@ -327,7 +350,7 @@ def validate_model_input(model, dataset) -> None:
 def runcfg_from_checkpoint(path: str | Path) -> RunCfg:
     """Restore trainer state and rebuild datasets from the run's serialized configuration."""
     checkpoint_path = Path(path)
-    trainer, model = BaseTrainer.load_checkpoint(checkpoint_path)
+    trainer, model = load_checkpoint(checkpoint_path)
     config_path = checkpoint_path.parent.parent / "hparams.yml"
     if not config_path.is_file():
         raise FileNotFoundError(f"Expected the run configuration at {config_path}.")
@@ -361,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_parser = commands.add_parser("train", help="Start a new training run from YAML.")
     train_config = train_parser.add_mutually_exclusive_group(required=True)
-    train_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    train_config.add_argument("config", nargs="?", help="Training YAML file.")
     train_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     train_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
 
@@ -370,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     dry_parser = commands.add_parser("dry", help="Run one epoch with small patient and sample budgets.")
     dry_config = dry_parser.add_mutually_exclusive_group(required=True)
-    dry_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    dry_config.add_argument("config", nargs="?", help="Training YAML file.")
     dry_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     dry_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
     return parser

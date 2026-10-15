@@ -6,6 +6,10 @@ from pathlib import Path
 import re
 import pandas as pd
 from .Basedataset import BaseDataset  
+from sleepwalker.datasets.events import decode_event_labels
+
+WSC_EVENT_LABELS = {'wake': 'wake', 'w': 'wake', 'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'r': 'rem', 'rem': 'rem', 'no stage': 'unscored', 'u': 'unscored'}
+
 
 class WSC(BaseDataset):
     """
@@ -84,6 +88,9 @@ class WSC(BaseDataset):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*WSC_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         folder = Path(edf_path).parent
         name = Path(edf_path).name.split(".edf")[0]
@@ -142,4 +149,4 @@ class WSC(BaseDataset):
             "Duration": [e - s for s, e in zip(start_times, end_times)]
         })
 
-        return df[["Label", "Starttime", "Endtime", "Duration"]]
+        return decode_event_labels(df[["Label", "Starttime", "Endtime", "Duration"]], mapping=WSC_EVENT_LABELS)

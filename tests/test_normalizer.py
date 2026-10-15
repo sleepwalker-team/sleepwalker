@@ -114,8 +114,8 @@ def test_eegfilternorm_integration():
     dataset = SyntheticDataset(
         channels=[ChannelConfig("EEG", ["EEG"], preprocessors=[] if normalizer is None else [normalizer])],
         sample_frequency=fs,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
     dataset.initialize(edf_files)
     iterate_dataset(dataset, NUM_BATCHES)

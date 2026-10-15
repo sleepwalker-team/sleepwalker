@@ -16,6 +16,7 @@ import pyedflib
 import requests
 from tqdm import tqdm
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.events import decode_event_labels
 from sleepwalker.utils import logger
 
 SERVER_URL_SC = "https://physionet.org/files/sleep-edfx/1.0.0/sleep-cassette"
@@ -468,6 +469,9 @@ def download_dataset(out_folder, server_url, file_names):
         download_url = server_url + "/{}".format(file_name)
         download_and_validate(download_url, sha256, out_file_path, prefix=f"[{i+1}/{len(file_names)}] ")
 
+SLEEPEDFX_EVENT_LABELS = {'sleep stage w': 'wake', 'sleep stage 1': 'n1', 'sleep stage 2': 'n2', 'sleep stage 3': 'n3', 'sleep stage 4': 'n3', 'sleep stage r': 'rem', 'sleep stage ?': 'unscored', 'movement time': 'movement'}
+
+
 class SleepEDFx(BaseDataset):
     """Read Sleep-EDF PSG recordings and hypnogram annotations.
 
@@ -512,6 +516,9 @@ class SleepEDFx(BaseDataset):
         ): 
         super().__init__(**kwargs)
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*SLEEPEDFX_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, fpath: str, start_date: pd.Timestamp) -> pd.DataFrame:
         """Load the hypnogram annotations corresponding to one PSG file.
 
@@ -548,18 +555,16 @@ class SleepEDFx(BaseDataset):
         with pyedflib.EdfReader(eventfile) as f:
             timestamps, event_len, events = f.readAnnotations()
             data = []
-            curtime = start_date
+            for onset, duration, label in zip(timestamps, event_len, events):
+                duration = pd.to_timedelta(duration, unit="s")
+                if pd.isna(duration) or duration <= pd.Timedelta(0):
+                    continue  # Markers without a supported interval cannot become targets.
+                event_start = start_date + pd.to_timedelta(onset, unit="s")
+                data.append({"Label": label, "SourceLabel": label, "Starttime": event_start, "Endtime": event_start + duration})
 
-            for l, e in zip(event_len, events):
-                e = e.lower()
-                len_sec = pd.to_timedelta(f"{l} s")
-                data.append({"Label":e, "Starttime":curtime, "Endtime":curtime+len_sec})
-                
-                curtime += len_sec
+            df = pd.DataFrame(data, columns=["Label", "SourceLabel", "Starttime", "Endtime"])
             
-            df = pd.DataFrame(data)
-            
-            return df
+            return decode_event_labels(df, mapping=SLEEPEDFX_EVENT_LABELS)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download the SleepEDF data.')

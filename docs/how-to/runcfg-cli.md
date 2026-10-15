@@ -175,7 +175,7 @@ dataset; each package evaluates its own entry, without a reference dataset.
 
 Each specification names `channels`, `sample_frequency`, `total_input`, `stride`,
 `resample_type`
-and `event_mapping`. Each channel declares its logical name, physical aliases,
+and explicit `annotation_labels` / `prepare_events`. Each channel declares its logical name, physical aliases,
 `read_mode` and `preprocessors` explicitly. Optional callbacks remain normal constructor
 arguments. YAML anchors may reuse definitions explicitly within a file.
 Older evaluation configs that relied on package inheritance must supply these

@@ -471,8 +471,8 @@ def test_peprocessor_chain(device="cuda"):
         total_input="120s",
         channels=[ChannelConfig("EEG", ["EEG"])],
         sample_frequency=100,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
     dataset.initialize(edf_files)
     iterate_dataset(dataset, NUM_BATCHES, preprocessors=preprocessors, device=device)  

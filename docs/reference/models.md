@@ -6,6 +6,17 @@ Models are selected in YAML by their **fully qualified import path** (`sleepwalk
 
 ## Base classes
 
+`PreprocessorEmbeddingModel` provides an explicit preprocessing-only feature
+pipeline. `BatchClassifierModel` owns a frozen encoder and fitted probability
+estimator, and exposes both classification and embeddings. Their public input
+remains the encoder's waveform input, with preprocessing applied once; see
+[batch training](batch-training.md).
+
+`sleepwalker.models.DRIVEN.DRIVEN` exposes named independent EfficientNetV2-S
+branch heads and concatenated probability/pooled features. Its
+[literature recipe](https://github.com/sleepwalker-team/models/tree/main/literature/osa/driven)
+documents source topology, geometry, stages and protocol differences.
+
 ### `BaseModel` {#base-model}
 
 ::: sleepwalker.models.BaseModel.BaseModel

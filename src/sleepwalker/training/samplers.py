@@ -1,9 +1,21 @@
 """Samplers used by the shared training loader."""
 
 from collections.abc import Iterator
+import random
 
 import torch
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, RandomSampler as TorchRandomSampler
+
+
+class RandomSampler(TorchRandomSampler):
+    """Avoid a full cohort permutation when selecting a smaller random pass."""
+
+    def __iter__(self):
+        if not self.replacement and self.num_samples < len(self.data_source):
+            seed = int(torch.empty((), dtype=torch.int64).random_(generator=self.generator).item())
+            yield from random.Random(seed).sample(range(len(self.data_source)), self.num_samples)
+        else:
+            yield from super().__iter__()
 
 
 class PatientSampler(Sampler[int]):

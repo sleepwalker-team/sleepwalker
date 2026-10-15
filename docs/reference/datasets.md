@@ -25,8 +25,7 @@ Each adapter has its own generated reference page below. The pages render the cl
 | `NCHSDB` | [NCHSDB](datasets/NCHSDB.md) | NCHS database adapter. |
 | `Numom2b` | [Numom2b](datasets/Numom2b.md) | Numom2b adapter. |
 
-!!! note "Label casing is a convention, not a guarantee"
-    Several adapters (`SleepEDFx`, `HSP`, `MNC`, `Ruhrlandklinik`, `Stages`, `SVUH-UCD`, `WSC`) lowercase annotation labels while reading them, so `event_mapping` keys must be lowercase for those. The convention is not enforced across adapters — check the adapter page or the raw labels when a mapping silently drops events. See [Loading data with labels](../how-to/data.md#loading-data-with-labels).
+Readers normalize recognized source concepts to the [shared event vocabulary](events.md). `supported_events()` describes reader capabilities; `annotation_labels` declares the allowed labels after `prepare_events`, independently of the model's output classes. Original source text remains diagnostic metadata. Unknown meanings are explicit `other` events rather than guessed physiology.
 
 ## Composition and utility datasets
 

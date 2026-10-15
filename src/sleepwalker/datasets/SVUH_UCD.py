@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import os
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.events import decode_event_labels
 from datetime import timedelta
 
 def convert_to_datetime(row, start_date):
@@ -13,6 +14,9 @@ def convert_to_datetime(row, start_date):
         complete_date += timedelta(days=1)
 
     return complete_date
+
+SVUH_UCD_EVENT_LABELS = {'0': 'wake', '1': 'n1', '2': 'n2', '3': 'n3', '4': 'n3', '5': 'rem', '8': 'unscored', 'apnea-': 'apnea', 'apnea-c': 'central_apnea', 'apnea-o': 'obstructive_apnea', 'apnea-m': 'mixed_apnea', 'hyp-c': 'hypopnea', 'hyp-o': 'hypopnea', 'hyp-m': 'hypopnea'}
+
 
 class SVUH_UCD(BaseDataset):
     """Dataset Summary
@@ -76,6 +80,9 @@ class SVUH_UCD(BaseDataset):
     def has_extra_target(self):
         return False
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*SVUH_UCD_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, fpath, start_date):
         repo_folder, filename = os.path.split(fpath) 
         pid = filename.split('.rec')[0]
@@ -114,4 +121,4 @@ class SVUH_UCD(BaseDataset):
 
         df["Label"] = df.apply(lambda row: None if row.Label is None else row.Label.lower().strip(), axis=1)
         df = df.dropna()
-        return df
+        return decode_event_labels(df, mapping=SVUH_UCD_EVENT_LABELS)

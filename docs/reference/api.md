@@ -114,8 +114,6 @@ Sleepwalker does not currently expose a public dataset-download function. See th
 
 ### Patient callbacks {#patient-callbacks}
 
-::: sleepwalker.training.callbacks.trim_patient_to_events
-
 ::: sleepwalker.training.callbacks.prepare_patient_events
 
 ### `class_weights_for_loss()` {#class-weights-for-loss}

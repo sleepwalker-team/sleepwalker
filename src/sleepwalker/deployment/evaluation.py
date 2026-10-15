@@ -14,8 +14,10 @@ import torch
 from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_value, import_name
 from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
+from sleepwalker.core.signal import read_edf_meta
 from sleepwalker.deployment.package import PackagedModel
-from sleepwalker.metrics import accuracy_from_confusion_matrix, cohen_kappa_from_confusion_matrix, f1_per_class_from_confusion_matrix, precision_from_confusion_matrix, recall_from_confusion_matrix, support_from_confusion_matrix
+from sleepwalker.prediction_transforms import apply_pipeline
+from sleepwalker.metrics import accuracy_from_confusion_matrix, cohen_kappa_from_confusion_matrix, f1_per_class_from_confusion_matrix, precision_from_confusion_matrix, recall_from_confusion_matrix, support_from_confusion_matrix, probability_metrics
 from sleepwalker.trainer.utils.disk import NumpyEncoder
 from sleepwalker.trainer.utils.splits import fold_names, load_files
 from sleepwalker.trainer.utils.targets import normalize_multitask_config, prepare_multitask_target, prepare_single_target
@@ -209,18 +211,25 @@ def patient_classification_metrics(frame: pd.DataFrame, classes: list[str]) -> d
     if missing:
         raise ValueError(f"Cannot calculate classification metrics; missing columns {missing}.")
     probabilities = frame[[f"prob__{name}" for name in classes]].to_numpy(dtype=float)
-    target = frame["target"].to_numpy(dtype=int)
+    target = frame["target"].to_numpy()
+    probability = probability_metrics(target, probabilities, classes)
+    target = target.astype(int)
     prediction = probabilities.argmax(axis=1)
-    return confusion_metrics(confusion_matrix(target, prediction, labels=range(len(classes))), classes)
+    metrics = confusion_metrics(confusion_matrix(target, prediction, labels=range(len(classes))), classes)
+    for label, values in probability.pop("per_class").items():
+        metrics["per_class"][label].update(values)
+    return {**metrics, **probability}
 
 
 def mean_patient_metrics(values: list[dict[str, Any]], classes: list[str]) -> dict[str, Any]:
-    fields = ["accuracy", "f1_micro", "f1_macro", "cohen_kappa", "precision_macro", "recall_macro", "sensitivity_macro"]
-    result = {field: float(np.mean([value[field] for value in values])) if values else None for field in fields}
+    fields = ["accuracy", "f1_micro", "f1_macro", "cohen_kappa", "precision_macro", "recall_macro", "sensitivity_macro", "auroc_macro", "average_precision_macro"]
+    result = {field: float(np.mean([value[field] for value in values])) if values and all(value.get(field) is not None for value in values) else None for field in fields}
+    result["n_patients"] = len(values)
+    result["probability_mean_policy"] = "all_evaluated_patients; undefined constituent yields null"
     result["per_class"] = {
         name: {
-            field: float(np.mean([value["per_class"][name][field] for value in values])) if values else None
-            for field in ["precision", "recall", "sensitivity", "f1"]
+            field: float(np.mean([value["per_class"][name][field] for value in values])) if values and all(value["per_class"][name].get(field) is not None for value in values) else None
+            for field in ["precision", "recall", "sensitivity", "f1", "auroc", "average_precision"]
         }
         for name in classes
     }
@@ -384,3 +393,64 @@ def apply_dependency_graph(frames: Mapping[str, pd.DataFrame], resolutions: Mapp
         source, target = dependency["source"], dependency["target"]
         result[target] = condition_endpoint(result[target], result[source], child_resolution=resolutions[target], parent_resolution=resolutions[source], active_classes=dependency["active_classes"], target_default=dependency["target_default"], minimum_coverage=dependency["minimum_coverage"])
     return result
+
+
+def evaluate_predictions(handle, package, dataset, predictions, analyses, *, dataset_label, fold, n_patients_requested):
+    """Analyze complete patient timelines and write patient/pooled JSONL metrics.
+
+    Prediction, target preparation and cohort selection happen before this call.
+    Each analysis sees only valid rows. Pool its analyzed targets/probabilities
+    across patients to calculate cohort curves; patient means stay separate.
+    Prediction tables and pooled scores are held in RAM.
+    """
+    classes_by_task = task_classes(package)
+    required = {"patient", "task", "valid"}
+    if not required.issubset(predictions.columns):
+        raise ValueError(f"Prediction table is missing evaluation columns {sorted(required - set(predictions))}.")
+    if predictions.empty:
+        raise ValueError(f"Dataset {dataset_label!r} produced no prediction rows.")
+    signal_map = {str(file.path): list(read_edf_meta(file.path)["signals"]) for file in dataset.edf_files}
+    if set(predictions["task"]) - set(classes_by_task) or set(predictions["patient"].astype(str)) - set(signal_map):
+        raise ValueError("Prediction table contains unknown patients or tasks.")
+    logger.progress_start(total=predictions.groupby(["patient", "task"]).ngroups * len(analyses), desc=f"{dataset_label} | analysis", leave=True)
+    try:
+        for analysis_name, pipeline in analyses:
+            for task, classes in classes_by_task.items():
+                common = {"package": package.name, "task": task, "dataset": dataset_label, "fold": fold, "analysis": analysis_name, "classes": classes}
+                columns = ["target", *(f"prob__{label}" for label in classes)]
+                patient_metrics, patient_matrices, scores = [], {}, []
+                for raw_patient, patient_frame in predictions.loc[predictions["task"] == task].groupby("patient", sort=False):
+                    patient = str(raw_patient)
+                    frame = patient_frame.loc[patient_frame["valid"]].drop(columns=["patient", "task", "valid"]).reset_index(drop=True)
+                    # Other task heads contribute all-NA columns in long tables.
+                    frame = frame[[column for column in frame if column in ["time", *columns] or not frame[column].isna().all()]]
+                    analyzed = apply_pipeline(frame, pipeline, patient=patient, signals=signal_map[patient]) if not frame.empty else frame
+                    logger.progress_status(f"{dataset_label} | analysis | patient {Path(patient).name} | {analysis_name} | {task} | kept {len(analyzed):,}/{len(patient_frame):,}")
+                    logger.progress_advance(1)
+                    if analyzed.empty:
+                        continue
+                    metrics = patient_classification_metrics(analyzed, classes)
+                    patient_metrics.append(metrics)
+                    patient_matrices[patient] = metrics["confusion_matrix"]
+                    scores.append(analyzed[columns])
+                    write_record(handle, {**common, "record_type": "patient", "patient": patient, "metrics": metrics})
+                pooled = pd.concat(scores, ignore_index=True) if scores else pd.DataFrame(columns=columns, dtype=float)
+                metrics = patient_classification_metrics(pooled, classes)
+                logger.info(f"{dataset_label}/{analysis_name}/{task}: {metrics['n_windows']} windows, accuracy {metrics['accuracy']:.4f}, macro F1 {metrics['f1_macro']:.4f}, kappa {metrics['cohen_kappa']:.4f}.")
+                write_record(handle, {**common, "record_type": "aggregate", "n_patients_requested": n_patients_requested, "n_patients_initialized": dataset.get_n_patients(), "n_patients_evaluated": len(patient_metrics), "metrics": metrics, "patient_mean_metrics": mean_patient_metrics(patient_metrics, classes), "patient_confusion_matrices": patient_matrices})
+    finally:
+        logger.progress_close()
+
+
+def analyze_patient(predictions, resolutions, classes_by_task, pipeline, dependencies, patient=""):
+    """Analyze one system timeline, then apply cross-task dependencies."""
+    frames = {}
+    for task, classes in classes_by_task.items():
+        frame = predictions.loc[(predictions["task"] == task) & predictions["valid"]].drop(columns=["patient", "task", "valid"]).reset_index(drop=True)
+        columns = ["time", "target", *(f"prob__{label}" for label in classes)]
+        frame = frame[[column for column in frame if column in columns or not frame[column].isna().all()]]
+        frames[task] = apply_pipeline(frame, pipeline, patient=patient, signals=[]) if not frame.empty else frame
+        if frames[task].empty:
+            raise ValueError(f"Patient has no analyzable predictions for task '{task}'.")
+    frames = apply_dependency_graph(frames, resolutions, dependencies)
+    return {task: {"classes": classes, "metrics": patient_classification_metrics(frames[task], classes), "n_endpoint_windows": len(frames[task])} for task, classes in classes_by_task.items()}

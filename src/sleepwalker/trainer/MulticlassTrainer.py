@@ -179,6 +179,7 @@ class MulticlassTrainer(BaseTrainer):
         class_cnts = self.class_counts
         if (self.balance_batches or self.loss_mode != "regular") and class_cnts is None:
             class_cnts = estimate_class_cnts(data_loader, classes=self.classes)
+            self.class_counts = class_cnts
             logger.info(f"Class counts are {class_cnts}")
         elif class_cnts is not None:
             logger.info(f"Using configured class counts: {class_cnts}")
@@ -199,10 +200,6 @@ class MulticlassTrainer(BaseTrainer):
                 if base_callback is None:
                     raise ValueError("balance_batches requires a prepare_target callback on the training dataset.")
             if can_balance_batches:
-                # TODO: Rebuild the loader (or implement balancing in a sampler)
-                # before enabling this path. Persistent DataLoader workers hold
-                # their own dataset copies, so mutating the callback here after
-                # class-count estimation does not affect those workers.
                 for current_ds in current_datasets:
                     base_callback = getattr(current_ds, "_base_prepare_target_callback", current_ds.prepare_target_callback)
                     current_ds._base_prepare_target_callback = base_callback

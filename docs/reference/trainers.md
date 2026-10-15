@@ -1,8 +1,19 @@
 # Trainers and targets
 
-A trainer owns everything around the model's forward pass: the loss function, the optimizer and learning-rate schedule, the epoch and validation cadence, early stopping, checkpointing, and the metrics a run reports. The user-facing guide is [Train a multiclass model](../how-to/train-multiclass.md); this page renders the generated reference for the trainer classes, the target-preparation callbacks, and the loss helpers.
+Gradient trainers own the loss, optimizer, schedule, epochs, validation and checkpointing around a model's forward pass. The independent `BatchTrainer` freezes an embedding model, extracts aligned rows and fits a native estimator without an optimizer or epoch lifecycle. See [batch training](batch-training.md) for storage, validation, resume and export contracts, and [Train a multiclass model](../how-to/train-multiclass.md) for gradient training.
 
 ## Trainer classes
+
+### `BatchTrainer`
+
+::: sleepwalker.trainer.BatchTrainer.BatchTrainer
+    options:
+      show_root_heading: false
+      members:
+        - fit
+        - test
+        - save_checkpoint
+        - load_checkpoint
 
 ### `BaseTrainer` {#base-trainer}
 

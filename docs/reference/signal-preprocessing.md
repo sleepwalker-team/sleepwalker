@@ -1,6 +1,6 @@
 # Recording scaling and delayed channel slices
 
-These reusable components provide recording scaling, selected channel scaling/clipping and delayed window slicing. Their motivating application is DRIVEN; the branch model, association recipe, batch trainer and native training/evaluation configurations remain pending.
+These reusable components provide recording scaling, selected channel scaling/clipping and delayed window slicing. Their motivating application is DRIVEN; see [batch training](batch-training.md) for its two-stage training flow and [annotation events](events.md) for task preparation.
 
 ## Recording scaling
 

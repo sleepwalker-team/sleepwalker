@@ -45,6 +45,10 @@ This is equivalent to the lambda above: the config builder injects `model.parame
 
 ## What happens inside fit()
 
+Warmup uses the training loader's population, batch sampler, collate function and configured worker count, with nonpersistent workers. The existing trainer and model warmup hooks decide whether they need to consume batches, based on their configuration and saved state. Count estimation updates the trainer in the main process; preprocessing updates the model on its warmup device. Callback changes are applied to the original dataset between passes. Only after preparation finishes does the original training loader start its workers, so persistent workers receive the final configuration.
+
+This is one shared preparation phase, with no balancing-specific prepass. A sample cap limits the population seen by each pass; a full cohort pass occurs only when the supplied loader requests it. Resuming reuses saved counts, rebuilds loss weights and rebinds training callbacks to the reconstructed dataset. It does not re-estimate counts or refit model preprocessing.
+
 The trainer executes the training lifecycle through `fit(model, train_loader, val_loader)`. The figure below shows a run with `eval_every=2`, `save_every=5`, and `early_stopping=4`:
 
 ![The training lifecycle: warmup, training epochs, periodic validation, checkpoints, best-epoch selection, and early stopping](../assets/figures/trainer-lifecycle.png)
@@ -142,15 +146,15 @@ The default `prepare_sample` is [`prepare_tensor_sample()`](../reference/api.md#
 ```python
 from functools import partial
 
-from sleepwalker.training.callbacks import trim_patient_to_events
+from sleepwalker.training.callbacks import prepare_patient_events
 
 dataset = SleepEDFx(
     ...,
-    prepare_patient=partial(trim_patient_to_events, keep_events=["n1", "n2", "n3", "rem"]),
+    prepare_patient=partial(prepare_patient_events, keep_events=["n1", "n2", "n3", "rem"]),
 )
 ```
 
-After `prepare_patient` returns, `initialize()` no longer treats the recording as one continuous usable region. It scans the retained intervals for gaps and builds a per-patient list of window offsets that lie inside the connected blocks of retained labels. A night whose annotations stop after the last sleep epoch therefore yields windows only around the actual sleep period, and the gaps between annotation blocks are never sampled. Use [`trim_patient_to_events`](../reference/api.md#patient-callbacks) or [`prepare_patient_events`](../reference/api.md#patient-callbacks) for this; the latter additionally drops events shorter than `min_seconds`.
+After `prepare_patient` returns, `initialize()` no longer treats the recording as one continuous usable region. It scans the retained intervals for gaps and builds a per-patient list of window offsets that lie inside the connected blocks of retained labels. A night whose annotations stop after the last sleep epoch therefore yields windows only around the actual sleep period, and the gaps between annotation blocks are never sampled. Use [`prepare_patient`](../reference/api.md#patient-callbacks) for this; its optional `min_seconds` and `labels` settings also filter short events before trimming.
 
 !!! note "`prepare_patient` rejects annotations, not patients"
     Returning `None` from `prepare_patient` drops that patient during initialization. An empty retained primary table also excludes the patient because it cannot produce a labelled window. Invalid schemas and undeclared labels raise errors. Recording bounds and observed labels are computed after this callback. Cohort-level decisions that compare patients to each other ("drop the shortest sleepers") do not belong in this hook either: they need statistics over all patients, which is what `get_patient_stats(...)` and the configured `patient_filter` in a training config are for. Split-level filters may only *remove* paths from an existing partition, never add new ones.
@@ -306,7 +310,7 @@ data:
   stride: 30s
   output_classes: &classes [wake, n1, n2, n3, rem]
   prepare_patient:
-    name: sleepwalker.training.callbacks.trim_patient_to_events
+    name: sleepwalker.training.callbacks.prepare_patient_events
     keep_events: [n1, n2, n3, rem]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target

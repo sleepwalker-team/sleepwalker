@@ -18,6 +18,7 @@ from torchinfo import summary
 
 from sleepwalker.deployment import save_packaged_model
 from sleepwalker.models.StackedClassifierModel import StackedClassifierModel
+from sleepwalker.trainer.BatchTrainer import BatchTrainer
 from sleepwalker.trainer.utils.disk import write_json
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.training.execution import RepeatedViewModel
@@ -65,6 +66,9 @@ class RunCfg:
     export_package: bool = True
     package_path: str | None = None
     telemetry: dict[str, Any] | None = None
+    train_sampling: str | None = None
+    n_samples_validation: int | None = None
+    validation_sampling: str = "sequential"
 
 
 @dataclass
@@ -150,6 +154,9 @@ def run(cfg: RunCfg) -> RunResult:
     if cfg.collate_fn is None:
         raise ValueError("RunCfg.collate_fn must not be None.")
     train_dataset = combine_datasets(cfg.train_datasets)
+    batch_fit = isinstance(cfg.trainer, BatchTrainer)
+    if batch_fit and (cfg.patients_per_epoch is not None or cfg.patient_group_size is not None):
+        raise ValueError("Batch runs require an explicit feature population without rotating patient pools.")
     val_dataset = combine_datasets(cfg.val_datasets) if len(cfg.val_datasets) > 0 else None
     loader_seed = int(torch.initial_seed())
 
@@ -185,7 +192,7 @@ def run(cfg: RunCfg) -> RunResult:
         if val_dataset is not None:
             logger.info(f"Loaded {val_dataset.get_n_patients()} for validation")
         logger.info(f"Prepared {len(cfg.test_datasets)} test dataset(s)")
-        summary_input, _ =  cfg.model.input_spec()
+        summary_input, _ = cfg.model.input_spec()
         if isinstance(summary_input, dict):
             for input_name, input_shape in summary_input.items():
                 if len(input_shape) == 4:
@@ -194,7 +201,10 @@ def run(cfg: RunCfg) -> RunResult:
                     logger.info(f"Input '{input_name}' is {input_shape[1]} x {input_shape[2]}")
         elif summary_input is not None:
             logger.info(f"Input data is {summary_input[1]} x {summary_input[2]}")
-            summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
+            if not batch_fit:
+                summary(cfg.model, input_size=summary_input, depth=5, device="cpu", row_settings=["hide_recursive_layers"])
+            else:
+                logger.info(f"Feature model: {cfg.model.feature_dim()} values per row; the estimator is fitted after extraction.")
 
         train_loader = build_loader(
             train_dataset,
@@ -202,11 +212,12 @@ def run(cfg: RunCfg) -> RunResult:
             num_workers=cfg.num_workers_dataloader,
             n_samples=cfg.n_samples,
             collate_fn=cfg.collate_fn,
-            sampling="patient_balanced" if cfg.patients_per_epoch is not None else "random",
+            sampling=cfg.train_sampling or ("sequential" if batch_fit else "patient_balanced" if cfg.patients_per_epoch is not None else "random"),
             seed=loader_seed,
             patients_per_epoch=cfg.patients_per_epoch,
             patient_group_size=cfg.patient_group_size,
-            drop_last=True,
+            drop_last=not batch_fit,
+            rejection_strategy="none" if batch_fit else None,
         )
         val_loader = None
         if val_dataset is not None:
@@ -214,16 +225,21 @@ def run(cfg: RunCfg) -> RunResult:
                 val_dataset,
                 batch_size=cfg.batch_size,
                 num_workers=cfg.num_workers_dataloader,
-                n_samples=cfg.n_samples,
+                n_samples=cfg.n_samples_validation if batch_fit else cfg.n_samples,
                 collate_fn=cfg.collate_fn,
-                sampling="sequential",
+                sampling=cfg.validation_sampling,
                 seed=loader_seed + 1,
                 rejection_strategy="none",
             )
 
+        if batch_fit:
+            cfg.trainer.checkpoint_path = os.path.join(local_artifact_path, "batch", "checkpoint.pt")
         train_result = cfg.trainer.fit(cfg.model, train_loader, val_loader)
         if "best_model_state" in train_result:
             cfg.model.load_state_dict(train_result["best_model_state"])
+        if batch_fit:
+            cfg.meta_data["feature_extraction"] = cfg.trainer.extraction_info
+            write_json(os.path.join(local_artifact_path, "feature_extraction.json"), cfg.trainer.extraction_info, overwrite=True)
 
         export_final_checkpoint(cfg)
         if cfg.export_package:

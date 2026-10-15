@@ -97,7 +97,8 @@ from sleepwalker.datasets.events import validate_event_labels
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.utils import random_split
-from sleepwalker.trainer.BaseTrainer import BaseTrainer
+from sleepwalker.trainer.BatchTrainer import BatchTrainer
+from sleepwalker.trainer.utils.disk import load_checkpoint
 from sleepwalker.trainer.Run import RunCfg, run, seed_everything
 from sleepwalker.trainer.utils.splits import load_split
 from sleepwalker.utils import logger
@@ -112,6 +113,7 @@ DATA_FIELDS = {
     "patient_filter",
 }
 DRY_RUN_PATIENTS = {"train": 30, "validation": 10, "test": 10}
+
 
 def build_dataset(entry: Mapping[str, Any]):
     """Build the dataset shown in one ``data`` entry."""
@@ -241,6 +243,7 @@ def run_options_from_dict(config: Mapping[str, Any], dry_run: bool, fold: str | 
         run_options["batch_size"] = min(int(run_options["batch_size"]), 16)
         run_options["n_samples"] = min(int(run_options.get("n_samples") or 512), 512)
         run_options["n_samples_test"] = min(int(run_options.get("n_samples_test") or 256), 256)
+        run_options["n_samples_validation"] = min(int(run_options.get("n_samples_validation") or 256), 256)
         run_options["num_workers_dataloader"] = 0
         run_options["test_repeats"] = [1]
         run_options["use_mlflow"] = False
@@ -269,6 +272,8 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
             "sampling_frequency": context_dataset.sample_frequency,
         })
 
+    trainer_type = import_name(config["trainer"]["name"])
+    batch_fit = isinstance(trainer_type, type) and issubclass(trainer_type, BatchTrainer)
     model = build_component(config["model"], context)
     train_datasets, validation_datasets, test_datasets = initialize_datasets(config, dry_run=dry_run, fold=selected_fold, model=model)
     training_dataset = combine_datasets(train_datasets)
@@ -278,12 +283,18 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
         if "input_offsets" in input_meta and hasattr(dataset, "set_input_offsets"):
             dataset.set_input_offsets(input_meta["input_offsets"])
     trainer_spec = copy.deepcopy(config["trainer"])
-    trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
+    if batch_fit:
+        if "optimizer" in trainer_spec or "epochs" in trainer_spec or "lr_scheduler" in trainer_spec:
+            raise ValueError("BatchTrainer has no optimizer, scheduler or epoch lifecycle.")
+        if dry_run:
+            trainer_spec.update(store_on_disk=False, feature_path=None)
+    else:
+        trainer_spec["optimizer"] = build_factory(trainer_spec["optimizer"], "model")
     if trainer_spec.get("lr_scheduler") is not None:
         trainer_spec["lr_scheduler"] = build_factory(trainer_spec["lr_scheduler"], "optimizer")
     if "loss_function" in trainer_spec:
         trainer_spec["loss_function"] = build_value(trainer_spec["loss_function"])
-    if dry_run:
+    if dry_run and not batch_fit:
         trainer_spec["epochs"] = 1
         trainer_spec["eval_every"] = 1
         trainer_spec["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -339,7 +350,7 @@ def validate_model_input(model, dataset) -> None:
 def runcfg_from_checkpoint(path: str | Path) -> RunCfg:
     """Restore trainer state and rebuild datasets from the run's serialized configuration."""
     checkpoint_path = Path(path)
-    trainer, model = BaseTrainer.load_checkpoint(checkpoint_path)
+    trainer, model = load_checkpoint(checkpoint_path)
     config_path = checkpoint_path.parent.parent / "hparams.yml"
     if not config_path.is_file():
         raise FileNotFoundError(f"Expected the run configuration at {config_path}.")

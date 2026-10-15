@@ -364,7 +364,7 @@ def test_runcfg_from_checkpoint_reuses_serialized_trainer_and_model(tmp_path, mo
     checkpoint_path.parent.mkdir(parents=True)
     (checkpoint_path.parent.parent / "hparams.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
 
-    monkeypatch.setattr(train_tool.BaseTrainer, "load_checkpoint", lambda path: (trainer, model))
+    monkeypatch.setattr(train_tool, "load_checkpoint", lambda path: (trainer, model))
     monkeypatch.setattr(train_tool, "initialize_datasets", lambda current_config, dry_run=False, fold=None: ([dataset], [], []))
     monkeypatch.setattr(train_tool, "build_component", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resume must not build a model or trainer")))
 
@@ -379,7 +379,7 @@ def test_runcfg_from_checkpoint_requires_run_configuration(tmp_path, monkeypatch
     train_tool = load_train_tool()
     checkpoint_path = tmp_path / "run" / "10" / "checkpoint.pt"
     checkpoint_path.parent.mkdir(parents=True)
-    monkeypatch.setattr(train_tool.BaseTrainer, "load_checkpoint", lambda path: (object(), object()))
+    monkeypatch.setattr(train_tool, "load_checkpoint", lambda path: (object(), object()))
 
     with pytest.raises(FileNotFoundError, match="hparams.yml"):
         train_tool.runcfg_from_checkpoint(checkpoint_path)
@@ -485,7 +485,7 @@ def test_hsp_sane_labels_only_map_labels():
     assert mapped["Label"].tolist() == ["rem", "rem", "rem", "n2", "arousal"]
 
 
-def test_prepare_patient_events_filters_mapped_labels_before_optional_trimming():
+def test_prepare_patient_filters_mapped_labels_before_optional_trimming():
     start = pd.Timestamp("2024-01-01")
     annotations = pd.DataFrame({
         "Label": ["sleep", "arousal", "sleep", "arousal"],

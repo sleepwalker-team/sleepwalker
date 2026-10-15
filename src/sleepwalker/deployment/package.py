@@ -8,11 +8,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pickle
 import subprocess
 from typing import Any, Optional
 
-import cloudpickle
 import pandas as pd
 import torch
 
@@ -23,23 +21,13 @@ from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment.predictions import format_prediction_batch
 from sleepwalker.models.BaseModel import ClassifierModel, EmbeddingModel
-from sleepwalker.trainer.utils.disk import NumpyEncoder, json_ready
+from sleepwalker.trainer.utils.disk import CloudpickleAdapter, NumpyEncoder, json_ready
 from sleepwalker.training.execution import RepeatedViewModel
 from sleepwalker.training.loader import build_loader
 from sleepwalker.utils import logger
 
 
 FORMAT_VERSION = "sleepwalker-packaged-model-v1"
-
-
-class CloudpickleAdapter:
-    __name__ = "cloudpickle"
-    Pickler = cloudpickle.Pickler
-    Unpickler = pickle.Unpickler
-    dump = staticmethod(cloudpickle.dump)
-    dumps = staticmethod(cloudpickle.dumps)
-    load = staticmethod(pickle.load)
-    loads = staticmethod(pickle.loads)
 
 
 def class_name(value: Any) -> str:
@@ -108,11 +96,15 @@ class PackagedModel:
         if self.classification_contract is not None and self.classification_contract.get("type") == "single-head-multiclass" and self.task is None:
             raise ValueError("A single-head classifier package requires task.")
         if self.classification_contract is not None and self.classification_contract.get("type") == "single-head-multiclass":
+            if hasattr(self.model, "classes") and list(self.model.classes) != list(self.classification_contract["classes"]):
+                raise ValueError("Model classes must match the packaged classification contract in order.")
             if "target_resolution" not in self.classification_contract:
                 raise ValueError("A single-head classification contract requires target_resolution.")
             if pd.to_timedelta(self.classification_contract["target_resolution"]) <= pd.Timedelta(0):
                 raise ValueError("Classification target_resolution must be positive.")
 
+        if hasattr(self.model, "validate_fitted"):
+            self.model.validate_fitted()
         shape, meta = self.model.input_spec()
         if isinstance(shape, dict):
             if not hasattr(self.dataset, "input_spec"):
@@ -330,3 +322,16 @@ def save_packaged_model(path: str | os.PathLike, *, name: str, model: torch.nn.M
 def load_packaged_model(path: str | os.PathLike, *, map_location: str | torch.device = "cpu") -> PackagedModel:
     """Load a trusted package after validating its format and payload digest."""
     return PackagedModel.load(path, map_location=map_location)
+
+
+def load_embedding_model(package, map_location="cpu"):
+    """Load the selected encoder, including its saved preprocessing state.
+
+    The returned module owns its weights; inference does not reopen the source
+    package. The new run declares its own dataset and target preparation.
+    """
+    loaded = load_packaged_model(package, map_location=map_location)
+    if not isinstance(loaded.model, EmbeddingModel):
+        raise TypeError(f"Package {loaded.name!r} does not expose embeddings.")
+    loaded.model.requires_grad_(False)
+    return loaded.model.eval()

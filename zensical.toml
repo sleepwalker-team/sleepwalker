@@ -39,6 +39,7 @@ nav = [
     { "Datasets" = "reference/datasets.md" },
     { "Annotation events" = "reference/events.md" },
     { "Signal preprocessing" = "reference/signal-preprocessing.md" },
+    { "Batch training" = "reference/batch-training.md" },
     { "Models" = "reference/models.md" },
     { "Trainers" = "reference/trainers.md" },
     { "Data pipeline" = "reference/pipeline.md" },

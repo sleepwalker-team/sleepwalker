@@ -25,7 +25,7 @@ data:
   stride: 30s
   output_classes: &classes [wake, n1, n2, n3, rem]
   prepare_patient:
-    name: sleepwalker.training.callbacks.trim_patient_to_events
+    name: sleepwalker.training.callbacks.prepare_patient_events
     keep_events: [n1, n2, n3, rem]
   prepare_target:
     name: sleepwalker.trainer.utils.targets.prepare_multiclass_target

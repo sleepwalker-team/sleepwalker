@@ -2,11 +2,14 @@
 
 import json
 import os
+import pickle
 from pathlib import Path
 from typing import Any
 
+import cloudpickle
 import numpy as np
 import pandas as pd
+import torch
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -72,3 +75,23 @@ def write_json(path: str | Path, value: Any, *, overwrite: bool = False) -> Path
         temporary.unlink(missing_ok=True)
         raise
     return output
+
+
+class CloudpickleAdapter:
+    __name__ = "cloudpickle"
+    Pickler = cloudpickle.Pickler
+    Unpickler = pickle.Unpickler
+    dump = staticmethod(cloudpickle.dump)
+    dumps = staticmethod(cloudpickle.dumps)
+    load = staticmethod(pickle.load)
+    loads = staticmethod(pickle.loads)
+
+
+def load_checkpoint(path, map_location=None):
+    """Load a trainer/model pair and validate it using the saved trainer."""
+    checkpoint = torch.load(path, map_location=map_location, pickle_module=CloudpickleAdapter, weights_only=False)
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {"trainer", "model"}:
+        raise TypeError("Expected a checkpoint containing exactly trainer and model.")
+    trainer, model = checkpoint["trainer"], checkpoint["model"]
+    trainer.validate_training_state(model)
+    return trainer, model

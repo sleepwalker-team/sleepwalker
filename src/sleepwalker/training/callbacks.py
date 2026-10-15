@@ -58,24 +58,13 @@ def prepare_sleep_events(label_df, label_extra_df, *, mapping, merge_labels=(), 
     return map_events(transform(label_df), transform(label_extra_df), mapping=mapping, remove_unmapped=remove_unmapped)
 
 
-def trim_patient_to_events(
-    label_df,
-    label_extra_df,
-    patient=None,
-    *,
-    keep_events: Sequence[str] | None = None,
-):
-    """Adapt :func:`trim_event` to the ``prepare_patient`` callback contract."""
-    return trim_event(label_df, label_extra_df, keep_events)
-
-
 def prepare_patient_events(
     label_df,
     label_extra_df,
     patient=None,
     *,
-    min_seconds: float,
-    labels: Sequence[str],
+    min_seconds: float = 0,
+    labels: Sequence[str] = (),
     keep_events: Sequence[str] | None = None,
 ):
     """Remove short selected events and optionally trim to retained events."""

@@ -1,16 +1,100 @@
-# Shared annotation contract
+# Annotation events and dataset preparation
 
-`sleepwalker.datasets.events` provides validation and single-table interval operations for shared event preparation. Event-preparation callbacks live in `sleepwalker.training.callbacks`. Event names are extensible strings. This catalogue defines recognized meanings; it is not a closed enum and does not require every reader to provide every event or field.
+Sleep databases describe the same physiology in different formats: XML event names, stage-change markers, spreadsheets, or text sidecars. Readers translate these sources into ordinary DataFrames with labels and absolute start/end times. A training task then decides what those events mean for its targets. For example, sleep staging keeps the stage labels, while arousal detection may combine all sleep stages into a `sleep` mask and predict only `no_arousal`/`arousal`.
 
-Labelled datasets require an explicit ordered `annotation_labels` declaration. The optional `prepare_events(label_df, label_extra_df)` callback receives complete timestamped copies of both available reader tables once per recording, including optional metadata. `None` means identity processing; it does not disable loading. Return `(primary, alternate)` to retain the sources or `None` to reject the recording. Preserve alternate-source availability: an unavailable alternate remains `None`, while an available empty table remains a table. An empty prepared primary excludes the recording; exceptions and invalid schemas are errors.
+Keeping those two operations separate lets a task use the same preparation code across datasets. The reader decodes source names and measurements. The configured callback performs task choices such as mapping, merging, wake exclusion or hypopnea association. No source file is reread when sampling a window.
 
-The lifecycle is reader output validation against `supported_events()`, event preparation, validation against `annotation_labels`, core-column projection, `prepare_patient`, retained-table validation, then bounds/observed-label computation and window indexing. Label declarations never shrink to the observed union. `dataset.observed_labels` records the retained cohort observations separately. YAML training entries declare `output_classes` independently, in model/target order; mask labels need not be model outputs, and an explicit target fallback can supply a negative without an event interval.
+## The data flow
 
-`load_annotations=False` skips readers and annotation-only hooks and rejects configured annotation vocabularies/callbacks. `UnlabelledDataset.from_dataset(...)` copies the signal pipeline and omits annotation handling. Run metadata retains the labelled recipe while raw inference packages use the unlabelled template.
+```mermaid
+flowchart LR
+    A[Source annotations] --> B[Reader DataFrame]
+    B --> C[prepare_events]
+    C --> D[prepare_patient]
+    D --> E[Retained intervals and window index]
+    E --> F[Window label activity]
+    F --> G[prepare_target]
+    G --> H[Model target and mask]
+```
 
-Every concrete reader declares `supported_events()` independently of patient selection or task mapping. Returned raw labels must belong to that declaration. A supported type can have no rows in a recording; this says nothing about whether it was scored. Measurement requirements belong to processing recipes: supporting desaturation does not guarantee an amplitude column or measurements for every event.
+The dataset is configured with a patient list and prepares each recording once during `initialize(patients)`. It validates reader output against `supported_events()`, applies `prepare_events`, validates the result against `annotation_labels`, and projects the temporal core for subsequent patient/window processing. After `prepare_patient`, it builds recording bounds and window offsets from the retained intervals. Window access samples label activity and calls `prepare_target`; `prepare_sample` assembles the final tensors.
 
-ISRUC exposes its annotators independently by default (`merge=False`). Its historical reader intersection remains an explicit `merge=True` source-selection choice. Unavailable alternate sidecars remain `None`; available empty tables retain their availability.
+| Hook | When and input | Purpose and output |
+| --- | --- | --- |
+| `prepare_events` | Once per recording, complete primary/alternate event DataFrames, including optional source metadata. | Task event transformation; return the two prepared tables or `None` to reject the recording. |
+| `prepare_patient` | Once per recording, task-labelled temporal tables and patient path. | Trim or reject the recording before indexing windows. |
+| `prepare_target` | Per candidate window, sampled label activity and timestamps. | Construct the output target/mask or reject the window. |
+| `prepare_sample` | Per accepted window, signal and prepared target payload. | Assemble the tensor sample returned to the loader. |
+
+Use `training.callbacks` for common preparation. `map_events` handles a mapping dictionary; `prepare_sleep_events` additionally composes interval merging and wake exclusion. `prepare_patient_events` combines optional duration filtering and trimming. Target builders live in `trainer.utils.targets`, because they determine the model supervision. Method-specific annotation policies live with their recipe, such as `models.DRIVEN.prepare_events`.
+
+## Three label declarations with different jobs
+
+Consider an arousal model trained only on sleep:
+
+| Declaration | Example | Meaning |
+| --- | --- | --- |
+| `reader.supported_events()` | `wake, n1, n2, n3, rem, arousal, ...` | Physiological event types this reader can decode, before task preparation. |
+| `annotation_labels` | `[sleep, arousal]` | Allowed prepared annotation columns, including labels used only for masks. |
+| `output_classes` | `[no_arousal, arousal]` | Model/target class order in the training configuration. |
+
+The model does not predict the `sleep` mask. Conversely, `no_arousal` needs no negative event intervals: the target builder can use it as the unique missing class when a valid sleep window has no positive arousal coverage. Declare both vocabularies explicitly; callback inspection and the observed labels of one patient cannot determine model dimensions reliably. An absent declared event still has a zero activity column. `dataset.observed_labels` separately records what actually occurred.
+
+## Configure an event preparation callback
+
+This training-config fragment maps source sleep stages to a mask while preserving arousal events. Channel settings and patient splits are omitted; see [Load and prepare data](../how-to/data.md) for a complete dataset setup.
+
+```yaml
+data:
+  annotation_labels: [sleep, arousal]
+  output_classes: [no_arousal, arousal]
+  prepare_events:
+    name: sleepwalker.training.callbacks.map_events
+    mapping:
+      n1: sleep
+      n2: sleep
+      n3: sleep
+      rem: sleep
+      arousal: arousal
+  prepare_target:
+    name: sleepwalker.trainer.utils.targets.prepare_multiclass_target
+    target_classes: [no_arousal, arousal]
+    target_resolution: 30s
+    filters:
+      - columns: [sleep]
+        percentage: 1.0
+        mode: min
+```
+
+`prepare_events` defines the available task intervals; `prepare_target` decides which windows are valid and assigns their output class. The positive overlap threshold is a separate target setting. Keeping it explicit matters when two recipes use the same events but different window definitions.
+
+For Python callers, bind an ordinary function with the shared callback signature:
+
+```python
+def prepare_events(label_df, label_extra_df):
+    def transform(events):
+        result = events.copy()
+        result.loc[result["Label"].isin(["n1", "n2", "n3", "rem"]), "Label"] = "sleep"
+        return result.loc[result["Label"].isin(["sleep", "arousal"])].copy()
+
+    primary = transform(label_df)
+    alternate = None if label_extra_df is None else transform(label_extra_df)
+    return primary, alternate
+```
+
+Pass it as the dataset's `prepare_events` argument. Each annotator is transformed independently using its own evidence. `None` as the callback means identity transformation. Returning `None` from a configured callback rejects the recording; an empty prepared primary also excludes it. An unavailable alternate remains `None`, and an available empty alternate remains an empty DataFrame. Exceptions and invalid schemas are processing errors.
+
+## Measurements and method-specific rules
+
+Optional metadata is available to `prepare_events` before core projection. DRIVEN uses `desaturation_drop_pp` to associate hypopneas with at least a 3 percentage-point desaturation or a nearby arousal. Its latest-pending matching rule, unknown-evidence handling, and mapping are together in `models.DRIVEN`; this is a DRIVEN protocol choice, not an implicit reader behavior. See the [DRIVEN source and recipe](https://github.com/sleepwalker-team/models/tree/main/literature/osa/driven).
+
+DRIVEN's `models.DRIVEN.prepare_target` callback checks sleep coverage and unknown hypopneas over the first 30 seconds, before delegating to the generic multitask builder. The final 25 seconds supplies future SpO2 context. These method-specific eligibility rules are not fields in the generic multitask configuration.
+
+A reader's support for `desaturation` does not guarantee amplitude measurements. A recipe must distinguish a missing measurement column from an unavailable individual value. DRIVEN can error or reject a recording when the column is absent; missing values within a present column can leave hypopneas unknown and masked. Never infer a drop from source-label text in the task callback or substitute zero.
+
+A supported event type with no rows is an empty observed event set; it does not prove that the source scored that type. `supported_events()` describes reader capability, independently of patient selection. ISRUC exposes primary and alternate annotations independently by default; its historical reader intersection remains the explicit `merge=True` option.
+
+For raw inference, `load_annotations=False` skips annotation readers and hooks and rejects labelled callback/vocabulary settings. `UnlabelledDataset.from_dataset(...)` copies the signal pipeline while omitting annotation handling. An inference package can therefore predict a recording without training labels.
 
 ## Temporal core
 

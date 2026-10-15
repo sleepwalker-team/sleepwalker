@@ -17,6 +17,7 @@ from sleepwalker.datasets.Basedataset import ChannelConfig
 from sleepwalker.datasets.Stages import Stages
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
 from sleepwalker.deployment import PackagedModel
+from sleepwalker.deployment import evaluation
 from sleepwalker.deployment.evaluation import resolve_entry_files
 from sleepwalker import prediction_transforms
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel, EmbeddingModel
@@ -156,7 +157,7 @@ def test_annotation_filter_uses_union_of_requested_labels():
 def test_evaluation_skips_patients_with_no_valid_targets(monkeypatch, invalid_target):
     package = make_package()
     dataset = SimpleNamespace(edf_files=[SimpleNamespace(path=path) for path in ["unscored.edf", "scored.edf"]], get_n_patients=lambda: 2)
-    monkeypatch.setattr(evaluate_tool, "read_edf_meta", lambda path: {"signals": ["EEG"]})
+    monkeypatch.setattr("sleepwalker.deployment.evaluation.read_edf_meta", lambda path: {"signals": ["EEG"]})
     predictions = pd.DataFrame({
         "patient": ["unscored.edf", "scored.edf"],
         "task": ["event", "event"],
@@ -189,7 +190,7 @@ def test_overlap_resolution_smoothing_and_metrics():
 
     resolved = prediction_transforms.resolve_overlaps(frame, "patient.edf", [], method="mean_probability")
     smoothed = prediction_transforms.smooth_probabilities(resolved, "patient.edf", [], window=1)
-    metrics = test_tool.patient_classification_metrics(smoothed, ["negative", "positive"])
+    metrics = evaluation.patient_classification_metrics(smoothed, ["negative", "positive"])
 
     assert len(resolved) == 2
     assert resolved.iloc[0]["prob__negative"] == pytest.approx(0.7)
@@ -205,8 +206,8 @@ def test_patient_confusion_matrices_can_be_aggregated_directly():
         "prob__negative": [0.9, 0.8, 0.2, 0.1],
         "prob__positive": [0.1, 0.2, 0.8, 0.9],
     })
-    patient_metrics = load_test_tool().patient_classification_metrics(frame, classes)
-    aggregate = load_test_tool().confusion_metrics(patient_metrics["confusion_matrix"], classes)
+    patient_metrics = evaluation.patient_classification_metrics(frame, classes)
+    aggregate = evaluation.confusion_metrics(patient_metrics["confusion_matrix"], classes)
 
     assert patient_metrics["confusion_matrix"] == [[2, 0], [0, 2]]
     assert aggregate["accuracy"] == 1.0
@@ -214,7 +215,7 @@ def test_patient_confusion_matrices_can_be_aggregated_directly():
 
 
 def test_empty_confusion_matrix_reports_zero_windows():
-    metrics = load_test_tool().confusion_metrics([[0, 0], [0, 0]], ["negative", "positive"])
+    metrics = evaluation.confusion_metrics([[0, 0], [0, 0]], ["negative", "positive"])
 
     assert metrics["n_windows"] == 0
     assert metrics["cohen_kappa"] == 0.0

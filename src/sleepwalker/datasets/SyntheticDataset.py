@@ -54,7 +54,10 @@ def load_stages(edf_path: str, start_datetime: pd.Timestamp, basename:str = "sta
                 "Duration": duration,
             })
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows, columns=["Label", "Starttime", "Endtime", "Duration"])
+    for column in ("Starttime", "Endtime"):
+        result[column] = pd.to_datetime(result[column])
+    return result
 
 class SyntheticDataset(BaseDataset):
     """
@@ -75,6 +78,9 @@ class SyntheticDataset(BaseDataset):
         self._has_extra = has_extra
         super().__init__(**kwargs)
 
+    def supported_events(self) -> list[str]:
+        return ["wake", "n1", "n2", "n3", "rem"]
+
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Load the primary stage annotations for one synthetic EDF path."""
         return load_stages(edf_path=edf_path, start_datetime=start_datetime)
@@ -82,9 +88,11 @@ class SyntheticDataset(BaseDataset):
     def get_extra_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Load the secondary stage annotations when enabled."""
         if not self._has_extra:
-            return pd.DataFrame()
-        else:
+            return None
+        try:
             return load_stages(edf_path=edf_path, start_datetime=start_datetime, basename="extra_stages")
+        except FileNotFoundError:
+            return None
 
     def has_extra_target(self) -> bool:
         """Return whether this dataset exposes secondary target annotations."""

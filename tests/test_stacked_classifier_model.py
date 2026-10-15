@@ -264,7 +264,7 @@ def cross_cohort_stack(tmp_path):
     packaged = PackagedModel(name="stack", task="multitask", model=model, dataset=dataset, classification_contract=contract)
     manifest = tmp_path / "files.yml"
     manifest.write_text(yaml.safe_dump({"files": [str(DATA / "signals_01.edf")]}))
-    reference = {"name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset", "channels": [], "sample_frequency": 1, "total_input": "4s", "stride": "4s", "resample_type": "nearest", "event_mapping": {"wake": "on", "n1": "yes", "n2": "on", "n3": "yes", "rem": "on"}}
+    reference = {"name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset", "channels": [], "sample_frequency": 1, "total_input": "4s", "stride": "4s", "resample_type": "nearest", "annotation_labels": ['on', 'yes'], "prepare_events": {"name": "sleepwalker.training.callbacks.map_events", "mapping": {'wake': 'on', 'n1': 'yes', 'n2': 'on', 'n3': 'yes', 'rem': 'on'}}}
     specs = {task: {**reference, "sample_frequency": 10, "channels": [{'logical_name': task, 'physical_names': ['EEG'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}]} for task in ("source", "target")}
     entry = {"label": "external", "files": str(manifest), "reference": reference, "datasets": specs}
     return packaged, entry

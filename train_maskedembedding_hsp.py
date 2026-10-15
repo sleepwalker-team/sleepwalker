@@ -21,6 +21,7 @@ from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config
 from sleepwalker.utils import logger, WandbSink, count_parameters
 from os import makedirs
+from sleepwalker.training.callbacks import map_events
 
 os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
@@ -31,7 +32,7 @@ os.environ['NUMEXPR_NUM_THREADS'] = '2'
 load_dotenv()
 
 SAMPLE_FREQUENCY=float(os.environ.get('SAMPLE_FREQUENCY', 100.0))
-BATCH_SIZE=int(os.environ.get('BATCH_SIZE', 96))
+BATCH_SIZE=int(os.environ.get('BATCH_SIZE', 64))
 N_TRAIN_SAMPLES=int(os.environ.get('N_TRAIN_SAMPLES', 250_000))
 N_WARMUP_SAMPLES=int(os.environ.get('N_WARMUP_SAMPLES', 50_000))
 N_VAL_SAMPLES=int(os.environ.get('N_VAL_SAMPLES', 15_000))
@@ -57,14 +58,11 @@ EVENT_MAPPING = {
     'n2': 'n2',
     'n3': 'n3',
     'rem': 'rem',
-    'obstructive-apnea': 'apnea',
-    'central-apnea': 'apnea',
-    'mixed-apnea': 'apnea',
+    'obstructive_apnea': 'apnea',
+    'central_apnea': 'apnea',
+    'mixed_apnea': 'apnea',
     'hypopnea': 'hypopnea',
-    'right leg': 'lm',
-    'left leg': 'lm',
-    'leg movement': 'lm',
-    'leg movements': 'lm',
+    'limb_movement': 'lm',
 }
 
 task_config = {
@@ -204,7 +202,7 @@ def get_datasets():
     logger.context('TRAIN')
     train_ds = HSP(
         channels=CHANNELS,
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(map_events, mapping=EVENT_MAPPING, remove_unmapped=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -218,7 +216,7 @@ def get_datasets():
     logger.context('VAL')
     val_ds = HSP(
         channels=CHANNELS,
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(map_events, mapping=EVENT_MAPPING, remove_unmapped=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -232,7 +230,7 @@ def get_datasets():
     logger.context('TEST')
     test_ds = HSP(
         channels=CHANNELS,
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(map_events, mapping=EVENT_MAPPING, remove_unmapped=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -354,7 +352,7 @@ def main():
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=2e-3),
         #lr_scheduler = lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=EPOCHS),
         #lr_scheduler = lambda optimizer: get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps),
-        classes=train_ds.get_classes(),
+        classes=[],  # Reconstruction has no single classifier output vocabulary.
         downstream_tasks=normalized_task_config,
         save_every=30,
         device=DEVICE,

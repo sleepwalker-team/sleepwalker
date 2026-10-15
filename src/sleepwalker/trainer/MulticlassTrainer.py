@@ -178,7 +178,7 @@ class MulticlassTrainer(BaseTrainer):
 
         class_cnts = self.class_counts
         if (self.balance_batches or self.loss_mode != "regular") and class_cnts is None:
-            class_cnts = estimate_class_cnts(data_loader)
+            class_cnts = estimate_class_cnts(data_loader, classes=self.classes)
             logger.info(f"Class counts are {class_cnts}")
         elif class_cnts is not None:
             logger.info(f"Using configured class counts: {class_cnts}")
@@ -208,7 +208,7 @@ class MulticlassTrainer(BaseTrainer):
                     current_ds._base_prepare_target_callback = base_callback
                     current_ds.prepare_target_callback = self._wrap_prepare_target_for_balancing(
                         base_callback,
-                        [class_cnts.get(c, 1.0) for c in current_ds.get_classes()],
+                        [class_cnts.get(c, 1.0) for c in self.classes],
                     )
 
         if self.loss_mode != "regular":
@@ -219,7 +219,7 @@ class MulticlassTrainer(BaseTrainer):
             class_weights = self.class_weights
 
         if len(class_weights) > 0:
-            weights_torch = torch.tensor([class_weights.get(c, 1) for c in dataset.get_classes()], device=self.device)
+            weights_torch = torch.tensor([class_weights.get(c, 1) for c in self.classes], device=self.device)
             self.loss_function = partial(self.base_loss_function, weight=weights_torch)
         else:
             self.loss_function = self.base_loss_function

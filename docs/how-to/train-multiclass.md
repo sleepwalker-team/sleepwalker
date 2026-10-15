@@ -153,7 +153,7 @@ dataset = SleepEDFx(
 After `prepare_patient` returns, `initialize()` no longer treats the recording as one continuous usable region. It scans the retained intervals for gaps and builds a per-patient list of window offsets that lie inside the connected blocks of retained labels. A night whose annotations stop after the last sleep epoch therefore yields windows only around the actual sleep period, and the gaps between annotation blocks are never sampled. Use [`trim_patient_to_events`](../reference/api.md#patient-callbacks) or [`prepare_patient_events`](../reference/api.md#patient-callbacks) for this; the latter additionally drops events shorter than `min_seconds`.
 
 !!! note "`prepare_patient` rejects annotations, not patients"
-    Returning `None` from `prepare_patient` drops that patient during initialization. Dropping the last annotation of a patient that is configured with an `event_mapping` raises an error instead, because such a patient can never produce a labelled window. Cohort-level decisions that compare patients to each other ("drop the shortest sleepers") do not belong in this hook either: they need statistics over all patients, which is what `get_patient_stats(...)` and the configured `patient_filter` in a training config are for. Split-level filters may only *remove* paths from an existing partition, never add new ones.
+    Returning `None` from `prepare_patient` drops that patient during initialization. An empty retained primary table also excludes the patient because it cannot produce a labelled window. Invalid schemas and undeclared labels raise errors. Recording bounds and observed labels are computed after this callback. Cohort-level decisions that compare patients to each other ("drop the shortest sleepers") do not belong in this hook either: they need statistics over all patients, which is what `get_patient_stats(...)` and the configured `patient_filter` in a training config are for. Split-level filters may only *remove* paths from an existing partition, never add new ones.
 
 `prepare_target` runs per candidate window and is the cheapest place to reject data because no signal has been touched yet. `prepare_multiclass_target()` is the standard implementation; it also performs the coverage rejection described in [Load some data](data.md). A custom version can add task logic around it. The dataset calls the callback with `target`, `target_extra`, `patient`, and `time`, and expects a dictionary (or `None` to reject), so a wrapper fixes the target arguments with `partial` and adds its own test:
 
@@ -297,13 +297,11 @@ data:
         - name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
           fs: 100
   sample_frequency: 100
-  event_mapping:
-    sleep stage w: wake
-    sleep stage 1: n1
-    sleep stage 2: n2
-    sleep stage 3: n3
-    sleep stage 4: n3
-    sleep stage r: rem
+  annotation_labels: [wake, n1, n2, n3, rem]
+  prepare_events:
+    name: sleepwalker.training.callbacks.map_events
+    mapping: {wake: wake, n1: n1, n2: n2, n3: n3, rem: rem}
+    remove_unmapped: true
   total_input: 30s
   stride: 30s
   output_classes: &classes [wake, n1, n2, n3, rem]

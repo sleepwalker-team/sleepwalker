@@ -75,7 +75,7 @@ def test_dataset_uses_complete_yaml_specification(tmp_path, dataset_key):
         "files": str(manifest),
         "dataset": {
             "name": "sleepwalker.datasets.Stages.Stages",
-            "event_mapping": {"event": "event", "sleep": "sleep"},
+            "annotation_labels": ['event', 'sleep'], "prepare_events": {"name": "sleepwalker.training.callbacks.map_events", "mapping": {'event': 'event', 'sleep': 'sleep'}},
             "channels": [{'logical_name': 'EEG', 'physical_names': ['external-eeg'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}],
             "sample_frequency": 100,
             "total_input": "60s",
@@ -256,7 +256,7 @@ def test_packaged_model_evaluates_to_jsonl(tmp_path, monkeypatch, telemetry_enab
             "files": str(manifest),
             "dataset": {
                 "name": "sleepwalker.datasets.SyntheticDataset.SyntheticDataset",
-                "event_mapping": {label: label for label in classes},
+                "annotation_labels": list(classes),
                 "channels": [{'logical_name': 'EEG', 'physical_names': ['EEG'], 'read_mode': 'physical', 'preprocessors': [{'name': 'sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit', 'target': 'uV'}]}],
                 "sample_frequency": 10,
                 "total_input": "30s",

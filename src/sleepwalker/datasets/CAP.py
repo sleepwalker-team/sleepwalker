@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from sleepwalker.utils import logger
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.events import decode_event_labels
 
 def convert_to_datetime(row, start_date):
     """Convert CAP time-of-day strings into absolute datetimes."""
@@ -28,6 +29,9 @@ def convert_to_datetime(row, start_date):
         complete_date += timedelta(days=1)
 
     return complete_date
+
+CAP_EVENT_LABELS = {'w': 'wake', 's1': 'n1', 's2': 'n2', 's3': 'n3', 's4': 'n3', 'rem': 'rem', 'mt': 'movement'}
+
 
 class CAP(BaseDataset):
     """
@@ -203,6 +207,9 @@ class CAP(BaseDataset):
         """Return whether this adapter exposes a second target table."""
         return False
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*CAP_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, fpath, start_date):
         """Load the sleep-stage sidecar file corresponding to one CAP EDF."""
         label_path = fpath.replace('edf', 'txt')
@@ -239,7 +246,6 @@ class CAP(BaseDataset):
         df['Label'] = df['Sleep Stage']
         
         # df["Label"] = df.apply(lambda row: None if row.Label is None else row.Label.lower().strip(), axis=1)
-        # df["Label"] = df.apply(lambda row: self.event_mapping[row["Label"]] if row["Label"] in self.event_mapping else None, axis=1)
         df = df[['Label', 'Starttime', 'Endtime']].dropna()
 
-        return df
+        return decode_event_labels(df, mapping=CAP_EVENT_LABELS)

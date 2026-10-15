@@ -49,9 +49,9 @@ def build_trainer(train_tool, spec, context):
     return train_tool.build_component(spec, context)
 
 
-def test_active_training_component_graphs_construct():
+def test_tutorial_training_component_graphs_construct():
     train_tool = load_train_tool()
-    configs = sorted((REPO_ROOT / "configs" / "train").rglob("*.yml"))
+    configs = sorted((REPO_ROOT / "configs" / "examples").glob("sleep_edfx*.yml"))
     assert configs
 
     for path in configs:
@@ -315,9 +315,9 @@ def test_numpy_cache_cannot_bypass_patient_partition(tmp_path):
 def test_dry_run_changes_training_not_just_validation(monkeypatch):
     train_tool = load_train_tool()
     config = train_tool.read_yaml(
-        REPO_ROOT / "configs" / "train" / "desaturation_hsp.yml"
+        REPO_ROOT / "configs" / "examples" / "sleep_edfx_multiclass.yml"
     )
-    dataset = train_tool.build_dataset(config["data"][0])
+    dataset = train_tool.build_dataset(config["data"])
     monkeypatch.setattr(
         train_tool,
         "initialize_datasets",
@@ -339,12 +339,12 @@ def test_dry_run_changes_training_not_just_validation(monkeypatch):
 
 
 def test_final_channel_callback_does_not_inject_source_count_into_model(monkeypatch):
-    config = train_tool.read_yaml(REPO_ROOT / "configs" / "train" / "desaturation_hsp.yml")
-    entry = config["data"][0]
+    config = train_tool.read_yaml(REPO_ROOT / "configs" / "examples" / "sleep_edfx_multiclass.yml")
+    entry = config["data"]
     prototype = entry["channels"][0]
     entry["channels"] = [{**copy.deepcopy(prototype), "logical_name": f"source{index}"} for index in range(3)]
-    entry["prepare_channels"] = lambda channels: {"SpO2": channels["source0"]}
-    entry["input_channels"] = ["SpO2"]
+    entry["prepare_channels"] = lambda channels: {"eeg": channels["source0"]}
+    entry["input_channels"] = ["eeg"]
     dataset = train_tool.build_dataset(entry)
     monkeypatch.setattr(train_tool, "initialize_datasets", lambda _config, dry_run, fold=None, model=None: ([dataset], [], []))
 
@@ -356,8 +356,8 @@ def test_final_channel_callback_does_not_inject_source_count_into_model(monkeypa
 
 def test_runcfg_from_checkpoint_reuses_serialized_trainer_and_model(tmp_path, monkeypatch):
     train_tool = load_train_tool()
-    config = train_tool.read_yaml(REPO_ROOT / "configs" / "train" / "desaturation_hsp.yml")
-    dataset = train_tool.build_dataset(config["data"][0])
+    config = train_tool.read_yaml(REPO_ROOT / "configs" / "examples" / "sleep_edfx_multiclass.yml")
+    dataset = train_tool.build_dataset(config["data"])
     model = object()
     trainer = object()
     checkpoint_path = tmp_path / "run" / "10" / "checkpoint.pt"

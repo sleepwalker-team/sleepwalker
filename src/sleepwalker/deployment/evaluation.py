@@ -91,7 +91,7 @@ def build_evaluation_target(package: PackagedModel, entry: Mapping[str, Any], an
         classes = list(contract["classes"])
         missing = sorted(set(classes) - set(annotation_labels))
         if len(missing) > 1:
-            raise ValueError(f"Dataset '{entry['label']}' event_mapping is missing multiple output classes {missing}.")
+            raise ValueError(f"Dataset '{entry['label']}' annotation_labels is missing multiple output classes {missing}.")
         return partial(prepare_single_target, target_classes=classes, sequence_len=int(contract["sequence_len"]), target_resolution=contract["target_resolution"], target_offset=contract.get("target_offset", "0s"), annotation_labels=annotation_labels, allow_invalid=True, **options)
     task_config = {
         task: {
@@ -136,8 +136,8 @@ def build_explicit_dataset(spec: Mapping[str, Any]):
         if not {"logical_name", "physical_names", "read_mode", "preprocessors"} <= set(channel):
             raise ValueError("Evaluation channels must explicitly specify logical_name, physical_names, read_mode and preprocessors.")
     dataset_name, arguments = build_dataset_arguments(spec)
-    if not arguments.get("event_mapping"):
-        raise ValueError("Evaluation dataset must provide event_mapping.")
+    if not arguments.get("annotation_labels"):
+        raise ValueError("Evaluation dataset must explicitly provide annotation_labels.")
     if "prepare_target" in arguments:
         raise ValueError("Evaluation targets come from the package contract and data.target; omit dataset.prepare_target.")
     arguments["rejection_strategy"] = "none"
@@ -160,7 +160,7 @@ def prepare_dataset(package: PackagedModel, entry: Mapping[str, Any]):
         spec = entry["dataset"] if "dataset" in entry else entry["datasets"][package.task]
         dataset = build_explicit_dataset(spec)
         base = dataset
-    annotation_labels = sorted(set(base.event_mapping.values()))
+    annotation_labels = list(base.label_classes)
     base.prepare_target_callback = build_evaluation_target(package, entry, annotation_labels)
     if not hasattr(dataset, "set_rejection_strategy"):
         raise TypeError(f"Evaluation dataset {dataset.__class__.__name__} does not support rejection strategies.")

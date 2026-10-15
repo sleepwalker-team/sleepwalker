@@ -2,7 +2,7 @@
 """Run a standard Sleepwalker training configuration.
 
 This tool is a small YAML adapter around the normal Python training API.  The
-canonical example is ``configs/train/desaturation_hsp.yml``.  Components use a
+complete tutorial is ``configs/examples/sleep_edfx_multiclass.yml``.  Components use a
 fully qualified ``name`` and put constructor arguments directly beside it::
 
     data:
@@ -93,6 +93,7 @@ import torch
 
 from sleepwalker.config import apply_patient_filter, build_callback, build_channel, build_component, build_factory, build_value, import_name, read_yaml
 from sleepwalker.datasets.Basedataset import batch_collate
+from sleepwalker.datasets.events import validate_event_labels
 from sleepwalker.datasets.MultiDataset import combine_datasets
 from sleepwalker.datasets.NumpyDataset import NumpyDataset
 from sleepwalker.datasets.utils import random_split
@@ -117,12 +118,15 @@ def build_dataset(entry: Mapping[str, Any]):
     spec = {key: value for key, value in entry.items() if key not in DATA_FIELDS}
     if "channels" in spec:
         spec["channels"] = [build_channel(channel) for channel in spec["channels"]]
-    for callback_name in ("prepare_patient", "prepare_target", "prepare_sample", "prepare_channels"):
+    for callback_name in ("prepare_events", "prepare_patient", "prepare_target", "prepare_sample", "prepare_channels"):
         if callback_name in spec:
             spec[callback_name] = build_callback(spec[callback_name])
     dataset = build_component(spec)
     if "output_classes" in entry:
-        dataset.classes = list(entry["output_classes"])
+        dataset.classes = validate_event_labels(entry["output_classes"], context="output_classes")
+        target_spec = entry.get("prepare_target")
+        if isinstance(target_spec, Mapping) and "target_classes" in target_spec and list(target_spec["target_classes"]) != dataset.classes:
+            raise ValueError("prepare_target.target_classes must match output_classes in declared order.")
     return dataset
 
 
@@ -285,6 +289,14 @@ def runcfg_from_dict(config: Mapping[str, Any], dry_run: bool = False, fold: str
         trainer_spec["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
         trainer_spec["warmup_device"] = "cpu"
     trainer = build_component(trainer_spec, context)
+    contract = trainer.classification_contract() if hasattr(trainer, "classification_contract") else None
+    if contract is not None and contract.get("type") == "single-head-multiclass":
+        expected_classes = list(contract["classes"])
+        for entry in entries:
+            if "output_classes" not in entry or list(entry["output_classes"]) != expected_classes:
+                raise ValueError("Every multiclass training dataset must explicitly declare output_classes in trainer order.")
+        if hasattr(model, "classes") and list(model.classes) != expected_classes:
+            raise ValueError("Model classes must match the trainer and data.output_classes in declared order.")
     run_options = run_options_from_dict(config, dry_run, selected_fold)
 
     return RunCfg(
@@ -361,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_parser = commands.add_parser("train", help="Start a new training run from YAML.")
     train_config = train_parser.add_mutually_exclusive_group(required=True)
-    train_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    train_config.add_argument("config", nargs="?", help="Training YAML file.")
     train_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     train_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
 
@@ -370,7 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     dry_parser = commands.add_parser("dry", help="Run one epoch with small patient and sample budgets.")
     dry_config = dry_parser.add_mutually_exclusive_group(required=True)
-    dry_config.add_argument("config", nargs="?", help="Training YAML under configs/.")
+    dry_config.add_argument("config", nargs="?", help="Training YAML file.")
     dry_config.add_argument("--config", dest="config_option", help="Training YAML supplied by an external runtime such as HAML.")
     dry_parser.add_argument("--fold", help="Fold name in a cross-validation manifest.")
     return parser

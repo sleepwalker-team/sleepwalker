@@ -230,6 +230,7 @@ def run(cfg: RunCfg) -> RunResult:
             export_final_model(cfg, train_dataset)
 
         test_records: list[dict[str, Any]] = []
+        output_contract = cfg.trainer.classification_contract() if hasattr(cfg.trainer, "classification_contract") else None
         for dataset_name, test_dataset in cfg.test_datasets:
             for repeat in cfg.test_repeats:
                 context_label = f"{dataset_name}:r={repeat}" if len(cfg.test_repeats) > 1 else dataset_name
@@ -256,7 +257,7 @@ def run(cfg: RunCfg) -> RunResult:
                         "train_loss": train_result["losses"],
                         "train_cm": train_result["outputs"],
                         "dataset": dataset_name,
-                        "classes": train_dataset.get_classes(),
+                        "classes": list(output_contract["classes"]) if output_contract is not None and output_contract["type"] == "single-head-multiclass" else train_dataset.get_classes(),
                         "path": os.path.join(cfg.log_path, cfg.experiment_name),
                     }
                     if len(cfg.test_repeats) > 1:

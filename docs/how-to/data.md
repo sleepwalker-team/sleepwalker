@@ -345,46 +345,35 @@ where \(s_j\) is the start time, \(e_j\) is the end time, and \(r_j\) is the raw
 
 | `Starttime` | `Endtime` | `Label` |
 | --- | --- | --- |
-| `1989-04-25 00:43:30` | `1989-04-25 00:45:30` | `sleep stage 1` |
-| `1989-04-25 00:45:30` | `1989-04-25 00:52:00` | `sleep stage 2` |
-| `1989-04-25 00:52:00` | `1989-04-25 00:52:30` | `sleep stage 3` |
+| `1989-04-25 00:43:30` | `1989-04-25 00:45:30` | `n1` |
+| `1989-04-25 00:45:30` | `1989-04-25 00:52:00` | `n2` |
+| `1989-04-25 00:52:00` | `1989-04-25 00:52:30` | `n3` |
 
 !!! note
-    Consecutive events are already merged inside the Dataset, i.e. epochs with the same label are stored as one longer interval. For example, the second row therefore represents thirteen consecutive 30s epochs of stage 2, not one 390-second scoring epoch.
+    A source file can already encode consecutive epochs as one longer interval; the dataset preserves their supplied boundaries. For example, the second row therefore represents thirteen consecutive 30s epochs of stage 2, not one 390-second scoring epoch.
 
-Similar to channel names, labels and annotations are also **not** standardized and often laboratory dependent. For example, [Sleep-EDFx](../how-to/sleep-edfx.md) stores its hypnogram in a matching `*-Hypnogram.edf` file, where sleep stages were scored using the [Rechtschaffen and Kales system](https://www.ncbi.nlm.nih.gov/nlmcatalog/173471), with the raw labels `Sleep stage W`, `1`, `2`, `3`, `4`, and `R`. Modern scoring uses a smaller taxonomy in which `sleep stage 3` and `sleep stage 4` are merged into `n3`. 
+Source annotation names are laboratory dependent. Readers decode recognized concepts into the [shared physiological vocabulary](../reference/events.md), including Sleep-EDFx stages 3 and 4 as `n3`. Unknown meanings are explicit `other` events with source text for investigation.
 
-We can supply an `event_mapping` dictionary to the dataset that canonicalizes events. This mapping uses exact string matching and may map several raw labels to one canonical label. As an example, to map the historical stages 3 and 4 into `n3` we can use:
+Declare the post-preparation vocabulary and configure task transformations explicitly:
 
 ```python
-event_mapping = {
-    "sleep stage w": "wake",
-    "sleep stage 1": "n1",
-    "sleep stage 2": "n2",
-    "sleep stage 3": "n3",
-    "sleep stage 4": "n3",
-    "sleep stage r": "rem",
-}
+from functools import partial
+from sleepwalker.training.callbacks import map_events
+
+classes = ["wake", "n1", "n2", "n3", "rem"]
+prepare_events = partial(map_events, mapping={label: label for label in classes})
+# Pass annotation_labels=classes and prepare_events=prepare_events to the dataset.
 ```
 
-!!! important "Several datasets use lowercase labels in Sleepwalker"
-
-    The Sleep-EDFx reader converts every annotation label to lowercase. Keys in `event_mapping` must therefore use `sleep stage w`, not `Sleep stage W`. An incorrectly capitalized key does not match the annotation. 
-    Several other adapters, including HSP, MNC, Ruhrlandklinik, Stages, SVUH-UCD, and WSC, also lowercase labels while reading them. This is, however, only a convention and not enforced.
-
-!!! note
-    A typical dataset adapter loads labels when an `event_mapping` is provided and may perform rejection sampling to reject windows without a clear label or sufficient data quality. Setting `event_mapping=None` disables label extraction. This can become confusing during deployment when no labels are available. To make label-free use explicit, convert a configured dataset with [`UnlabelledDataset.from_dataset(dataset)`](../reference/api.md#unlabelled-dataset), as shown in the first complete example on this page. `BaseDataset` does not currently provide a `to_unlabelled()` method.
-
+The callback maps each available annotator independently and drops unmatched labels by default. Set its `remove_unmapped=False` to retain unmatched labels, and declare those labels too. `prepare_events=None` means identity processing of loaded annotations. Disable annotation loading explicitly with `load_annotations=False`, or create an inference template with [`UnlabelledDataset.from_dataset(dataset)`](../reference/api.md#unlabelled-dataset). Unlabelled loading rejects annotation vocabularies and annotation-only callbacks.
 
 A dataset provides data preparation and target mapping, but does not know how to interpret these targets. In its most general form, sleep analysis is a group of multiple tasks, i.e. a multi-task, multi-label machine learning problem. For example, while a patient can only be in one of the five sleep stages ("wake", "n1", "n2", "n3", "rem"), she can also experience a leg movement and snoring in parallel. The label interpretation is up to the model and model [trainer](../reference/api.md#multiclass-trainer).
 
-!!! note "Omit labels that the task should ignore"
-
-    With the default `remove_unmapped_events=True`, an annotation is removed when its raw label is not a key in `event_mapping`. For example, the above mapping therefore excludes sleep stages with unclear mapping (e.g. `sleep stage ?`). Set `remove_unmapped_events=False` when you want to retain all raw labels for which no mapping is found.
+The declared `annotation_labels` fixes timeline column order, including labels used only for masks. Output/target class order is declared separately; absent events do not change either vocabulary. An empty primary table excludes the recording, while an available empty alternate remains an empty annotation source.
 
 ![Raw and mapped annotations from Sleep-EDFx recording SC4001E0](../assets/figures/data-annotations.png)
 
-*The lower row applies the `event_mapping` above. Raw stages 3 and 4 both become `n3`.*
+*Reader decoding converts historical stages 3 and 4 to `n3`; the task callback selects the declared labels.*
 
 Sleep staging is regular: a standard epoch is 30 seconds and the label vocabulary is widely understood. Other sleep events may last arbitrary numbers of seconds, overlap one another, or use dataset-specific names. You can supply a Python function `prepare_target` to the dataset to prepare the target for training. `prepare_target` runs once per candidate item *before* the signal window is loaded and can also be used to reject windows, if no label can be computed for a given window. It receives the target interval labels and should either:
 
@@ -393,7 +382,7 @@ Sleep staging is regular: a standard epoch is 30 seconds and the label vocabular
 
 Rejected candidates are handled by the dataset's `rejection_strategy`: `"none"` returns no item for that index, while `"patient"`, `"global"`, and `"patient_then_global"` draw fallback candidates within the same patient or across the cohort.
 
-`target` always covers the complete input window. It is a time-indexed DataFrame with one column per canonical label, i.e. per value of `event_mapping`, and one row per sample of `sample_frequency`. For the 30-second window at 100 Hz used below, `target` therefore has \(30\cdot100=3000\) rows and `target["n2"].mean()` is the fraction of the window that is scored `n2`.
+`target` always covers the complete input window. It is a time-indexed DataFrame with one column per declared `annotation_labels` entry, and one row per sample of `sample_frequency`. For the 30-second window at 100 Hz used below, `target` therefore has \(30\cdot100=3000\) rows and `target["n2"].mean()` is the fraction of the window that is scored `n2`.
 
 The optional second argument `target_extra` carries a second annotation timeline for the same window in the same format. It is only populated by adapters that declare an additional annotation source through `has_extra_target()` and `get_extra_event_df()`: `ABC` and `MROS` (alternate annotation source), `ISRUC` (second scorer when `merge=False`), `Ruhrlandklinik` with `return_nox=True`, `NumpyDataset` shards written with a `target_extra` array, and `MultiDataset` when every component dataset provides one. For [Sleep-EDFx](../how-to/sleep-edfx.md) it is always `None`. A missing or ambiguous `target_extra` does not reject an otherwise valid primary target.
 
@@ -435,7 +424,7 @@ $$
 d_{k,c} = \left|W_k \cap \bigcup_{j:\,m(r_j)=c}[s_j,e_j)\right|.
 $$
 
-Here, \(m\) is `event_mapping`. The union collects every annotation interval that maps to class \(c\), the intersection keeps only the portions inside \(W_k\), and the outer bars measure their combined duration. The equation therefore answers a concrete question: *for how many seconds was class \(c\) active inside this target interval?* Taking the union also prevents overlapping annotations of the same class from being counted twice.
+Here, \(m\) denotes the configured event-preparation label transformation. The union collects every annotation interval that maps to class \(c\), the intersection keeps only the portions inside \(W_k\), and the outer bars measure their combined duration. The equation therefore answers a concrete question: *for how many seconds was class \(c\) active inside this target interval?* Taking the union also prevents overlapping annotations of the same class from being counted twice.
 
 `prepare_multiclass_target(..., percentage=0.5)` requires a class to cover at least half of each target interval. In a 30-second interval, the threshold is therefore
 
@@ -464,6 +453,7 @@ from sleepwalker.datasets.Basedataset import ChannelConfig, batch_collate
 from sleepwalker.datasets.SleepEDFx import SleepEDFx
 from sleepwalker.datasets.normalizer import ConvertUnit, EEGFilterNormalizer
 from sleepwalker.datasets.utils import get_edf_files_in_repo
+from sleepwalker.training.callbacks import map_events
 from sleepwalker.trainer.utils.targets import prepare_multiclass_target
 from sleepwalker.training.loader import build_loader
 
@@ -482,14 +472,8 @@ labelled_dataset = SleepEDFx(
     total_input="30s",
     stride="30s",
     group_sampling_strategy="first",
-    event_mapping={
-        "sleep stage w": "wake",
-        "sleep stage 1": "n1",
-        "sleep stage 2": "n2",
-        "sleep stage 3": "n3",
-        "sleep stage 4": "n3",
-        "sleep stage r": "rem",
-    },
+    annotation_labels=classes,
+    prepare_events=partial(map_events, mapping={label: label for label in classes}),
     prepare_target=partial(
         prepare_multiclass_target,
         target_classes=classes,

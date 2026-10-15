@@ -11,13 +11,16 @@ data:
         - name: sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer
           fs: 100
   sample_frequency: 100
-  event_mapping:
-    sleep stage w: wake
-    sleep stage 1: n1
-    sleep stage 2: n2
-    sleep stage 3: n3
-    sleep stage 4: n3
-    sleep stage r: rem
+  annotation_labels: [wake, n1, n2, n3, rem]
+  prepare_events:
+    name: sleepwalker.training.callbacks.map_events
+    mapping:
+      wake: wake
+      n1: n1
+      n2: n2
+      n3: n3
+      rem: rem
+    remove_unmapped: true
   total_input: 30s
   stride: 30s
   output_classes: &classes [wake, n1, n2, n3, rem]

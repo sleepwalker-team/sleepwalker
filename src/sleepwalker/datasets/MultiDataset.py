@@ -46,9 +46,11 @@ class MultiDataset(Dataset):
         if len(set(strides)) > 1:
             raise ValueError(f"All datasets must have the same stride")
         
-        classes = [set(d.classes) for d in datasets]
-        if not all(set(lst) == set(classes[0]) for lst in classes):
-            raise ValueError(f"All datasets must have the same classes")
+        classes = [list(d.classes) for d in datasets]
+        if any(labels != classes[0] for labels in classes[1:]):
+            raise ValueError("All datasets must have the same output class order")
+        if any(dataset.label_classes != datasets[0].label_classes for dataset in datasets[1:]):
+            raise ValueError("All datasets must have the same annotation label order")
 
         self.lower_bound = []
         self.upper_bound = []

@@ -127,6 +127,42 @@ These classes implement `BaseModel` and `EmbeddingModel`, with optional released
     options:
       show_root_heading: false
 
+## Feature encoders
+
+These classes implement `BaseModel` and `EmbeddingModel` and compute fixed features from `[B, T, C]` windows; nothing in them is trained. `EncoderClassifier` concatenates the features of one or more encoders and trains a head on them.
+
+### `MiniRocket` {#minirocket}
+
+::: sleepwalker.models.MiniRocket.MiniRocket
+    options:
+      show_root_heading: false
+
+### `Rocket` {#rocket}
+
+::: sleepwalker.models.Rocket.Rocket
+    options:
+      show_root_heading: false
+
+### `MultiRocket` {#multirocket}
+
+::: sleepwalker.models.MultiRocket.MultiRocket
+    options:
+      show_root_heading: false
+
+### `YasaFeatures` {#yasa-features}
+
+Needs the optional `yasa` dependencies: `pip install -e ".[yasa]"`.
+
+::: sleepwalker.models.YasaFeatures.YasaFeatures
+    options:
+      show_root_heading: false
+
+### `EncoderClassifier` {#encoder-classifier}
+
+::: sleepwalker.models.EncoderClassifier.EncoderClassifier
+    options:
+      show_root_heading: false
+
 ## Packaged backbone models
 
 These wrap an existing [`PackagedModel`](api.md#packaged-model) encoder so a pretrained package can serve as the backbone of a new trainable head.

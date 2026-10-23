@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from .Basedataset import BaseDataset  
+from sleepwalker.datasets.events import decode_event_labels
 
 def correct_apples_eeg(values, *, unit, is_recording):
     """Apply NSRR's microvolt assumption to missing APPLES EEG/EOG units.
@@ -79,6 +80,9 @@ def convert_to_datetime(row, start_date):
         complete_date += timedelta(days=1)
 
     return complete_date
+
+APPLES_EVENT_LABELS = {'wake': 'wake', 'w': 'wake', 'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'r': 'rem', 'rem': 'rem', 'no stage': 'unscored', 'u': 'unscored', 'apnea': 'apnea', 'hypopnea': 'hypopnea', 'arousal': 'arousal', 'desat': 'desaturation', 'desaturation': 'desaturation'}
+
 
 class Apples(BaseDataset):
     """
@@ -173,6 +177,9 @@ class Apples(BaseDataset):
         """
         super().__init__(**kwargs)
 
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*APPLES_EVENT_LABELS.values(), "other"]))
+
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Load one APPLES ``.annot`` sidecar into event-table form.
 
@@ -194,4 +201,4 @@ class Apples(BaseDataset):
 
         df["Duration"] = df["Endtime"] - df["Starttime"]
 
-        return df[["Label", "Starttime", "Endtime", "Duration"]]
+        return decode_event_labels(df[["Label", "Starttime", "Endtime", "Duration"]], mapping=APPLES_EVENT_LABELS)

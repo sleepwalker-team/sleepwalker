@@ -1,8 +1,10 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 import multiprocessing
+
 from typing import Sequence
 
+from sleepwalker.datasets.events import SLEEP_STAGE_LABELS
 from sleepwalker.datasets.normalizer import ConvertUnit
 import pandas as pd
 from .Basedataset import BaseDataset, ChannelConfig
@@ -239,8 +241,10 @@ def filter_hsp_annotation_labels(patients: Sequence[str | Path], required_labels
     return selected
 
 def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """Map heterogeneous HSP annotation labels to stable task labels."""
+    """Decode heterogeneous HSP source text into common physiological event labels."""
     df = df.copy()
+    if "SourceLabel" not in df:
+        df["SourceLabel"] = df["Label"].astype("string")
 
     exact_mapping = {
         "stage - n1": "n1",
@@ -257,9 +261,16 @@ def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
         "sleep_stage_rem": "rem",
         "rem": "rem",
         "stage - w": "wake",
+        "stage - no stage": "unscored",
         "sleep_stage_w": "wake",
-        "apnea / desats": "apnea",
         "oxygen_desaturation": "desaturation",
+        "obstructive-apnea": "obstructive_apnea",
+        "central-apnea": "central_apnea",
+        "mixed-apnea": "mixed_apnea",
+        "right leg": "limb_movement",
+        "left leg": "limb_movement",
+        "leg movement": "limb_movement",
+        "leg movements": "limb_movement",
     }
     df["Label"] = df["Label"].replace(exact_mapping)
 
@@ -280,15 +291,15 @@ def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
     result = result.mask(desaturation_mask, "desaturation")
 
     substring_matches = {
-        "obstructive apnea": "obstructive-apnea",
-        "obstructive_apnea": "obstructive-apnea",
-        "obstructiveapnea": "obstructive-apnea",
-        "mixed apnea": "mixed-apnea",
-        "mixed_apnea": "mixed-apnea",
-        "mixedapnea": "mixed-apnea",
-        "central apnea": "central-apnea",
-        "central_apnea": "central-apnea",
-        "centralapnea": "central-apnea",
+        "obstructive apnea": "obstructive_apnea",
+        "obstructive_apnea": "obstructive_apnea",
+        "obstructiveapnea": "obstructive_apnea",
+        "mixed apnea": "mixed_apnea",
+        "mixed_apnea": "mixed_apnea",
+        "mixedapnea": "mixed_apnea",
+        "central apnea": "central_apnea",
+        "central_apnea": "central_apnea",
+        "centralapnea": "central_apnea",
         "hypopnea": "hypopnea",
         "rera": "rera",
         "arousal": "arousal",
@@ -298,7 +309,8 @@ def map_hsp_sane_labels(df: pd.DataFrame) -> pd.DataFrame:
         mask = orig.str.contains(source, case=False, regex=False, na=False)
         result = result.mask(mask, target)
 
-    df["Label"] = result
+    known = {*SLEEP_STAGE_LABELS, "apnea", "obstructive_apnea", "central_apnea", "mixed_apnea", "hypopnea", "desaturation", "arousal", "rera", "limb_movement"}
+    df["Label"] = result.where(result.isin(known), "other")
     return df
 
 
@@ -2124,9 +2136,11 @@ class HSP(BaseDataset):
             - new sensitivity 150 µvp-p e1-m2 - 1002
             - new sensitivity 50 µvp-p chin1-chin3, new high filters 50.0hz notch 60hz chin1-chin3 - 1001
     '''
-    def __init__(self, sane_labels=True, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.sane_labels = sane_labels
+
+    def supported_events(self) -> list[str]:
+        return [*SLEEP_STAGE_LABELS, "apnea", "obstructive_apnea", "central_apnea", "mixed_apnea", "hypopnea", "desaturation", "arousal", "rera", "limb_movement", "other"]
 
     def get_event_df(self, edf_path, start_datetime):
         annot_path = get_hsp_annotation_path(edf_path)
@@ -2135,13 +2149,18 @@ class HSP(BaseDataset):
 
         df = pd.read_csv(annot_path)
         df = df.rename(columns={'event': 'Label', 'time': 'Starttime', 'duration': 'Duration'})
-        df['Label'] = df['Label'].str.lower()
+        df["SourceLabel"] = df["Label"].astype("string")
+        df['Label'] = df['Label'].astype("string").str.lower().str.strip()
+        if df.empty:
+            df["Starttime"] = pd.Series(dtype="datetime64[ns]")
+            df["Endtime"] = pd.Series(dtype="datetime64[ns]")
+            return df
 
         # Some HSP exports leave the duration column blank but retain event
         # durations in the text, e.g. "Respiratory Event - Dur: 14.6 sec.".
         # Read these before mapping labels, and keep explicit CSV durations.
         embedded_duration = df['Label'].str.extract(r'\bdur:\s*([0-9]+(?:\.[0-9]+)?)\s*sec\b', expand=False)
-        df['Duration'] = df['Duration'].fillna(pd.to_numeric(embedded_duration))
+        df['Duration'] = pd.to_numeric(df['Duration'], errors="raise").fillna(pd.to_numeric(embedded_duration))
 
         base_date = f'{start_datetime._date_repr}'
         df['Starttime'] = pd.to_datetime(base_date + ' ' + df['Starttime'])
@@ -2162,10 +2181,12 @@ class HSP(BaseDataset):
 
         df['Endtime'] = df['Starttime'] + pd.to_timedelta(df['Duration'], unit='s')
 
-        if self.sane_labels:
-            df = self._map_to_sane_labels(df)
-
-        return df[['Label', 'Starttime', 'Endtime', 'Duration']]
-
-    def _map_to_sane_labels(self, df):
-        return map_hsp_sane_labels(df)
+        drops = df["SourceLabel"].str.extract(r"\bdrop\s+(-?[0-9]+(?:\.[0-9]+)?)\s*%", expand=False)
+        df = map_hsp_sane_labels(df)
+        if (drops.notna() & df["Label"].eq("desaturation")).any():
+            df["desaturation_drop_pp"] = pd.to_numeric(drops, errors="raise").astype("Float64").where(df["Label"] == "desaturation")
+        # Unbounded stage changes and instantaneous markers have no event interval.
+        # In particular, do not invent a boundary for the final unbounded stage.
+        df = df.loc[df["Endtime"] > df["Starttime"]].copy()
+        columns = ["Label", "Starttime", "Endtime", "SourceLabel"] + (["desaturation_drop_pp"] if "desaturation_drop_pp" in df else [])
+        return df[columns]

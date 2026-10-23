@@ -20,6 +20,7 @@ from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTraine
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
 from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config
 from sleepwalker.utils import logger, WandbSink, count_parameters
+from sleepwalker.training.callbacks import prepare_sleep_events
 
 os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
@@ -49,21 +50,18 @@ CHANNELS = [
 ]
 
 EVENT_MAPPING = {
-    'wach': 'wake',
+    'wake': 'wake',
     'n1': 'n1',
     'n2': 'n2',
     'n3': 'n3',
     'rem': 'rem',
     'arousal': 'arousal',
-    'a. gemischt': 'apnea',
-    'a. obstruktiv': 'apnea',
-    'a. zentral': 'apnea',
-    'apnoe': 'apnea',
-    'h. obstruktiv': 'hypopnea',
-    'h. zentral': 'hypopnea',
-    'hypopnea-gemischt': 'hypopnea',
-    'hypopnoe': 'hypopnea',
-    'lm': 'lm',
+    'mixed_apnea': 'apnea',
+    'obstructive_apnea': 'apnea',
+    'central_apnea': 'apnea',
+    'apnea': 'apnea',
+    'hypopnea': 'hypopnea',
+    'limb_movement': 'lm',
 }
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
@@ -181,7 +179,7 @@ def get_datasets():
     logger.context('TRAIN')
     train_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -196,7 +194,7 @@ def get_datasets():
     logger.context('VAL')
     val_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -211,7 +209,7 @@ def get_datasets():
     logger.context('TEST')
     test_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -299,7 +297,7 @@ def main():
         epochs=EPOCHS,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=2e-3),
         #lr_scheduler = lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=EPOCHS),
-        classes=train_ds.get_classes(),
+        classes=[],  # Reconstruction has no single classifier output vocabulary.
         downstream_tasks=normalized_task_config,
         save_every=10,
         device=DEVICE,

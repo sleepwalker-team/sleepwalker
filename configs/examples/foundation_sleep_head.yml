@@ -97,12 +97,16 @@ data:
     - C4-M1
     preprocessors:
     - name: sleepwalker.datasets.normalizer.RecordingZScore
-  event_mapping:
-    wake: wake
-    n1: n1
-    n2: n2
-    n3: n3
-    rem: rem
+  annotation_labels: [wake, n1, n2, n3, rem]
+  prepare_events:
+    name: sleepwalker.training.callbacks.map_events
+    mapping:
+      wake: wake
+      n1: n1
+      n2: n2
+      n3: n3
+      rem: rem
+    remove_unmapped: true
   total_input: 300s
   stride: 300s
   output_classes: &id001

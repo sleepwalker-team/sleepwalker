@@ -46,6 +46,9 @@ class MultiLabelTrainer(BaseTrainer):
         return_best: Whether to return the lowest-loss validation checkpoint
             instead of leaving the model at its last training epoch.
         log_batches: Whether to emit batch-level metric logs.
+        balance_batches: Use training class counts to configure frequency-based
+            acceptance in the target callback. Counts are shared with loss
+            weighting and retained for resume; minibatch quotas are approximate.
 
     """
 
@@ -65,6 +68,7 @@ class MultiLabelTrainer(BaseTrainer):
         early_stopping: Optional[int] = None,
         return_best: bool = True,
         log_batches: bool = True,
+        balance_batches: bool = False,
     ):
         super().__init__(
             epochs=epochs,
@@ -81,6 +85,7 @@ class MultiLabelTrainer(BaseTrainer):
 
         self.task_config = normalize_multitask_config(task_config)
         self.task_specs = list(self.task_config.values())
+        self.balance_batches = bool(balance_batches)
         self.task_idx = {cfg["task"]: idx for idx, cfg in enumerate(self.task_specs)}
         self.target_resolution = max(cfg["target_span"] for cfg in self.task_specs)
         self.max_task_steps = max(cfg["n_steps"] for cfg in self.task_specs)
@@ -149,15 +154,12 @@ class MultiLabelTrainer(BaseTrainer):
         }
 
     def warmup_trainer(self, data_loader, device: str = "cuda"):
-        """Estimate per-task class counts and configure weighted losses."""
+        """Reuse/estimate training counts, configure losses and bind balancing."""
         tasks_needing_counts = [
             cfg["task"]
             for cfg in self.task_config.values()
-            if (cfg.get("loss_mode", "none") or "none") != "none"
+            if self.balance_batches or (cfg.get("loss_mode", "none") or "none") != "none"
         ]
-        if not tasks_needing_counts:
-            return
-
         class_cnts = {
             task: dict(self.task_config[task]["class_counts"])
             for task in tasks_needing_counts
@@ -179,6 +181,21 @@ class MultiLabelTrainer(BaseTrainer):
             logger.info(f"Estimated class counts for {missing_tasks}: {class_cnts}")
         else:
             logger.info(f"Using configured class counts: {class_cnts}")
+
+        for task, counts in class_cnts.items():
+            self.task_config[task]["class_counts"] = counts
+        if self.balance_batches:
+            if any(count <= 0 for counts in class_cnts.values() for count in counts.values()):
+                raise ValueError("Balancing requires observed training examples from every class.")
+            pending = [data_loader.dataset]
+            while pending:
+                dataset = pending.pop()
+                if hasattr(dataset, "datasets"):
+                    pending.extend(dataset.datasets)
+                else:
+                    if dataset.prepare_target_callback is None:
+                        raise ValueError("balance_batches requires a prepare_target callback.")
+                    dataset.prepare_target_callback = partial(dataset.prepare_target_callback, class_cnts=class_cnts)
 
         for cfg in self.task_specs:
             task = cfg["task"]

@@ -17,6 +17,7 @@ import pandas as pd
 import xlrd
 
 from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig
+from sleepwalker.datasets.events import decode_event_labels
 from sleepwalker.datasets.normalizer.EEGFilterNormalizer import EEGFilterNormalizer
 from sleepwalker.datasets.normalizer.PulseFilterNormalizer import PulseFilterNormalizer
 from sleepwalker.datasets.normalizer.RespirationFilterNormalizer import RespirationFilterNormalizer
@@ -347,6 +348,9 @@ def get_channels(
 
     return requested
 
+RUHRLAND_EVENT_LABELS = {'wach': 'wake', 'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'rem': 'rem', 'arousal': 'arousal', 'plm-arousal': 'arousal', 'a. obstruktiv': 'obstructive_apnea', 'a. zentral': 'central_apnea', 'a. gemischt': 'mixed_apnea', 'apnoe': 'apnea', 'fg apnoe geschlossen': 'apnea', 'fg apnoe geöffnet': 'apnea', 'fg-apnoe unbekannt': 'apnea', 'h. obstruktiv': 'hypopnea', 'h. zentral': 'hypopnea', 'hypopnea-gemischt': 'hypopnea', 'hypopnoe': 'hypopnea', 'fg hypopnoe': 'hypopnea', 'entsättigung': 'desaturation', 'lm': 'limb_movement', 'plm': 'periodic_limb_movement', 'plms': 'periodic_limb_movement', 'rera': 'rera', 'cheyne stokes': 'cheyne_stokes', 'links': 'body_position_left', 'rechts': 'body_position_right', 'rückenlage': 'body_position_supine', 'bauchlage': 'body_position_prone', 'aufrecht': 'body_position_upright', 'geräteeinstellungen': 'device_settings'}
+
+
 class Ruhrlandklinik(BaseDataset):
     """Dataset adapter for Ruhrlandklinik recordings and annotations.
 
@@ -671,6 +675,8 @@ class Ruhrlandklinik(BaseDataset):
             ``Endtime``, and ``Duration`` columns.
         """
         nox_filepath = os.path.splitext(edf_path)[0] + "_AS.csv"
+        if not os.path.exists(nox_filepath):
+            return None
         try:
             dfnox = pd.read_csv(nox_filepath, skiprows=[1], header=0, parse_dates=["Anfangszeit","Endzeit"], dayfirst=True, usecols=[0,1,2,3])
             
@@ -682,18 +688,20 @@ class Ruhrlandklinik(BaseDataset):
                 "ger?teeinstellungen":"geräteeinstellungen"
             }
             dfnox["Ereignis"] = dfnox.apply(lambda row: encoding_fix.get(row.Ereignis.lower().strip(), row.Ereignis.lower().strip()), axis=1) # type: ignore
-            # dfnox["Ereignis"] = dfnox.apply(lambda row: self.event_mapping[row["Ereignis"]] if row["Ereignis"] in self.event_mapping else None, axis=1) # type: ignore
             dfnox = dfnox.rename(columns={"Ereignis":"Label", "Anfangszeit":"Starttime", "Endzeit":"Endtime", "Dauer":"Duration"})
             dfnox = dfnox.dropna(subset=["Label", "Starttime"])
             dfnox["Starttime"] = pd.to_datetime(dfnox["Starttime"])
             dfnox["Endtime"] = pd.to_datetime(dfnox["Endtime"])
-            return self._expand_change_based_body_positions(dfnox)
+            return decode_event_labels(self._expand_change_based_body_positions(dfnox), mapping=RUHRLAND_EVENT_LABELS)
         except Exception as e:
                 raise ValueError(f"Error reading {nox_filepath}. Error was {traceback.format_exc()}")
     
     def has_extra_target(self):
         """Report whether auxiliary Ruhrland annotations should be exposed."""
         return self.return_nox
+
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*RUHRLAND_EVENT_LABELS.values(), "other"]))
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """Read the main Ruhrland event annotations from spreadsheet files.
@@ -708,11 +716,8 @@ class Ruhrlandklinik(BaseDataset):
             ``Endtime``, and ``Duration`` columns.
 
         Notes:
-            The parser contains Ruhrland-specific normalization steps, including
-            merging overlapping ``lm`` intervals and suppressing certain
-            non-sleep events that overlap with wake intervals. Those behaviors
-            are documented because they are explicit in code, but their broader
-            annotation rationale remains dataset-specific.
+            This reader only decodes annotations and expands body-position
+            change markers. Merging and wake exclusion belong to prepare_events.
         """
         description_filepath = os.path.splitext(edf_path)[0] + "_MS"
         if os.path.exists(description_filepath + ".xls"):
@@ -744,98 +749,7 @@ class Ruhrlandklinik(BaseDataset):
         #     first_event_timestamp = xls_file.iloc[0]["Anfangszeit"] + pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
         #     last_event_timestamp = xls_file.iloc[-1]["Endzeit"] - pd.to_timedelta(self.cutoff_time) #datetime.timedelta(minutes=cutoff_minutes)
 
-        events = list(set(self.event_mapping.keys()))
-        if "lm" in events:
-            dff = xls_file.loc[xls_file["Ereignis"] == "lm", :].sort_values("Anfangszeit").reset_index(drop=True)
-            if len(dff) > 0:
-                merged_rows = []
-
-                current_start = pd.Timestamp(dff.loc[0, "Anfangszeit"])
-                current_end = pd.Timestamp(dff.loc[0, "Endzeit"])
-
-                for i in range(1, len(dff)):
-                    next_start = pd.Timestamp(dff.loc[i, "Anfangszeit"])
-                    next_end = pd.Timestamp(dff.loc[i, "Endzeit"])
-                    if next_start <= current_end:
-                        current_end = max(current_end, next_end)
-                    else:
-                        merged_rows.append(
-                            {
-                                "Anfangszeit": current_start,
-                                "Endzeit": current_end,
-                                "Ereignis": "lm",
-                                "Dauer": pd.Timedelta(current_end - current_start).total_seconds(),
-                            }
-                        )
-                        current_start = next_start
-                        current_end = next_end
-                merged_rows.append(
-                    {
-                        "Anfangszeit": current_start,
-                        "Endzeit": current_end,
-                        "Ereignis": "lm",
-                        "Dauer": pd.Timedelta(current_end - current_start).total_seconds(),
-                    }
-                )
-                dff = pd.DataFrame(merged_rows)
-                xls_file = xls_file.loc[xls_file["Ereignis"] != "lm", :]
-                xls_file = pd.concat([xls_file, dff], axis=0, ignore_index=True)
-
-        non_sleep_events = [e for e in events if e not in ["wach", "n1", "n2", "n3", "rem"]]
-        non_cnt = 0
-
-        if len(non_sleep_events) > 0:
-            # Filter for "Wach" events and merge consecutive intervals
-            wach_df = xls_file[xls_file["Ereignis"] == "wach"].sort_values("Anfangszeit").reset_index(drop=True)
-
-            # Merge consecutive rows where Endzeit of one row is the same as Anfangszeit of the next.
-            merged_wach_intervals = []
-            current_start = wach_df.loc[0, "Anfangszeit"]
-            current_end = wach_df.loc[0, "Endzeit"]
-
-            for i in range(1, len(wach_df)):
-                row = wach_df.iloc[i]
-                if row["Anfangszeit"] <= current_end:  
-                    # Extend the interval
-                    current_end = max(current_end, row["Endzeit"])  
-                else:
-                    # Save the completed interval + Start a new interval
-                    merged_wach_intervals.append((current_start, current_end))
-                    current_start = row["Anfangszeit"]
-                    current_end = row["Endzeit"]
-
-            # Append the last interval
-            merged_wach_intervals.append((current_start, current_end))
-            merged_wach_df = pd.DataFrame(merged_wach_intervals, columns=["Anfangszeit", "Endzeit"])
-            other_df = xls_file[xls_file["Ereignis"].isin(non_sleep_events)]
-
-            # Check for overlaps and set rows to None where there's an overlap with merged "Wach" intervals
-            for idx, event_row in other_df.iterrows():
-                event_start = event_row["Anfangszeit"]
-                event_end = event_row["Endzeit"]
-                
-                # Find if there's an overlap with any merged "Wach" interval
-                overlap_exists = merged_wach_df[
-                    (merged_wach_df["Anfangszeit"] <= event_end) & (merged_wach_df["Endzeit"] >= event_start)
-                ]
-                
-                # If overlap exists, set "Ereignis" of the "Wach" row to None
-                if not overlap_exists.empty:
-                    non_cnt += 1
-                    xls_file.at[idx, "Ereignis"] = None
-        
-        # if non_cnt > 0:
-        #     logger.info(f"Removed {non_cnt} annotations for patient {edf_path}, due to not being asleep.")
-
         xls_file["Ereignis"] = xls_file["Ereignis"].apply(lambda x: None if x is None else x.lower().strip())
         xls_file = xls_file.dropna(subset=["Ereignis"]).reset_index(drop=True)
         df = xls_file[["Ereignis", "Anfangszeit", "Endzeit", "Dauer"]].copy().rename(columns={"Ereignis":"Label", "Anfangszeit":"Starttime", "Endzeit":"Endtime", "Dauer":"Duration"})
-        return self._expand_change_based_body_positions(df)
-        # xls_file["Ereignis"] = xls_file["Ereignis"].apply(lambda x: self.event_mapping[x] if x in self.event_mapping else None)
-
-        # xls_file["Ereignis"] = xls_file.apply(lambda row: None if row.Ereignis is None else row.Ereignis.lower().strip(), axis=1)
-        # xls_file["Ereignis"] = xls_file.apply(lambda row: self.event_mapping[row["Ereignis"]] if row["Ereignis"] in self.event_mapping else None, axis=1)
-        # df = xls_file[["Ereignis", "Anfangszeit", "Endzeit", "Dauer"]].copy().rename(columns={"Ereignis":"Label", "Anfangszeit":"Starttime", "Endzeit":"Endtime", "Dauer":"Duration"})
-        # df = df.dropna()
-
-        # return df
+        return decode_event_labels(self._expand_change_based_body_positions(df), mapping=RUHRLAND_EVENT_LABELS)

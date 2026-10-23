@@ -3,10 +3,17 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from .Basedataset import BaseDataset  
+from sleepwalker.datasets.events import decode_event_labels
+
+STAGES_EVENT_LABELS = {'wake': 'wake', 'w': 'wake', 'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'r': 'rem', 'rem': 'rem', 'no stage': 'unscored', 'u': 'unscored', 'arousal': 'arousal', 'apnea': 'apnea', 'hypopnea': 'hypopnea', 'desaturation': 'desaturation', 'obstructive apnea': 'obstructive_apnea', 'central apnea': 'central_apnea', 'mixed apnea': 'mixed_apnea'}
+
 
 class Stages(BaseDataset):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*STAGES_EVENT_LABELS.values(), "other"]))
 
     def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
         """
@@ -51,4 +58,4 @@ class Stages(BaseDataset):
         df["Endtime"] = df["Starttime"] + df["Duration"]
         df["Label"] = df["event"].astype(str).str.strip().str.lower()
 
-        return df[["Label", "Starttime", "Endtime", "Duration"]]
+        return decode_event_labels(df[["Label", "Starttime", "Endtime", "Duration"]], mapping=STAGES_EVENT_LABELS)

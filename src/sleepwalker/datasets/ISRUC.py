@@ -20,6 +20,7 @@ from tqdm import tqdm
 from sleepwalker.utils import logger
 
 from sleepwalker.datasets.Basedataset import BaseDataset
+from sleepwalker.datasets.events import decode_event_labels
 
 files = [
     'subgroupI/1.rar',
@@ -196,13 +197,11 @@ def download_dataset(out_folder, server_url, file_names):
 
         download_and_extract(download_url, out_file_path, prefix=f"[{i+1}/{len(file_names)}] ")
 
-def load_dataframe(fpath: str, event_mapping, annotator = "s1", start_date: pd.Timestamp = None):
+def load_dataframe(fpath: str, annotator = "s1", start_date: pd.Timestamp = None):
     """Load one annotator spreadsheet into the repository event-table format.
 
     Args:
         fpath: EDF path whose sidecar spreadsheet should be read.
-        event_mapping: Unused by the current implementation, but retained for
-            compatibility with adapter call sites.
         annotator: Annotator suffix used in ISRUC sidecar filenames.
         start_date: Recording start timestamp used to construct absolute times.
 
@@ -231,6 +230,9 @@ def load_dataframe(fpath: str, event_mapping, annotator = "s1", start_date: pd.T
     except Exception as e:
         logger.warning(f"Error reading {fpath}. Error was {traceback.format_exc()}")
         raise e
+
+ISRUC_EVENT_LABELS = {'wake': 'wake', 'w': 'wake', 'n1': 'n1', 'n2': 'n2', 'n3': 'n3', 'r': 'rem', 'rem': 'rem', 'no stage': 'unscored', 'u': 'unscored'}
+
 
 class ISRUC(BaseDataset):
     """
@@ -320,7 +322,7 @@ class ISRUC(BaseDataset):
     """
     def __init__(self, 
             annotator = ["1", "2"],
-            merge = True, 
+            merge = False,
             **kwargs
         ): 
         """Configure the ISRUC adapter.
@@ -331,11 +333,12 @@ class ISRUC(BaseDataset):
                 annotator is configured.
             **kwargs: Forwarded to :class:`BaseDataset`.
         """
-        if not isinstance(annotator, list):
-            annotator = [annotator]
-        
         if annotator is None or len(annotator) == 0:
             annotator = ["1", "2"] 
+        elif isinstance(annotator, str):
+            annotator = [annotator]
+        else:
+            annotator = list(annotator)
         
         self.annotator = annotator
         self.merge = merge
@@ -350,8 +353,13 @@ class ISRUC(BaseDataset):
         """Load the secondary annotator table when ``merge`` is disabled."""
         if len(self.annotator) <= 1 or self.merge:
             raise ValueError(f"This function should not have been called.")
-        else:
-            return load_dataframe(fpath, self.event_mapping, self.annotator[1], start_date)
+        try:
+            return decode_event_labels(load_dataframe(fpath, self.annotator[1], start_date), mapping=ISRUC_EVENT_LABELS)
+        except FileNotFoundError:
+            return None
+
+    def supported_events(self) -> list[str]:
+        return list(dict.fromkeys([*ISRUC_EVENT_LABELS.values(), "other"]))
 
     def get_event_df(self, fpath, start_date):
         """Load the primary ISRUC annotation table for one EDF recording.
@@ -360,14 +368,14 @@ class ISRUC(BaseDataset):
         adapter keeps only intervals that match across both annotators.
         """
         if len(self.annotator) > 1 and self.merge:
-            df0 = load_dataframe(fpath, self.event_mapping, self.annotator[0], start_date)
-            df1 = load_dataframe(fpath, self.event_mapping, self.annotator[1], start_date)
-            return pd.merge(df0, df1, on=["Label", "Starttime", "Endtime"],how="inner")
+            df0 = load_dataframe(fpath, self.annotator[0], start_date)
+            df1 = load_dataframe(fpath, self.annotator[1], start_date)
+            return decode_event_labels(pd.merge(df0, df1, on=["Label", "Starttime", "Endtime"],how="inner"), mapping=ISRUC_EVENT_LABELS)
         else:
             if len(self.annotator) > 1:
-                return load_dataframe(fpath, self.event_mapping, self.annotator[0], start_date)
+                return decode_event_labels(load_dataframe(fpath, self.annotator[0], start_date), mapping=ISRUC_EVENT_LABELS)
             else:
-                return load_dataframe(fpath, self.event_mapping, self.annotator, start_date)
+                return decode_event_labels(load_dataframe(fpath, self.annotator[0], start_date), mapping=ISRUC_EVENT_LABELS)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download the ISRUC data.')

@@ -82,6 +82,7 @@ class MulticlassTrainer(BaseTrainer):
         balance_gamma: float = 1.0,
         sequence_len: int = 1,
         target_offset: str | pd.Timedelta = "0s",
+        log_confusion_figures: bool = True,
     ):
         super().__init__(
             epochs=epochs,
@@ -111,6 +112,7 @@ class MulticlassTrainer(BaseTrainer):
         self.balance_batches = balance_batches
         self.balance_gamma = float(balance_gamma)
         self.sequence_len = int(sequence_len)
+        self.log_confusion_figures = bool(log_confusion_figures)
         if self.sequence_len < 1:
             raise ValueError("sequence_len must be at least 1.")
         self.target_resolution = pd.to_timedelta(target_resolution)
@@ -178,7 +180,8 @@ class MulticlassTrainer(BaseTrainer):
 
         class_cnts = self.class_counts
         if (self.balance_batches or self.loss_mode != "regular") and class_cnts is None:
-            class_cnts = estimate_class_cnts(data_loader)
+            class_cnts = estimate_class_cnts(data_loader, classes=self.classes)
+            self.class_counts = class_cnts
             logger.info(f"Class counts are {class_cnts}")
         elif class_cnts is not None:
             logger.info(f"Using configured class counts: {class_cnts}")
@@ -199,16 +202,12 @@ class MulticlassTrainer(BaseTrainer):
                 if base_callback is None:
                     raise ValueError("balance_batches requires a prepare_target callback on the training dataset.")
             if can_balance_batches:
-                # TODO: Rebuild the loader (or implement balancing in a sampler)
-                # before enabling this path. Persistent DataLoader workers hold
-                # their own dataset copies, so mutating the callback here after
-                # class-count estimation does not affect those workers.
                 for current_ds in current_datasets:
                     base_callback = getattr(current_ds, "_base_prepare_target_callback", current_ds.prepare_target_callback)
                     current_ds._base_prepare_target_callback = base_callback
                     current_ds.prepare_target_callback = self._wrap_prepare_target_for_balancing(
                         base_callback,
-                        [class_cnts.get(c, 1.0) for c in current_ds.get_classes()],
+                        [class_cnts.get(c, 1.0) for c in self.classes],
                     )
 
         if self.loss_mode != "regular":
@@ -219,7 +218,7 @@ class MulticlassTrainer(BaseTrainer):
             class_weights = self.class_weights
 
         if len(class_weights) > 0:
-            weights_torch = torch.tensor([class_weights.get(c, 1) for c in dataset.get_classes()], device=self.device)
+            weights_torch = torch.tensor([class_weights.get(c, 1) for c in self.classes], device=self.device)
             self.loss_function = partial(self.base_loss_function, weight=weights_torch)
         else:
             self.loss_function = self.base_loss_function
@@ -337,7 +336,7 @@ class MulticlassTrainer(BaseTrainer):
 
         logger.progress_close()
         epoch_loss = loss_sum / max(loss_weight_sum, 1)
-        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm = True)  
+        self._log_from_cm(cm_sum, epoch_loss, mode=mode, scope="epoch", step=self.epoch_step, show_cm=self.log_confusion_figures)
         
 
         return epoch_loss, cm_sum  

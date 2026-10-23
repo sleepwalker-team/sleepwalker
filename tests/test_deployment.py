@@ -15,6 +15,8 @@ from sleepwalker.datasets.normalizer import EEGFilterNormalizer, RecordingZScore
 from sleepwalker.deployment import PackagedModel, save_packaged_model
 from sleepwalker.deployment.predictions import format_prediction_batch
 from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
+from sleepwalker.training.callbacks import map_events
+from functools import partial
 
 
 DATA = Path(__file__).parent / "data"
@@ -75,7 +77,7 @@ def test_online_retry_configuration_only_exposes_budget():
 
 def test_hsp_header_correction_survives_unlabelled_clone():
     channels = get_hsp_channels(["spo2"], grouped=True, normalize=False, sample_frequency=100)
-    dataset = HSP(channels=channels, sample_frequency=100, event_mapping={"desaturation": "desaturation"})
+    dataset = HSP(channels=channels, sample_frequency=100, annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
 
     expected = [ChannelConfig('SpO2', ['SaO2', 'SpO2', 'SPO2'], preprocessors={name: [ConvertUnit('%')] for name in ['SaO2', 'SpO2', 'SPO2']})]
 
@@ -139,16 +141,18 @@ def test_loading_legacy_package_moves_target_resolution_out_of_the_dataset(tmp_p
 
 
 def test_packaging_discards_label_pipeline(tmp_path):
-    labelled = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    labelled = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
     packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=labelled)
 
     assert isinstance(packaged.dataset, UnlabelledDataset)
-    assert packaged.dataset.event_mapping is None
+    assert packaged.dataset.load_annotations is False
+    assert packaged.dataset.label_classes == []
+    assert packaged.dataset.prepare_events_callback is None
 
 
 def test_packaging_uses_first_component_of_multidataset(tmp_path):
-    first = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
-    second = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", event_mapping={"desaturation": "desaturation"})
+    first = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
+    second = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
     first.initialized = True
     second.initialized = True
 

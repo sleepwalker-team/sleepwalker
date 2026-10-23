@@ -37,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 datasets = ["openpyxl", "rarfile", "xlrd"]
 tracking = ["mlflow", "wandb"]
+yasa = ["yasa>=0.7,<0.9", "antropy"]
 docs = ["zensical==0.0.60", "mkdocstrings-python==2.0.8"]
 dev = ["pytest", "python-dotenv"]
 

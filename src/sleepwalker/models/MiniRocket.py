@@ -1,35 +1,36 @@
-"""MiniRocket features as a preprocessor."""
+"""MiniRocket as an encoder: [B, T, C] windows in, [B, n_features] features out."""
+
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from sleepwalker.models.preprocessors.Preprocessor import Preprocessor
+from sleepwalker.models.BaseModel import BaseModel, EmbeddingModel
 from sleepwalker.utils import logger
 
 
 # Adapted from tsai's MINIROCKET_Pytorch.py (Malcolm McLean, Ignacio Oguiza; https://github.com/timeseriesAI/tsai,
 # Apache License 2.0), with the channel combinations folded into the convolution weights.
-class MiniRocket(Preprocessor):
-    """MiniRocket (Dempster et al., 2021): [B, T, C] in, [B, n_features] proportions of positive values out.
+class MiniRocket(BaseModel, EmbeddingModel):
+    """MiniRocket (Dempster et al., 2021) encoder: proportions of positive values of random convolutions.
 
     Args:
-        n_channels: Number of input channels, filled in from the data config.
         ts_len: Number of samples per input window, filled in from the data config.
+        n_channels: Number of input channels, filled in from the data config.
         num_features: Number of output features, rounded down to a multiple of 84.
         max_dilations_per_kernel: Upper limit on the number of dilations.
-        fit_windows: Training windows collected during warmup before the biases are fitted.
+        fit_windows: Training windows the biases are fitted on during warmup; None uses all windows the warmup delivers.
         random_state: Seed for the channel combinations and the fitting windows.
     """
 
-    def __init__(self, n_channels, ts_len, num_features=10_000, max_dilations_per_kernel=32, fit_windows=1024, random_state=0, channels=None):
-        super().__init__(channels=channels)
-        self.n_channels = int(n_channels)
+    def __init__(self, *, ts_len: int, n_channels: int, num_features: int = 10_000, max_dilations_per_kernel: int = 32, fit_windows: int | None = 1024, random_state: int = 0):
+        super().__init__()
         self.ts_len = int(ts_len)
-        self.fit_windows = int(fit_windows)
+        self.n_channels = int(n_channels)
+        self.fit_windows = fit_windows
         self.generator = np.random.default_rng(random_state)
         self.dilations, self.features_per_dilation = minirocket_dilations(self.ts_len, num_features, max_dilations_per_kernel)
-        self.warmup_windows = []  # until fit_windows are collected
 
         positions = torch.combinations(torch.arange(9), 3)  # weight 2 at 3 of 9 positions, -1 elsewhere
         self.register_buffer("kernels", (-torch.ones(84, 9)).scatter_(1, positions, 2.0))
@@ -37,36 +38,30 @@ class MiniRocket(Preprocessor):
         self.register_buffer("biases", torch.zeros(84, sum(self.features_per_dilation)))
         self.register_buffer("fitted", torch.tensor(False))
 
-    @property
-    def n_features(self) -> int:
-        """Number of output features."""
-        return 84 * sum(self.features_per_dilation)
-
-    def requires_warmup(self) -> bool:
-        """Return whether this preprocessor requires warmup."""
-        return True
-
-    def _update(self, data: torch.Tensor):
-        """Collect warmup windows and fit once fit_windows have arrived."""
+    @torch.no_grad()
+    def warmup_preprocessor(self, data_loader, device: str):
+        """Fit the biases on the first fit_windows training windows, then stop. The trainer calls this before training."""
+        self.to(device)
         if self.fitted:
-            return
-        collected = sum(len(windows) for windows in self.warmup_windows)
-        self.warmup_windows.append(data[: self.fit_windows - collected].detach())
-        if collected + len(self.warmup_windows[-1]) >= self.fit_windows:
-            self.fit_buffered(data.device)
+            return self
+        windows, collected = [], 0
+        for batch in data_loader:
+            if batch is None:
+                continue
+            windows.append(batch["data"] if self.fit_windows is None else batch["data"][: self.fit_windows - collected])
+            collected += len(windows[-1])
+            if self.fit_windows is not None and collected >= self.fit_windows:
+                break
+        self.fit(torch.cat(windows).to(device))
+        return self
 
-    def _transform(self, data: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         """PPV features per dilation; before fitting it warns and uses zero biases."""
-        if tuple(data.shape[1:]) != (self.ts_len, self.n_channels):
-            raise ValueError(f"MiniRocket expects [B, {self.ts_len}, {self.n_channels}], got {tuple(data.shape)}.")
+        if tuple(x.shape[1:]) != (self.ts_len, self.n_channels):
+            raise ValueError(f"MiniRocket expects [B, {self.ts_len}, {self.n_channels}], got {tuple(x.shape)}.")
         if not self.fitted:
-            if self.warmup_windows:
-                collected = sum(len(windows) for windows in self.warmup_windows)
-                logger.warning(f"MiniRocket got {collected} of {self.fit_windows} fit_windows during warmup; fitting on those.")
-                self.fit_buffered(data.device)
-            else:
-                logger.warning("MiniRocket is not fitted yet; features use zero biases until the trainer's warmup has run.")
-        x = data.transpose(1, 2).float()
+            logger.warning("MiniRocket is not fitted yet; features use zero biases until the trainer's warmup has run.")
+        x = x.transpose(1, 2).float()
         biases = torch.split(self.biases, self.features_per_dilation, dim=1)
         features = []
         for i, dilation in enumerate(self.dilations):
@@ -76,13 +71,19 @@ class MiniRocket(Preprocessor):
             features.append(ppv(convolved[:, 1 - first::2, padding:-padding], biases[i][1 - first::2]))
         return torch.cat(features, dim=1)
 
-    def fit_buffered(self, device: torch.device):
-        """Fit on the collected warmup windows, on the device of the current batch."""
-        self.fit(torch.cat(self.warmup_windows).to(device))
-        self.warmup_windows = []
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        """Return embeddings without a classification head."""
+        return self.encode(x)
+
+    def feature_dim(self) -> int:
+        """Number of output features."""
+        return 84 * sum(self.features_per_dilation)
+
+    def input_spec(self) -> tuple[tuple[int, ...], dict[str, Any]]:
+        return (1, self.ts_len, self.n_channels), {"layout": "BTC", "ts_len": self.ts_len, "n_channels": self.n_channels}
 
     def fit(self, data: torch.Tensor):
-        """Biases: quantiles of each kernel's convolution of one random training window, as in MiniRocket."""
+        """Biases: quantiles of each kernel's convolution of one random training window."""
         x = data.transpose(1, 2).float()
         kernels = torch.arange(84, device=x.device)
         biases = []
@@ -110,6 +111,7 @@ class MiniRocket(Preprocessor):
         return F.conv1d(x, weights, padding=4 * dilation, dilation=dilation)
 
 
+@torch.compile(dynamic=True)  # fusing the steps keeps the comparison mask out of memory
 def ppv(C, bias):
     """Proportion of positive values: the share of time steps where the convolution exceeds each bias."""
     C = C.unsqueeze(-1)
@@ -123,7 +125,7 @@ def golden_ratio_quantiles(n):
 
 
 def minirocket_dilations(input_length, num_features, max_dilations_per_kernel):
-    """MiniRocket's dilations and features per dilation for an input length (the same formula as sktime and tsai)."""
+    """MiniRocket's dilations and features per dilation for an input length."""
     num_features_per_kernel = num_features // 84
     true_max_dilations_per_kernel = min(num_features_per_kernel, max_dilations_per_kernel)
     multiplier = num_features_per_kernel / true_max_dilations_per_kernel

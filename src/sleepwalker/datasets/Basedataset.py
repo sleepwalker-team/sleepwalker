@@ -396,8 +396,7 @@ class EventIndex:
         self.events = events.copy()
         self.starts: Dict[str, np.ndarray] = {}
         self.ends:   Dict[str, np.ndarray] = {}
-        # Sorted-end alternative retained for a future speed/memory benchmark:
-        # self.sorted_ends: Dict[str, np.ndarray] = {}
+        self.max_ends: Dict[str, np.ndarray] = {}
 
         for lab, g in self.events.groupby("Label", sort=False):
             s = g["Starttime"].dt.as_unit("ns").astype("int64").to_numpy()
@@ -408,7 +407,8 @@ class EventIndex:
 
             self.starts[lab] = s
             self.ends[lab] = e  # paired with starts, retaining individual boundaries
-            # self.sorted_ends[lab] = np.sort(e)
+            # Prefix maxima allow skipping expired intervals even when events nest.
+            self.max_ends[lab] = np.maximum.accumulate(e)
 
     def query(
         self,
@@ -444,23 +444,18 @@ class EventIndex:
 
         out = {}
         for lab in labels:
-            # Sorted-end alternative; enable with the commented constructor lines above.
-            # s = self.starts.get(lab, np.empty(0, np.int64))
-            # e = self.sorted_ends.get(lab, np.empty(0, np.int64))
-            # started = np.searchsorted(s, t, side="right")
-            # ended = np.searchsorted(e, t, side="right")
-            # active = (started - ended) > 0
-            # out[lab] = active.astype(dtype)
-
-            s = self.starts.get(lab, ())
-            e = self.ends.get(lab, ())
-            # TODO: Benchmark interval marking against sorted-end counting for query speed and memory.
-            # Search the sorted query grid, preserving paired half-open event boundaries.
             active = np.zeros(len(t), dtype=bool)
-            for event_start, event_end in zip(s, e):
-                first = np.searchsorted(t, event_start, side="left")
-                last = np.searchsorted(t, event_end, side="left")
-                active[first:last] = True
+            if len(t) and lab in self.starts:
+                starts, ends = self.starts[lab], self.ends[lab]
+                first = np.searchsorted(self.max_ends[lab], t[0], side="right")
+                stop = np.searchsorted(starts, t[-1], side="right")
+                starts, ends = starts[first:stop], ends[first:stop]
+                # A long interval can enclose shorter, already expired events.
+                relevant = ends > t[0]
+                left = np.searchsorted(t, starts[relevant], side="left")
+                right = np.searchsorted(t, ends[relevant], side="left")
+                for lo, hi in zip(left, right):
+                    active[lo:hi] = True
             out[lab] = active.astype(dtype)
 
         df = pd.DataFrame(out, index=idx)

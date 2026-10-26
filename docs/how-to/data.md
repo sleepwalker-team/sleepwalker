@@ -257,7 +257,7 @@ time points per logical channel. With `total_input="30s"`, `sample_frequency=100
 Window starts are multiples of `stride` counted from the first usable sample of the recording, so a `stride="15s"` produces windows starting at 0 s, 15 s, 30 s, and so on, and every window is dropped if it does not fit into the usable signal range. Once labels are available, `initialize()` does not keep every window in that grid: it keeps only the windows that overlap at least one retained annotation interval. Windows that fall entirely inside an unlabelled gap between two blocks of annotations are therefore never offered. See [what happens when a dataset is initialized](#what-happens-when-a-dataset-is-initialized).
 
 !!! important
-    Filters and window-dependent normalization receive the actual requested window. Filter boundary effects and window statistics can therefore differ between overlapping windows. During recording fitting, preceding filters receive the complete recording. The EDF cache stores native samples before resampling and processing; enabling it does not change this lifecycle.
+    Filters and window-dependent normalization receive the actual requested window. Filter boundary effects and window statistics can therefore differ between overlapping windows. During recording fitting, preceding filters receive the complete recording. Signal loading uses the requested native interval; there is no shared decoded-recording cache.
 
 ## What happens when a dataset is initialized
 
@@ -292,8 +292,8 @@ Adapters that expose a secondary annotation timeline can add `target_extra` (see
 
 `strict=True` makes an invalid patient fail initialization. With `strict=False`, invalid headers, annotations, and explicitly rejected recordings are logged and skipped. Processor errors always propagate. Stateless steps run during window access, so their rejection is handled there.
 
-!!! warning "Data loading pressures I/O bandwidth"
-    Data is loaded lazily from disk and is *not* held in memory. Each requested window means we are reading some part of an EDF file into main memory. This allows us to process even terabytes of data on fairly small machines, but also pressures I/O. In many cases, I/O bandwidth will be the limiting factor and not GPU speed. We highly recommend storing data on local SSDs for good performance rather than on a networked file system.
+!!! note "Measure the complete loading path"
+    Lazy access reads requested intervals without retaining complete recordings. Reads may hit the OS page cache; physical storage traffic is not implied by the number of window requests. Storage, CPU preparation, startup or model execution may dominate, depending on the workload and worker count. Measure exposed batch waiting before attributing a slowdown to I/O or changing storage. See [Performance](performance.md) for measured examples and limitations.
 
 ## A complete example
 

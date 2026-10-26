@@ -106,9 +106,9 @@ This page records useful features discovered while writing and testing the docum
 
 ## Reuse open EDF reader handles {#reuse-open-edf-reader-handles}
 
-**Current state:** `EDFFile` declares a `handle` field, but `EDFFile.get_x()` passes the file path to `edf_to_df()`, which opens a new `pyedflib.EdfReader` for every requested window and closes it afterwards. Every sample access therefore pays a file open, header parse, and close on top of the window read itself.
+**Current state:** The direct loading path opens a `pyedflib.EdfReader` per request. edflib retains parsed metadata while a handle is open, but frees it on close. Warm-file profiling found reader construction around 0.04–0.06 ms per request, below 1% of preparation time in the measured cases; retaining handles has no demonstrated end-to-end benefit yet.
 
-**Target:** Keep one open reader per patient per worker (opened lazily on first window access, closed when the worker exits or the dataset is re-initialized), verify correctness under `num_workers > 0` and `persistent_workers=True`, and measure the per-window speedup so the docs can state it.
+**Possible follow-up:** Measure another workload before introducing a bounded worker-local reader pool. The reviewed edflib 1.17 build permits 64 open files per process and rejects duplicate opens of the same pathname. Any design must respect those limits and handle cleanup. `EDFFile` is a metadata descriptor, not an open reader. See [Performance](how-to/performance.md).
 
 ## Provide a supported thread-limit helper {#provide-a-supported-thread-limit-helper}
 

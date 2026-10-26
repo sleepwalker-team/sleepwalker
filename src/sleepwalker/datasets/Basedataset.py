@@ -33,7 +33,6 @@ from torch.utils.data import Dataset, default_collate
 
 from sleepwalker.utils import logger
 from sleepwalker.core.signal import read_edf_native, resample_native_signals
-from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.events import EVENT_COLUMNS, validate_event_labels, validate_event_table
 from sleepwalker.datasets.normalizer import SignalFilterNormalizer
 
@@ -233,7 +232,7 @@ class EDFFile:
             end = start + pd.to_timedelta(reader.getFileDuration(), unit="s")
         return cls(path=os.fspath(path), channels=channels, units=units, start_date=start, end_date=end)
 
-    def get_x(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency: float, resample_type: str, channels: Optional[Sequence[str]] = None, cache: Optional[EDFCache] = None, read_mode: str = "physical") -> pd.DataFrame:
+    def get_x(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency: float, resample_type: str, channels: Optional[Sequence[str]] = None, read_mode: str = "physical") -> pd.DataFrame:
         """Load and resample signals for one contiguous patient interval.
 
         Args:
@@ -245,14 +244,13 @@ class EDFFile:
             sample_frequency: Target sampling frequency in Hz.
             resample_type: Resampling method understood by
                 :func:`resample_native_signals`.
-            cache: Optional process-shared cache of native EDF samples.
         """
         requested_channels = self.channels if channels is None else list(channels)
-        native = self.get_native(start_date, end_date, channels=requested_channels, cache=cache, read_mode=read_mode)
+        native = self.get_native(start_date, end_date, channels=requested_channels, read_mode=read_mode)
         return resample_native_signals(native, requested_channels, start_date, end_date, sample_frequency, resample_type)
 
-    def get_native(self, start_date: pd.Timestamp, end_date: pd.Timestamp, channels: Optional[Sequence[str]] = None, cache: Optional[EDFCache] = None, read_mode: str = "physical") -> dict[float, pd.DataFrame]:
-        """Load native samples, using separate cache entries for each channel and read mode."""
+    def get_native(self, start_date: pd.Timestamp, end_date: pd.Timestamp, channels: Optional[Sequence[str]] = None, read_mode: str = "physical") -> dict[float, pd.DataFrame]:
+        """Read requested native channel samples for one interval."""
         requested_channels = self.channels if channels is None else list(channels)
         unknown_channels = sorted(set(requested_channels) - set(self.channels))
         if unknown_channels:
@@ -268,27 +266,7 @@ class EDFFile:
             frequency = 1e9 / float(periods[0])
             return {frequency: self.X.loc[(self.X.index >= interval_start) & (self.X.index < interval_end), names].copy()}
 
-        if cache is None:
-            native = load_native(requested_channels, start_date, end_date)
-        else:
-            if self.end_date is None:
-                raise ValueError(f"Cached EDF access requires an end timestamp for {self.path}.")
-            native = {}
-            # Cache native samples, before resampling or any channel processing.
-            # Resampling the requested interval afterwards preserves its boundaries.
-            for name in requested_channels:
-                key = (str(self.path), name, int(self.start_date.value), int(self.end_date.value), read_mode)
-                def load_channel():
-                    return next(iter(load_native([name], self.start_date, self.end_date).values()))
-                with cache.acquire(key, str(self.path), load_channel) as entry:
-                    period = entry.metadata["period_ns"]
-                    origin = entry.metadata["start_ns"]
-                    first = origin + max((start_date.value - origin) // period, 0) * period
-                    stop = origin + max((end_date.value - origin) // period, 1) * period
-                    frame = entry.copy_window(pd.Timestamp(first), pd.Timestamp(stop), [name])
-                    frequency = 1e9 / period
-                    native[frequency] = pd.concat([native[frequency], frame], axis=1) if frequency in native else frame
-        return native
+        return load_native(requested_channels, start_date, end_date)
 
     def get_y_extra(self, start_date: pd.Timestamp, end_date: pd.Timestamp, sample_frequency, classes):
         """Sample the optional secondary target timeline for one window."""
@@ -396,8 +374,7 @@ class EventIndex:
         self.events = events.copy()
         self.starts: Dict[str, np.ndarray] = {}
         self.ends:   Dict[str, np.ndarray] = {}
-        # Sorted-end alternative retained for a future speed/memory benchmark:
-        # self.sorted_ends: Dict[str, np.ndarray] = {}
+        self.max_ends: Dict[str, np.ndarray] = {}
 
         for lab, g in self.events.groupby("Label", sort=False):
             s = g["Starttime"].dt.as_unit("ns").astype("int64").to_numpy()
@@ -408,7 +385,8 @@ class EventIndex:
 
             self.starts[lab] = s
             self.ends[lab] = e  # paired with starts, retaining individual boundaries
-            # self.sorted_ends[lab] = np.sort(e)
+            # Prefix maxima allow skipping expired intervals even when events nest.
+            self.max_ends[lab] = np.maximum.accumulate(e)
 
     def query(
         self,
@@ -444,23 +422,18 @@ class EventIndex:
 
         out = {}
         for lab in labels:
-            # Sorted-end alternative; enable with the commented constructor lines above.
-            # s = self.starts.get(lab, np.empty(0, np.int64))
-            # e = self.sorted_ends.get(lab, np.empty(0, np.int64))
-            # started = np.searchsorted(s, t, side="right")
-            # ended = np.searchsorted(e, t, side="right")
-            # active = (started - ended) > 0
-            # out[lab] = active.astype(dtype)
-
-            s = self.starts.get(lab, ())
-            e = self.ends.get(lab, ())
-            # TODO: Benchmark interval marking against sorted-end counting for query speed and memory.
-            # Search the sorted query grid, preserving paired half-open event boundaries.
             active = np.zeros(len(t), dtype=bool)
-            for event_start, event_end in zip(s, e):
-                first = np.searchsorted(t, event_start, side="left")
-                last = np.searchsorted(t, event_end, side="left")
-                active[first:last] = True
+            if len(t) and lab in self.starts:
+                starts, ends = self.starts[lab], self.ends[lab]
+                first = np.searchsorted(self.max_ends[lab], t[0], side="right")
+                stop = np.searchsorted(starts, t[-1], side="right")
+                starts, ends = starts[first:stop], ends[first:stop]
+                # A long interval can enclose shorter, already expired events.
+                relevant = ends > t[0]
+                left = np.searchsorted(t, starts[relevant], side="left")
+                right = np.searchsorted(t, ends[relevant], side="left")
+                for lo, hi in zip(left, right):
+                    active[lo:hi] = True
             out[lab] = active.astype(dtype)
 
         df = pd.DataFrame(out, index=idx)
@@ -831,7 +804,6 @@ class BaseDataset(Dataset, ABC):
                         raise ValueError("Filter fs must match the model sampling frequency.")
 
         self.group_sampling_strategy = group_sampling_strategy
-        self.edf_cache: Optional[EDFCache] = None
 
     def supported_events(self) -> list[str]:
         """Declare reader event types before preparation, independently of observed rows."""
@@ -879,10 +851,6 @@ class BaseDataset(Dataset, ABC):
     def get_n_patients(self) -> int:
         """Return the number of prepared patient recordings."""
         return len(self.edf_files)
-
-    def set_edf_cache(self, cache: Optional[EDFCache]) -> None:
-        """Use one loading-session cache for complete resampled recordings."""
-        self.edf_cache = cache
 
     def set_rejection_strategy(self, strategy: str) -> None:
         strategy = str(strategy)
@@ -1052,7 +1020,7 @@ class BaseDataset(Dataset, ABC):
             if channels:
                 channels = list(dict.fromkeys(channels))
                 requested.extend((mode, name) for name in channels)
-                for frequency, frame in file.get_native(start, end, channels=channels, cache=self.edf_cache, read_mode=mode).items():
+                for frequency, frame in file.get_native(start, end, channels=channels, read_mode=mode).items():
                     native[frequency][mode] = frame
         # Keep mode in the column key: one EDF source can be used in both forms.
         # Resample together so the existing boundary fill also spans read modes.
@@ -1456,8 +1424,7 @@ class BaseDataset(Dataset, ABC):
             Target preparation and channel selection happen separately for
             each request and before signal I/O. ``read_channels`` combines
             native physical and digital samples before shared resampling.
-            ``EDFFile.get_native`` optionally serves the requested interval
-            from the native-sample cache.
+            ``EDFFile.get_native`` reads the requested interval at native rates.
 
             ``PairedDataset`` uses this method to load the native calls needed
             by one or more compatible packaged experts. Ordinary datasets use

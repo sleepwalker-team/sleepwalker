@@ -127,7 +127,7 @@ The full field list, the `run()` execution order, and the YAML/CLI equivalent ar
 | --- | --- | --- |
 | Which EDF channels, units, filtering | `ChannelConfig`, normalizers | [Load some data](data.md) |
 | Window length, stride, rejection | `total_input`, `stride`, `rejection_strategy` | [Load some data](data.md) |
-| I/O and CPU throughput | `num_workers`, thread caps, `PatientSampler`, `NumpyDataset` | [Performance](performance.md) |
+| Loading performance and exposure | `num_workers`, thread caps, random or balanced sampling, `NumpyDataset` | [Performance](performance.md) |
 | Model input representation | model `preprocessors` | [Models](models.md) |
 | Loss, weighting, imbalance | trainer `loss_function`, `loss_mode`, `class_weights` | [Train a multiclass model](train-multiclass.md) |
 | Several overlapping label sets | `task_config`, `MultiLabelTrainer` | [Multilabel targets](multilabel.md) |

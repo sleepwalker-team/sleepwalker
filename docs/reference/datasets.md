@@ -32,7 +32,7 @@ Readers normalize recognized source concepts to the [shared event vocabulary](ev
 | Dataset | Reference | Purpose |
 | --- | --- | --- |
 | `MultiDataset` | [MultiDataset](datasets/MultiDataset.md) | Combines several configured datasets into one index; patient ranges and targets are concatenated. Used for multi-dataset training. |
-| `NumpyDataset` | [NumpyDataset](datasets/NumpyDataset.md) | Serves arrays exported by `export_dataloader_to_numpy_dir` from RAM or memmap. See [Performance](../how-to/performance.md#numpydataset-full-in-memory-data). |
+| `NumpyDataset` | [NumpyDataset](datasets/NumpyDataset.md) | Serves arrays exported by `export_dataloader_to_numpy_dir` from RAM or memmap. See [Performance](../how-to/performance.md#numpydataset-an-explicit-fixed-window-pool). |
 | `UnlabelledDataset` | [UnlabelledDataset](datasets/UnlabelledDataset.md) | Wraps a configured dataset and strips label construction; the standard form for inference templates inside packages. |
 | `SyntheticDataset` | [SyntheticDataset](datasets/SyntheticDataset.md) | Generates synthetic windows; useful for tests and smoke runs without real recordings. |
 

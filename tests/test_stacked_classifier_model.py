@@ -315,6 +315,6 @@ def test_complete_joint_dataset_initializes_and_predicts(cross_cohort_stack):
     packaged, entry = cross_cohort_stack
     dataset, patients, _ = prepare_dataset(packaged, entry)
     dataset.initialize(patients, num_workers=0, strict=True)
-    predictions = packaged.predict_dataset(dataset, batch_size=2, num_workers=0, progress=False, edf_cache_patients=0)
+    predictions = packaged.predict_dataset(dataset, batch_size=2, num_workers=0, progress=False)
     assert set(predictions["task"]) == {"source", "target"}
     assert predictions["valid"].all()

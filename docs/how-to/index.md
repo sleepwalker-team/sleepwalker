@@ -29,7 +29,7 @@ These guides each solve one task. Install [Sleepwalker](../getting-started/index
 
 **Advanced**
 
-- [Tune data loading performance](performance.md) — workers, thread limits, the `PatientSampler`, and in-memory caches.
+- [Tune data loading performance](performance.md) — measured input waiting, workers, sampling semantics, and materialized window pools.
 - [How Sleepwalker works](overview.md) — the full data flow from EDF files to predictions.
 
 **Troubleshooting**

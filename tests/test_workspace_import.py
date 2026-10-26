@@ -28,7 +28,7 @@ from sleepwalker.server.validation.workspace import (
 DATA_DIR = Path(__file__).parent / "data"
 
 
-def _bundle(tmp_path, kind=PredictionKind.EPOCH):
+def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resolution=30.0):
     storage = TemporaryStorage(tmp_path / "export")
     app = create_app(temporary_storage=storage)
     session = app.state.session_service.create([])
@@ -39,21 +39,21 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH):
     session.duration = study.duration
     session.recording_start = study.recording_start
     session.signals = study.signals
-    times = {"start": [12.0], "end": [18.0]} if kind == PredictionKind.EVENT else {"time": [15.0]}
+    times = {"start": [12.0], "end": [18.0]} if kind == PredictionKind.EVENT else {"time": [epoch_start + epoch_resolution / 2]}
     task = "sleep_stage" if kind == PredictionKind.EPOCH else "arousal"
     result = PredictionResult(
         session_id=session.id,
         model_id="model-test",
         task=task,
         classes=("negative", "positive"),
-        resolution=30.0 if kind == PredictionKind.EPOCH else 1.0,
+        resolution=epoch_resolution if kind == PredictionKind.EPOCH else 1.0,
         kind=kind,
         frame=pd.DataFrame({**times, "prob__negative": [0.1], "prob__positive": [0.9]}),
     )
     app.state.prediction_store.add(result)
     annotations = app.state.annotation_service
     if kind == PredictionKind.EPOCH:
-        edit = annotations.set_label(session.id, task, 0.0, "negative")
+        edit = annotations.set_label(session.id, task, epoch_start, "negative")
         annotations.revert(session.id, edit.id)
     else:
         edit = annotations.add_event(session.id, task, 12.0, 18.0, "positive")
@@ -141,6 +141,44 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
         assert new_edits[0]["event_id"] != payload["annotations"][0]["event_id"]
         assert len(app.state.annotation_service.current_events(session.id)) == 1
     assert app.state.model_registry.list() == []
+
+
+@pytest.mark.parametrize(("start", "resolution"), [(35.0, 10.0), (25.0, 5.0), (300.0, 30.0)])
+def test_workspace_round_trip_preserves_shifted_epoch_edits(tmp_path, start, resolution):
+    bundle, _, payload = _bundle(tmp_path, epoch_start=start, epoch_resolution=resolution)
+    app, session, job, path = _prepare_import(tmp_path, bundle)
+    _run_import(app, session, job, path)
+    assert job.state == JobState.SUCCEEDED, job.error
+    restored = app.state.result_export_service.build_payload(session)
+    assert restored["tasks"] == payload["tasks"]
+    assert [edit["start"] for edit in restored["annotations"] if edit["operation"] == "set_label"] == [start]
+    assert app.state.annotation_service.current_labels(session.id) == []
+
+
+@pytest.mark.parametrize("bad_start", [0.0, 30.0, 35.1, 40.0, 45.0])
+def test_workspace_rejects_epoch_edits_without_a_matching_prediction(tmp_path, bad_start):
+    bundle, _, _ = _bundle(tmp_path, epoch_start=35, epoch_resolution=10)
+    def change(contents):
+        _edit_json(contents, "annotations/edits.json", lambda edits: edits[0].update(start=bad_start))
+    altered = _alter_bundle(bundle, tmp_path / "invalid-epoch-edit.zip", change)
+    app, session, job, path = _prepare_import(tmp_path, altered)
+    _run_import(app, session, job, path)
+    assert job.state == JobState.FAILED
+    assert job.error.code == "INVALID_BUNDLE"
+    assert app.state.prediction_store.list_for_session(session.id) == []
+    assert app.state.annotation_service.current_labels(session.id) == []
+
+
+def test_workspace_canonicalizes_roundoff_in_epoch_edits(tmp_path):
+    bundle, _, _ = _bundle(tmp_path, epoch_start=35, epoch_resolution=10)
+    def change(contents):
+        _edit_json(contents, "annotations/edits.json", lambda edits: edits[0].update(start=35.0000001))
+    altered = _alter_bundle(bundle, tmp_path / "rounded-epoch-edit.zip", change)
+    app, session, job, path = _prepare_import(tmp_path, altered)
+    _run_import(app, session, job, path)
+    assert job.state == JobState.SUCCEEDED, job.error
+    edit = app.state.annotation_service.store.list_for_session(session.id)[0]
+    assert edit.start == 35.0
 
 
 @pytest.mark.parametrize("mutation", [

@@ -7,8 +7,37 @@ from sleepwalker.server.services.prediction_mapper import (
     map_continuous_predictions,
     map_epoch_predictions,
     map_event_predictions,
+    epoch_starts,
+    resolve_epoch_start,
 )
 from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionResult
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_epoch_starts_follow_actual_predictions_not_a_zero_based_grid(absolute):
+    times = [60.0, 40.0]
+    if absolute:
+        times = [pd.Timestamp("2025-01-01") + pd.Timedelta(seconds=time) for time in times]
+    result = PredictionResult("sess-test", "model", "desaturation", ("negative", "positive"), 10.0, pd.DataFrame({"time": times}))
+    starts = epoch_starts(result, datetime(2025, 1, 1))
+    assert starts == [35.0, 55.0]
+    assert resolve_epoch_start(35.0000001, 120, 10, starts) == 35.0
+    with pytest.raises(ValueError):
+        resolve_epoch_start(45, 120, 10, starts)
+
+
+@pytest.mark.parametrize("start", [-1.0, 0.0, 30.0, 35.1, 45.0, float("nan"), float("inf")])
+def test_epoch_start_resolution_rejects_invalid_or_missing_intervals(start):
+    with pytest.raises(ValueError):
+        resolve_epoch_start(start, 120, 10, [35.0, 55.0])
+
+
+def test_epoch_start_resolution_rejects_empty_timelines_and_incomplete_epochs():
+    with pytest.raises(ValueError):
+        resolve_epoch_start(0, 120, 10, [])
+    with pytest.raises(ValueError):
+        resolve_epoch_start(115, 120, 10, [115.0])
+    assert resolve_epoch_start(110, 120, 10, [110.0]) == 110.0
 
 
 def test_maps_multiclass_predictions_to_relative_epochs() -> None:

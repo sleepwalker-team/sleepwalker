@@ -1,4 +1,4 @@
-import {isNegativeClass, labelColor, labelTextColor} from "./colors.js?v=20261026-bounds-1";
+import {isNegativeClass, labelColor, labelTextColor} from "./colors.js?v=20261026-theme-1";
 export {labelColor};
 export function currentPrediction(task, predictions, time) {
   if (!task) return null;
@@ -35,7 +35,7 @@ export class Timeline {
       if (!row || p.x < this.left || !this.data) return;
       const time = this.timeAt(p.x);
       const selected = this.hit(row,time);
-      canvas.title = `${this.data.taskName(row.task)} · ${this.data.timeLabel(time)} · ${selected ? this.data.className(selected.label) + (["label","event"].includes(selected.kind)?" · manuell":"") : "Keine Vorhersage"}`;
+      canvas.title = `${this.data.taskName(row.task)} · ${this.data.timeLabel(time)} · ${selected ? this.data.className(selected.label) + (["label","event"].includes(selected.kind)?this.data.t(" · manuell"):"") : this.data.t("Keine Vorhersage")}`;
     });
     canvas.addEventListener("pointerup", event => {
       if (!this.drag) return;
@@ -69,7 +69,7 @@ export class Timeline {
   geometry(left, right) { this.left = left; this.right = right; this.draw(); }
   draw() {
     if (!this.data) return;
-    const {tasks, predictions, annotations, expanded, range, time, taskId, selection, timeLabel, taskName, className} = this.data;
+    const {tasks, predictions, annotations, expanded, range, time, taskId, selection, timeLabel, taskName, className, t} = this.data;
     this.width = this.canvas.clientWidth;
     if (!this.width) return;
     this.rows = []; let y = 8;
@@ -83,31 +83,36 @@ export class Timeline {
     c.font = "11px Arial, sans-serif"; c.textBaseline = "middle";
     const plotWidth = this.width - this.left - this.right;
     const xx = t => this.left + (t - range[0]) / (range[1] - range[0]) * plotWidth;
+    const style=getComputedStyle(this.canvas);
+    const ink=style.getPropertyValue("--ink").trim()||"#262a2c",muted=style.getPropertyValue("--muted").trim()||"#6e7476";
+    const secondary=style.getPropertyValue("--ink-secondary").trim()||"#626a6c",line=style.getPropertyValue("--line").trim()||"#d7d9d8";
+    const track=style.getPropertyValue("--track-line").trim()||"#c9cdcb",selectionColor=style.getPropertyValue("--selection").trim()||"#161a1c";
+    const cursorColor=style.getPropertyValue("--cursor").trim()||"#687074";
     const segment=(label,start,end,y,manual=false)=>{
       const x=xx(Math.max(range[0],start)),w=xx(Math.min(range[1],end))-x;
       if(w<=0)return;
       const negative=isNegativeClass(label);
       if(manual)c.clearRect(x,y+5,w,22);
       if(!negative){c.fillStyle=labelColor(label);c.fillRect(x,y+7,Math.max(.5,w),16);}
-      else if(manual){c.strokeStyle="#c9cdcb";c.lineWidth=1;c.beginPath();c.moveTo(x,y+15.5);c.lineTo(x+w,y+15.5);c.stroke();}
-      c.fillStyle=negative?"#262a2c":labelTextColor(label);
+      else if(manual){c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(x,y+15.5);c.lineTo(x+w,y+15.5);c.stroke();}
+      c.fillStyle=negative?ink:labelTextColor(label);
       const caption=className(label);
       if(!negative&&w>c.measureText(caption).width+(manual?28:10)){c.textAlign="center";c.fillText(caption,x+w/2,y+15);c.textAlign="left";}
       if(manual){
         if(w>=18){c.save();c.font="bold 9px Arial, sans-serif";c.fillText("M",x+3,y+15);c.restore();}
-        else {c.fillStyle="#161a1c";c.beginPath();c.moveTo(x,y+5);c.lineTo(x+Math.min(5,w),y+5);c.lineTo(x,y+10);c.closePath();c.fill();}
+        else {c.fillStyle=selectionColor;c.beginPath();c.moveTo(x,y+5);c.lineTo(x+Math.min(5,w),y+5);c.lineTo(x,y+10);c.closePath();c.fill();}
       }
     };
-    if (!tasks.length) { c.fillStyle = "#6e7476"; c.fillText("Noch keine Vorhersagen. Modelle können über ‘Modelle …’ gestartet werden.",16,27,Math.max(100,this.width-32)); return; }
+    if (!tasks.length) { c.fillStyle = muted; c.fillText(t("Noch keine Vorhersagen. Modelle können über ‘Modelle’ gestartet werden."),16,27,Math.max(100,this.width-32)); return; }
     for (const row of this.rows) {
       const {task, klass, y} = row;
       const items = predictions.get(task.id) || [];
       const label = klass ? `  ${className(klass)}` : taskName(task);
       c.save(); c.beginPath(); c.rect(10,y,this.left - 18,32); c.clip();
-      c.fillStyle = task.id === taskId ? "#262a2c" : "#626a6c";
+      c.fillStyle = task.id === taskId ? ink : secondary;
       c.fillText((klass ? "" : expanded.has(task.id) ? "▾ " : "▸ ") + label,12,y+15); c.restore();
       const baseline=y+(task.kind==="continuous"?25.5:15.5);
-      c.strokeStyle="#c9cdcb";c.lineWidth=1;c.beginPath();c.moveTo(this.left,baseline);c.lineTo(this.width-this.right,baseline);c.stroke();
+      c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(this.left,baseline);c.lineTo(this.width-this.right,baseline);c.stroke();
       c.save(); c.beginPath(); c.rect(this.left,y,plotWidth,32); c.clip();
       if (task.kind === "continuous") {
         const labels = klass ? [klass] : task.classes.filter(label=>!isNegativeClass(label));
@@ -122,7 +127,7 @@ export class Timeline {
           }
           c.stroke();
         }
-        if (range[1]-range[0] > 900) { c.fillStyle="#6e7476"; c.fillText("Für kontinuierliche Werte auf höchstens 15 min zoomen",this.left+8,y+15); }
+        if (range[1]-range[0] > 900) { c.fillStyle=muted; c.fillText(t("Für kontinuierliche Werte auf höchstens 15 min zoomen"),this.left+8,y+15); }
       } else {
         for (const p of items) {
           if (annotations.labels.some(e => e.task===task.id && Math.abs(e.start-p.start)<1e-6)) continue;
@@ -144,19 +149,19 @@ export class Timeline {
         : selection?.task===task.id ? selection : null;
       if (marked && (!klass || !marked.label || marked.label===klass)) {
         const x=xx(Math.max(range[0],marked.start)), w=xx(Math.min(range[1],marked.end))-x;
-        if(w>0) {c.strokeStyle="#161a1c";c.lineWidth=2;c.setLineDash(marked.kind==="interval"?[4,2]:[]);c.strokeRect(x+1,y+2,Math.max(1,w-2),27);c.setLineDash([]);}
+        if(w>0) {c.strokeStyle=selectionColor;c.lineWidth=2;c.setLineDash(marked.kind==="interval"?[4,2]:[]);c.strokeRect(x+1,y+2,Math.max(1,w-2),27);c.setLineDash([]);}
       }
       c.restore();
     }
     if (time>=range[0] && time<=range[1]) {
-      c.strokeStyle="#687074"; c.setLineDash([3,3]); c.beginPath(); c.moveTo(xx(time),0); c.lineTo(xx(time),y+2); c.stroke(); c.setLineDash([]);
+      c.strokeStyle=cursorColor; c.setLineDash([3,3]); c.beginPath(); c.moveTo(xx(time),0); c.lineTo(xx(time),y+2); c.stroke(); c.setLineDash([]);
     }
-    c.strokeStyle="#d7d9d8"; c.beginPath(); c.moveTo(this.left,y+9); c.lineTo(this.width-this.right,y+9); c.stroke();
-    c.font="10px monospace"; c.fillStyle="#6e7476";
+    c.strokeStyle=line; c.beginPath(); c.moveTo(this.left,y+9); c.lineTo(this.width-this.right,y+9); c.stroke();
+    c.font="10px monospace"; c.fillStyle=muted;
     const ticks=plotWidth<450 ? 2 : 4;
     for(let i=0;i<=ticks;i++) { const t=range[0]+(range[1]-range[0])*i/ticks; c.textAlign=i===0?"left":i===ticks?"right":"center"; c.fillText(timeLabel(t),xx(t),y+28); }
     c.textAlign="left";
   }
 }
-import {selectionAt} from "./corrections.js?v=20261026-bounds-1";
+import {selectionAt} from "./corrections.js?v=20261026-theme-1";
 

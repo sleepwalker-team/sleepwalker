@@ -33,6 +33,15 @@ Clients can apply `labels` as overrides and display `events` as an annotation
 track, without needing to replay the edit history themselves. Human-added
 events are separate from model-generated event predictions.
 
+`set_label` must reference the start of an existing prediction epoch, not a
+zero-based multiple of its resolution. For example, a desaturation interval
+`[35, 45]` is corrected with `start: 35`, even though its resolution is 10 seconds.
+Context-only edges, prediction gaps, empty tasks and incomplete out-of-recording
+epochs cannot receive label overrides. Differences up to one microsecond are
+matched to the exact stored epoch start so rounding cannot create separate
+annotation positions. Workspace imports apply the same validation and matching.
+This does not change any model probabilities, timestamps or event-kind rules.
+
 The endpoint also works after workspace import. Imported edits and events
 have new IDs, with references remapped by the importer, but their effective
 state and history are retained.

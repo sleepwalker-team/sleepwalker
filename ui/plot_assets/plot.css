@@ -5,3 +5,15 @@ body > div, #react-entry-point, #_dash-app-content, #_dash-app-content > div { m
 ._dash-loading { padding: 30px 24px; color: #6e7476; font-size: 12px; }
 .signal-cursor { position: absolute; width: 0; border-left: 1px dotted #687074; pointer-events: none; z-index: 10; }
 .signal-interval { position:absolute; border:1px solid #161a1c; background:#00000006; pointer-events:none; z-index:9; }
+
+.signal-edge { position:absolute; pointer-events:none; z-index:8; box-sizing:border-box; }
+.signal-edge[data-side="left"] { background:linear-gradient(90deg,#71858d20,transparent 16px); }
+.signal-edge[data-side="right"] { background:linear-gradient(270deg,#71858d20,transparent 16px); }
+
+:root[data-theme="dark"] { color-scheme:dark; }
+:root[data-theme="dark"], :root[data-theme="dark"] body { background:#20262b; }
+:root[data-theme="dark"] ._dash-loading { color:#a3afb7; }
+:root[data-theme="dark"] .signal-cursor { border-color:#b0c1ca; }
+:root[data-theme="dark"] .signal-interval { border-color:#edf3f5; background:#ffffff09; }
+:root[data-theme="dark"] .signal-edge[data-side="left"] { background:linear-gradient(90deg,#b0c1ca30,transparent 16px); }
+:root[data-theme="dark"] .signal-edge[data-side="right"] { background:linear-gradient(270deg,#b0c1ca30,transparent 16px); }

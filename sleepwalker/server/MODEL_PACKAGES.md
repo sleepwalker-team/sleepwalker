@@ -146,6 +146,13 @@ Worker termination also releases its model/signal memory; this is not a guarante
 for a full-night recording. Temporary transport files are removed on success,
 failure and cancellation. Worker tracebacks go to server logs, not public errors.
 
+If the worker catches Python `MemoryError` or Torch `OutOfMemoryError`, the job
+fails with `RESOURCE_EXHAUSTED` and a fixed public message, available through both
+job status and SSE updates. Allocator details stay in server logs. An abrupt
+worker exit without a valid response remains `COMPUTE_UNAVAILABLE`: SIGKILL alone
+does not prove memory exhaustion. This reports detectable memory failures; it
+does not impose memory limits, reduce peak memory or automatically retry jobs.
+
 Progress phases currently describe starting the worker and handing preprocessing/
 inference to the package; they are not per-window percentage measurements.
 

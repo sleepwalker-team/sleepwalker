@@ -87,10 +87,14 @@ class SubprocessInferenceClient:
                         log.seek(max(0, log.seek(0, os.SEEK_END) - 8192))
                         logger.error("Inference worker failed for %s:\n%s", model.id, log.read().decode("utf-8", errors="replace"))
                         code = response["code"]
-                        if code not in {"MODEL_INCOMPATIBLE", "INFERENCE_FAILED"}:
+                        messages = {
+                            "MODEL_INCOMPATIBLE": "Recording or model package is incompatible.",
+                            "INFERENCE_FAILED": "Model inference failed.",
+                            "RESOURCE_EXHAUSTED": "Inference could not be completed because compute memory was exhausted.",
+                        }
+                        if code not in messages:
                             raise ValueError("Unknown worker error code.")
-                        message = "Recording or model package is incompatible." if code == "MODEL_INCOMPATIBLE" else "Model inference failed."
-                        raise JobExecutionError(code, message, {"model_id": model.id})
+                        raise JobExecutionError(code, messages[code], {"model_id": model.id})
                     if process.returncode != 0:
                         raise ValueError("Worker exited unsuccessfully.")
                     return pd.read_csv(root / "predictions.csv")

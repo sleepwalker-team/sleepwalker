@@ -60,7 +60,7 @@ def test_client_runs_without_api_pythonpath_and_cleans_transport_files(make_mode
     assert all(not path.exists() for path in worker_temporary_paths)
 
 
-@pytest.mark.parametrize("outcome", ["typed_error", "crash", "invalid_json", "invalid_csv"])
+@pytest.mark.parametrize("outcome", ["typed_error", "crash", "killed", "unknown_code", "invalid_json", "invalid_csv"])
 def test_client_hides_worker_errors_and_cleans_files(make_model_package, tmp_path, stub_worker, worker_temporary_paths, outcome):
     path, _ = make_model_package()
     code = "print('private/patient/path and internal traceback', file=sys.stderr)\n"
@@ -68,6 +68,10 @@ def test_client_hides_worker_errors_and_cleans_files(make_model_package, tmp_pat
         code += "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': False, 'code': 'MODEL_INCOMPATIBLE'}))\nsys.exit(1)\n"
     elif outcome == "crash":
         code += "sys.exit(2)\n"
+    elif outcome == "killed":
+        code += "os.kill(os.getpid(), 9)\n"
+    elif outcome == "unknown_code":
+        code += "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': False, 'code': 'UNTRUSTED_CODE'}))\nsys.exit(1)\n"
     elif outcome == "invalid_json":
         code += "(root / 'response.json').write_text('broken')\n"
     else:
@@ -77,6 +81,47 @@ def test_client_hides_worker_errors_and_cleans_files(make_model_package, tmp_pat
         SubprocessInferenceClient(Path(sys.executable)).predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=lambda: None)
     assert error.value.code == ("MODEL_INCOMPATIBLE" if outcome == "typed_error" else "COMPUTE_UNAVAILABLE")
     assert "private/patient" not in str(error.value)
+    assert all(not path.exists() for path in worker_temporary_paths)
+
+
+def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp_path, stub_worker, worker_temporary_paths):
+    from fastapi.testclient import TestClient
+
+    from sleepwalker.server.app import create_app
+    from sleepwalker.server.services.job_executor import LocalJobExecutor
+    from sleepwalker.server.services.job_service import JobService
+    from sleepwalker.server.storage.temporary_storage import TemporaryStorage
+    from sleepwalker.server.stores.job_store import JobStore
+
+    path, _ = make_model_package()
+    model = read_model_manifest(path)
+    stub_worker(
+        "print('private/patient/path and allocator details', file=sys.stderr)\n"
+        "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': False, 'code': 'RESOURCE_EXHAUSTED', 'message': 'private details'}))\n"
+        "sys.exit(1)\n"
+    )
+    service = JobService(JobStore())
+    job = service.create(session_id="sess-test", job_type="inference")
+
+    def operation(_report_progress, check_cancelled):
+        SubprocessInferenceClient(Path(sys.executable)).predict(model, tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
+
+    LocalJobExecutor(service).execute(job.id, operation)
+    with TestClient(create_app(job_service=service, temporary_storage=TemporaryStorage(tmp_path / "server-storage"))) as client:
+        response = client.get(f"/api/v1/jobs/{job.id}")
+        events = client.get(f"/api/v1/jobs/{job.id}/events")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "failed"
+    assert response.json()["error"] == {
+        "code": "RESOURCE_EXHAUSTED",
+        "message": "Inference could not be completed because compute memory was exhausted.",
+        "details": {"model_id": model.id},
+    }
+    assert events.status_code == 200
+    assert '"code":"RESOURCE_EXHAUSTED"' in events.text
+    assert "private" not in response.text
+    assert "private" not in events.text
     assert all(not path.exists() for path in worker_temporary_paths)
 
 

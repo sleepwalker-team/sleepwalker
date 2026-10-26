@@ -23,7 +23,7 @@ from ..validation.workspace import (
 )
 from .annotation_service import AnnotationService
 from .job_executor import CancellationCheck, JobExecutionError, ProgressCallback
-from .prediction_mapper import validate_prediction_result
+from .prediction_mapper import epoch_starts, resolve_epoch_start, validate_prediction_result
 from .session_service import SessionService
 
 
@@ -69,7 +69,7 @@ class WorkspaceImportService:
                 check_cancelled()
                 validate_prediction_result(result, study.recording_start)
 
-            edits = _restore_edits(workspace, session.id, check_cancelled)
+            edits = _restore_edits(workspace, results, session.id, check_cancelled)
             check_cancelled()
             report_progress(JobPhase.IMPORTING, 0.8, "Restoring workspace data")
             self.prediction_store.add_many(results)
@@ -183,10 +183,15 @@ def _validate_task_metadata(workspace: LoadedWorkspace) -> None:
 
 def _restore_edits(
     workspace: LoadedWorkspace,
+    results: list[PredictionResult],
     session_id: str,
     check_cancelled: CancellationCheck,
 ) -> list[AnnotationEdit]:
     tasks = {task.task: task for task in workspace.tasks}
+    starts_by_task = {
+        result.task: epoch_starts(result, workspace.metadata.recording_start)
+        for result in results if result.kind == PredictionKind.EPOCH
+    }
     old_edits = {}
     event_ids = {}
     edit_ids = {}
@@ -212,12 +217,7 @@ def _restore_edits(
             if operation == AnnotationOperation.SET_LABEL:
                 if task.kind != PredictionKind.EPOCH or edit.end is not None or edit.event_id is not None:
                     raise InvalidWorkspaceError("Workspace label edit is invalid.")
-                aligned = math.isclose(
-                    edit.start / task.resolution, round(edit.start / task.resolution),
-                    rel_tol=0.0, abs_tol=1e-9,
-                )
-                if edit.start + task.resolution > workspace.metadata.duration or not aligned:
-                    raise InvalidWorkspaceError("Workspace label edit is not aligned to an epoch.")
+                values["start"] = resolve_epoch_start(edit.start, workspace.metadata.duration, task.resolution, starts_by_task[task.task])
             else:
                 if (
                     task.kind == PredictionKind.EPOCH or edit.end is None

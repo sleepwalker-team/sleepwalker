@@ -73,6 +73,28 @@ def test_real_package_from_edf_upload_to_api_predictions(real_model_configuratio
         tasks = client.get(f"/api/v1/sessions/{session_id}/tasks").json()["tasks"]
         assert tasks[0]["id"] == task
         assert tasks[0]["resolution"] == resolution
+        corrected_label = result["classes"][0]
+        corrected = client.post(f"/api/v1/sessions/{session_id}/annotations", json={"operation": "set_label", "task": task, "start": first_start, "label": corrected_label})
+        assert corrected.status_code == 201, corrected.text
+        assert corrected.json()["start"] == first_start
+        assert client.get(f"/api/v1/sessions/{session_id}/predictions/{task}").json() == result
+        if task == "desaturation":
+            # Exercise the real 35-second offset through HTTP export/import too.
+            exported = client.post(f"/api/v1/sessions/{session_id}/exports", json={"format": "sleepwalker", "mode": "workspace"})
+            assert exported.status_code == 202, exported.text
+            downloaded = client.get(f"/api/v1/exports/{exported.json()['export_id']}/download")
+            assert downloaded.status_code == 200
+            imported = client.post("/api/v1/sessions/import", files={"bundle": ("corrected.sleepwalker.zip", downloaded.content, "application/zip")})
+            assert imported.status_code == 202, imported.text
+            imported_id = imported.json()["session_id"]
+            imported_job = client.get(f"/api/v1/jobs/{imported.json()['job_id']}").json()
+            assert imported_job["state"] == "succeeded", imported_job
+            restored = client.get(f"/api/v1/sessions/{imported_id}/annotations").json()
+            assert len(restored["labels"]) == 1
+            assert restored["labels"][0]["start"] == first_start
+            assert restored["labels"][0]["label"] == corrected_label
+            assert client.get(f"/api/v1/sessions/{imported_id}/predictions/{task}").json() == result
+            assert client.delete(f"/api/v1/sessions/{imported_id}").status_code == 204
         assert client.delete(f"/api/v1/sessions/{session_id}").status_code == 204
 
 

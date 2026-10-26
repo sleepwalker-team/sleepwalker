@@ -3,127 +3,128 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>Sleepwalker</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2325292b'/%3E%3Cpath d='M3 17h6l3-8 5 15 4-10 3 3h5' stroke='white' fill='none'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/ui/assets/styles.css?v=20261026-bounds-1">
-  <script type="module" src="/ui/assets/app.js?v=20261026-bounds-1"></script>
+  <script>try { document.documentElement.dataset.theme = localStorage.getItem("sleepwalker.theme") === "dark" ? "dark" : "light"; } catch { document.documentElement.dataset.theme = "light"; }</script>
+  <link rel="stylesheet" href="/ui/assets/styles.css?v=20261026-theme-1">
+  <script type="module" src="/ui/assets/app.js?v=20261026-theme-1"></script>
 </head>
 <body>
-  <nav class="rail" aria-label="Navigation">
-    <a class="wordmark" href="/ui/" aria-label="Sleepwalker Start">sw</a>
-    <button id="nav-file" class="rail-action active" title="Datei öffnen" aria-label="Datei öffnen"><svg viewBox="0 0 24 24"><path d="M5 3h9l5 5v13H5Z M14 3v6h5"/></svg><span>Datei</span></button>
-    <button id="nav-view" class="rail-action" title="Signalansicht" aria-label="Signalansicht" disabled><svg viewBox="0 0 24 24"><path d="M2 12h5l3-8 4 16 3-9 2 1h3"/></svg><span>Ansicht</span></button>
-    <button id="nav-history" class="rail-action" title="Änderungsverlauf" aria-label="Änderungsverlauf" disabled><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l5 3"/></svg><span>Verlauf</span></button>
-    <button id="nav-help" class="rail-help" aria-label="Bedienung und Tastenkürzel" title="Bedienung und Tastenkürzel">?</button>
-  </nav>
   <div class="application">
     <header class="app-header">
-      <div><div class="app-name">Sleepwalker</div><h1 id="study-title">Aufzeichnung öffnen</h1></div>
+      <div><div class="app-name">Sleepwalker</div><h1 id="study-title" data-i18n="Aufzeichnung öffnen">Aufzeichnung öffnen</h1></div>
       <div id="study-meta" class="study-meta"></div>
       <div class="header-actions">
-        <span id="server-indicator" class="server-indicator">Nicht verbunden</span>
-        <button id="export-open" hidden>Exportieren</button>
-        <button id="close-open" hidden>Schließen …</button>
-        <button id="inspector-toggle" hidden aria-expanded="true" aria-controls="inspector">Details</button>
+        <span id="server-indicator" class="server-indicator" data-i18n="Nicht verbunden">Nicht verbunden</span>
+        <button id="export-open" hidden data-i18n="Exportieren">Exportieren</button>
+        <button id="close-open" hidden data-i18n="Schließen">Schließen</button>
+        <button id="inspector-toggle" hidden aria-expanded="true" aria-controls="inspector" data-i18n="Details">Details</button>
+        <label class="visually-hidden" for="language-select" data-i18n="Sprache">Sprache</label>
+        <select id="language-select" class="language-select" aria-label="Sprache" data-i18n-aria-label="Sprache"><option value="de" lang="de">Deutsch</option><option value="en" lang="en">English</option></select>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Dunkler Modus" aria-pressed="false" title="Zum dunklen Modus wechseln">
+          <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4L19 5"/></svg>
+          <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14a8.5 8.5 0 0 1-10.5-10.5A8.5 8.5 0 1 0 20.5 14Z"/></svg>
+        </button>
+        <button id="help-open" title="Bedienung und Tastenkürzel" data-i18n-title="Bedienung und Tastenkürzel" data-i18n="Hilfe">Hilfe</button>
       </div>
     </header>
-    <div id="notice" class="notice" role="status" aria-live="polite" hidden><span id="notice-text"></span><button id="notice-dismiss" aria-label="Meldung schließen">×</button></div>
-    <section id="entry" class="entry" aria-label="Aufzeichnung öffnen">
-      <h2>Neue Aufzeichnung</h2>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden><span id="notice-text"></span><button id="notice-dismiss" aria-label="Meldung schließen" data-i18n-aria-label="Meldung schließen">×</button></div>
+    <section id="entry" class="entry" aria-label="Aufzeichnung öffnen" data-i18n-aria-label="Aufzeichnung öffnen">
+      <h2 data-i18n="Neue Aufzeichnung">Neue Aufzeichnung</h2>
       <div class="entry-sheet">
         <section class="server-form">
-          <h3>Server</h3><p class="muted">Ziel für Upload und Inferenz</p>
-          <label for="server-profile">Profil</label><select id="server-profile"><option value="current">Aktuelle Instanz</option></select>
-          <label for="server-address">Adresse</label><input id="server-address" type="url" spellcheck="false" autocomplete="url">
-          <button id="connect">Verbinden</button>
-          <p id="connection-status" class="connection-status" role="status">Verbindung wird geprüft …</p>
+          <h3 data-i18n="Server">Server</h3><p class="muted" data-i18n="Ziel für Upload und Inferenz">Ziel für Upload und Inferenz</p>
+          <label for="server-profile" data-i18n="Profil">Profil</label><select id="server-profile"><option value="current" data-i18n="Aktuelle Instanz">Aktuelle Instanz</option></select>
+          <label for="server-address" data-i18n="Adresse">Adresse</label><input id="server-address" type="url" spellcheck="false" autocomplete="url">
+          <button id="connect" data-i18n="Verbinden">Verbinden</button>
+          <p id="connection-status" class="connection-status" role="status" data-i18n="Verbindung wird geprüft …">Verbindung wird geprüft …</p>
           <p id="model-count" class="muted"></p>
-          <hr><h4>Gespeicherte Server</h4><div id="server-list" class="saved-servers"></div>
-          <p class="server-note muted">Daten werden auf dem ausgewählten Server verarbeitet.</p>
+          <hr><h4 data-i18n="Gespeicherte Server">Gespeicherte Server</h4><div id="server-list" class="saved-servers"></div>
+          <p class="server-note muted" data-i18n="Daten werden auf dem ausgewählten Server verarbeitet.">Daten werden auf dem ausgewählten Server verarbeitet.</p>
         </section>
         <section class="upload-form">
-          <h3>EDF-Datei</h3><p class="muted">Datei auswählen oder in das Feld ziehen.</p>
+          <h3 data-i18n="EDF-Datei">EDF-Datei</h3><p class="muted" data-i18n="Datei auswählen oder in das Feld ziehen.">Datei auswählen oder in das Feld ziehen.</p>
           <div id="drop-zone" class="drop-zone">
-            <div><strong id="file-name">Keine Datei ausgewählt</strong><span id="file-size" class="muted">Eine EDF-Aufzeichnung</span></div>
-            <label class="button file-button" for="edf-file">Datei wählen …</label><input id="edf-file" class="visually-hidden" type="file" accept=".edf">
+            <div><strong id="file-name" data-i18n="Keine Datei ausgewählt">Keine Datei ausgewählt</strong><span id="file-size" class="muted" data-i18n="Eine EDF-Aufzeichnung">Eine EDF-Aufzeichnung</span></div>
+            <label class="button file-button" for="edf-file" data-i18n="Datei wählen">Datei wählen</label><input id="edf-file" class="visually-hidden" type="file" accept=".edf">
           </div>
-          <div class="section-heading"><h3>Modelle</h3><span class="muted">Auswahl vom Zielserver</span></div>
-          <div class="table-scroll"><table class="model-table"><thead><tr><th>Aufgabe / Modell</th><th>Zeitfenster</th><th>Klassen</th></tr></thead><tbody id="models"><tr><td colspan="3" class="muted">Server verbinden, um Modelle zu laden.</td></tr></tbody></table></div>
-          <p id="model-hint" class="muted small">Je Aufgabe kann ein Modell ausgewählt werden.</p>
+          <div class="section-heading"><h3 data-i18n="Modelle">Modelle</h3><span class="muted" data-i18n="Auswahl vom Zielserver">Auswahl vom Zielserver</span></div>
+          <div class="table-scroll"><table class="model-table"><thead><tr><th data-i18n="Aufgabe / Modell">Aufgabe / Modell</th><th data-i18n="Zeitfenster">Zeitfenster</th><th data-i18n="Klassen">Klassen</th></tr></thead><tbody id="models"><tr><td colspan="3" class="muted" data-i18n="Server verbinden, um Modelle zu laden.">Server verbinden, um Modelle zu laden.</td></tr></tbody></table></div>
+          <p id="model-hint" class="muted small" data-i18n="Je Aufgabe kann ein Modell ausgewählt werden.">Je Aufgabe kann ein Modell ausgewählt werden.</p>
           <div id="upload-progress" hidden><progress id="upload-meter" max="100"></progress><span id="upload-status" role="status"></span></div>
-          <p class="muted small">Temporäre Session · Dauerhaft sichern über Export</p>
-          <div class="form-actions"><button id="open-infer" class="primary" disabled>Öffnen &amp; Inferenz starten</button><button id="open-signals" disabled>Nur Signale ansehen</button></div>
+          <p class="muted small" data-i18n="Temporäre Session · Dauerhaft sichern über Export">Temporäre Session · Dauerhaft sichern über Export</p>
+          <div class="form-actions"><button id="open-infer" class="primary" disabled data-i18n="Öffnen &amp; Inferenz starten">Öffnen &amp; Inferenz starten</button><button id="open-signals" disabled data-i18n="Nur Signale ansehen">Nur Signale ansehen</button></div>
         </section>
       </div>
-      <div class="entry-footer"><span class="muted">Arbeitsstand fortsetzen</span><label class="text-button file-button" for="workspace-file">Workspace öffnen …</label><input id="workspace-file" class="visually-hidden" type="file" accept=".zip"></div>
-      <section id="recent-sessions-panel" class="recent-sessions-panel" aria-label="Zuletzt geöffnete Sessions">
-        <div class="section-heading"><h3>Zuletzt geöffnete Sessions</h3><button id="refresh-sessions" class="text-button">Aktualisieren</button></div>
-        <p class="muted small">In diesem Browser auf diesem Server geöffnete Aufzeichnungen. Fortsetzen ist möglich, solange die Session auf dem Server besteht.</p>
+      <div class="entry-footer"><span class="muted" data-i18n="Arbeitsstand fortsetzen">Arbeitsstand fortsetzen</span><label class="text-button file-button" for="workspace-file" data-i18n="Workspace öffnen">Workspace öffnen</label><input id="workspace-file" class="visually-hidden" type="file" accept=".zip"></div>
+      <section id="recent-sessions-panel" class="recent-sessions-panel" aria-label="Zuletzt geöffnete Sessions" data-i18n-aria-label="Zuletzt geöffnete Sessions">
+        <div class="section-heading"><h3 data-i18n="Zuletzt geöffnete Sessions">Zuletzt geöffnete Sessions</h3><button id="refresh-sessions" class="text-button" data-i18n="Aktualisieren">Aktualisieren</button></div>
+        <p class="muted small" data-i18n="In diesem Browser auf diesem Server geöffnete Aufzeichnungen. Fortsetzen ist möglich, solange die Session auf dem Server besteht.">In diesem Browser auf diesem Server geöffnete Aufzeichnungen. Fortsetzen ist möglich, solange die Session auf dem Server besteht.</p>
         <div id="recent-sessions" aria-live="polite"></div>
       </section>
     </section>
-    <section id="viewer" class="viewer" aria-label="Signalviewer" hidden>
+    <section id="viewer" class="viewer" aria-label="Signalviewer" hidden data-i18n-aria-label="Signalviewer">
       <main class="workspace">
-        <div class="section-heading workspace-heading"><h2>Aufzeichnung</h2><span id="inference-state" class="muted"></span></div>
-        <div id="job-panel" class="job-panel" hidden><div><strong id="job-phase"></strong><span id="job-message"></span></div><progress id="job-meter" max="1"></progress><button id="cancel-job">Abbrechen</button></div>
-        <div class="toolbar" aria-label="Zeitnavigation">
-          <button id="channels-open">Kanäle …</button><button id="infer-open">Modelle …</button>
-          <div class="interaction-tools" role="group" aria-label="Mauswerkzeug"><button id="select-tool" aria-pressed="true" title="Intervall mit der Maus markieren">Markieren</button><button id="pan-tool" aria-pressed="false" title="Zeitachse mit der Maus verschieben">Verschieben</button></div><button id="selection-edit" disabled>Auswahl bearbeiten …</button><label for="window-size">Fenster</label><select id="window-size"><option value="30">30 s</option><option value="120" selected>2 min</option><option value="300">5 min</option><option value="900">15 min</option><option value="all">Gesamt</option></select>
-          <button id="previous" aria-label="Vorheriges Zeitfenster" title="Vorheriges Zeitfenster (←)">‹</button><button id="next" aria-label="Nächstes Zeitfenster" title="Nächstes Zeitfenster (→)">›</button>
-          <form id="goto-form" class="goto-form"><label class="visually-hidden" for="goto-time">Zeitpunkt, Stunden:Minuten:Sekunden</label><input id="goto-time" value="00:00:00" class="mono" aria-label="Zeitpunkt, Stunden:Minuten:Sekunden" pattern="[0-9]+:[0-5][0-9]:[0-5][0-9](\.[0-9]+)?" title="Zeit seit Aufnahmebeginn: HH:MM:SS"><button type="submit">Gehe zu</button></form>
-          <button id="time-mode" class="text-button time-mode">Zeit seit Aufnahmebeginn</button>
+        <div class="section-heading workspace-heading"><h2 data-i18n="Aufzeichnung">Aufzeichnung</h2><span id="inference-state" class="muted"></span></div>
+        <div id="job-panel" class="job-panel" hidden><div><strong id="job-phase"></strong><span id="job-message"></span></div><progress id="job-meter" max="1"></progress><button id="cancel-job" data-i18n="Abbrechen">Abbrechen</button></div>
+        <div class="toolbar" aria-label="Zeitnavigation" data-i18n-aria-label="Zeitnavigation">
+          <button id="channels-open" data-i18n="Kanäle">Kanäle</button><button id="infer-open" data-i18n="Modelle">Modelle</button>
+          <div class="interaction-tools" role="group" aria-label="Mauswerkzeug" data-i18n-aria-label="Mauswerkzeug"><button id="select-tool" aria-pressed="true" title="Intervall mit der Maus markieren" data-i18n-title="Intervall mit der Maus markieren" data-i18n="Markieren">Markieren</button><button id="pan-tool" aria-pressed="false" title="Zeitachse mit der Maus verschieben" data-i18n-title="Zeitachse mit der Maus verschieben" data-i18n="Verschieben">Verschieben</button></div><button id="selection-edit" disabled data-i18n="Auswahl bearbeiten">Auswahl bearbeiten</button><label for="window-size" data-i18n="Fenster">Fenster</label><select id="window-size"><option value="30">30 s</option><option value="120" selected>2 min</option><option value="300">5 min</option><option value="900">15 min</option><option value="all" data-i18n="Gesamt">Gesamt</option></select>
+          <button id="previous" aria-label="Vorheriges Zeitfenster" title="Vorheriges Zeitfenster (←)" data-i18n-aria-label="Vorheriges Zeitfenster" data-i18n-title="Vorheriges Zeitfenster (←)">‹</button><button id="next" aria-label="Nächstes Zeitfenster" title="Nächstes Zeitfenster (→)" data-i18n-aria-label="Nächstes Zeitfenster" data-i18n-title="Nächstes Zeitfenster (→)">›</button>
+          <form id="goto-form" class="goto-form"><label class="visually-hidden" for="goto-time" data-i18n="Zeitpunkt, Stunden:Minuten:Sekunden">Zeitpunkt, Stunden:Minuten:Sekunden</label><input id="goto-time" value="00:00:00" class="mono" aria-label="Zeitpunkt, Stunden:Minuten:Sekunden" pattern="[0-9]+:[0-5][0-9]:[0-5][0-9](\.[0-9]+)?" title="Zeit seit Aufnahmebeginn: HH:MM:SS" data-i18n-aria-label="Zeitpunkt, Stunden:Minuten:Sekunden" data-i18n-title="Zeit seit Aufnahmebeginn: HH:MM:SS"><button type="submit" data-i18n="Gehe zu">Gehe zu</button></form>
+          <button id="time-mode" class="text-button time-mode" data-i18n="Zeit seit Aufnahmebeginn">Zeit seit Aufnahmebeginn</button>
         </div>
         <details id="model-input-report" class="model-input-report" open hidden>
-          <summary>Kanalzuordnung · diese Modelle wurden nicht ausgeführt</summary>
+          <summary data-i18n="Kanalzuordnung · diese Modelle wurden nicht ausgeführt">Kanalzuordnung · diese Modelle wurden nicht ausgeführt</summary>
           <div id="model-input-issues"></div>
-          <p class="small"><strong>Vorhandene EDF-Kanäle:</strong> <span id="model-input-signals" class="mono"></span></p>
-          <p class="muted small">Die benötigten Signale fehlen oder ihre Namen entsprechen keiner Zuordnung im Modellpaket. Abweichende Ableitungen müssen fachlich geprüft werden. Die Kanalwahl im Plot ändert die Modelleingänge nicht.</p>
+          <p class="small"><strong data-i18n="Vorhandene EDF-Kanäle:">Vorhandene EDF-Kanäle:</strong> <span id="model-input-signals" class="mono"></span></p>
+          <p class="muted small" data-i18n="Die benötigten Signale fehlen oder ihre Namen entsprechen keiner Zuordnung im Modellpaket. Abweichende Ableitungen müssen fachlich geprüft werden. Die Kanalwahl im Plot ändert die Modelleingänge nicht.">Die benötigten Signale fehlen oder ihre Namen entsprechen keiner Zuordnung im Modellpaket. Abweichende Ableitungen müssen fachlich geprüft werden. Die Kanalwahl im Plot ändert die Modelleingänge nicht.</p>
         </details>
         <div class="plot-sheet">
-          <div class="plot-heading"><h3>Signale</h3><span id="range-label" class="mono muted"></span></div>
-          <div id="plot-loading" class="plot-loading" role="status">Signalansicht wird geladen …</div>
-          <iframe id="signal-frame" title="Physiologische Signalverläufe" referrerpolicy="same-origin"></iframe>
-          <div class="prediction-heading"><h3>Vorhersagen</h3><span class="muted small">M = manuell · schwarze Umrandung = Auswahl</span></div>
-          <div id="prediction-loading" class="muted small" role="status" hidden>Vorhersagen werden geladen …</div>
-          <canvas id="timeline" tabindex="0" aria-label="Vorhersagespuren: mit Klick Zeitpunkt und Aufgabe auswählen, mit Ziehen Intervall markieren"></canvas>
-          <div id="timeline-legend" class="timeline-legend" aria-label="Klassenfarben" hidden></div>
+          <div class="plot-heading"><h3 data-i18n="Signale">Signale</h3><span id="range-label" class="mono muted"></span></div>
+          <div id="plot-loading" class="plot-loading" role="status" data-i18n="Signalansicht wird geladen …">Signalansicht wird geladen …</div>
+          <iframe id="signal-frame" title="Physiologische Signalverläufe" referrerpolicy="same-origin" data-i18n-title="Physiologische Signalverläufe"></iframe>
+          <div class="prediction-heading"><h3 data-i18n="Vorhersagen">Vorhersagen</h3><span class="muted small" data-i18n="M = manuell · Umrandung = Auswahl">M = manuell · Umrandung = Auswahl</span></div>
+          <div id="prediction-loading" class="muted small" role="status" hidden data-i18n="Vorhersagen werden geladen …">Vorhersagen werden geladen …</div>
+          <canvas id="timeline" tabindex="0" aria-label="Vorhersagespuren: mit Klick Zeitpunkt und Aufgabe auswählen, mit Ziehen Intervall markieren" data-i18n-aria-label="Vorhersagespuren: mit Klick Zeitpunkt und Aufgabe auswählen, mit Ziehen Intervall markieren"></canvas>
+          <div id="timeline-legend" class="timeline-legend" aria-label="Klassenfarben" hidden data-i18n-aria-label="Klassenfarben"></div>
           <div id="timeline-summary" class="visually-hidden" aria-live="polite"></div>
         </div>
-        <div class="workspace-footer muted small">Ziehen: Intervall markieren · Rechtsklick: Auswahl bearbeiten · Scrollen: zoomen · Verschieben über das Mauswerkzeug</div>
+        <div class="workspace-footer muted small" data-i18n="Ziehen: Intervall markieren · Rechtsklick: Auswahl bearbeiten · Scrollen: zoomen · Verschieben über das Mauswerkzeug">Ziehen: Intervall markieren · Rechtsklick: Auswahl bearbeiten · Scrollen: zoomen · Verschieben über das Mauswerkzeug</div>
         <div id="viewer-status" class="viewer-status mono muted small" role="status"></div>
       </main>
-      <aside id="inspector" class="inspector" aria-label="Auswahldetails und Verlauf">
-        <section><h2>Auswahl</h2><div id="selection-range" class="selection-range mono">—</div><p id="selection-meta" class="muted small">Zeitpunkt im Plot auswählen.</p></section>
-        <section><label for="task-select">Aufgabe</label><select id="task-select"></select><h3 class="prediction-label">Modellvorhersage</h3><div class="prediction-value"><strong id="prediction-label">—</strong><span id="prediction-confidence"></span></div><p id="effective-label" class="muted small"></p><details id="probability-details"><summary>Klassenwahrscheinlichkeiten</summary><div id="probabilities"></div></details></section>
+      <aside id="inspector" class="inspector" aria-label="Auswahldetails und Verlauf" data-i18n-aria-label="Auswahldetails und Verlauf">
+        <section><h2 data-i18n="Auswahl">Auswahl</h2><div id="selection-range" class="selection-range mono">—</div><p id="selection-meta" class="muted small" data-i18n="Zeitpunkt im Plot auswählen.">Zeitpunkt im Plot auswählen.</p></section>
+        <section><label for="task-select" data-i18n="Aufgabe">Aufgabe</label><select id="task-select"></select><h3 class="prediction-label" data-i18n="Modellvorhersage">Modellvorhersage</h3><div class="prediction-value"><strong id="prediction-label">—</strong><span id="prediction-confidence"></span></div><p id="effective-label" class="muted small"></p><details id="probability-details"><summary data-i18n="Klassenwahrscheinlichkeiten">Klassenwahrscheinlichkeiten</summary><div id="probabilities"></div></details></section>
 
-        <section id="history-section"><div class="section-heading"><h3>Verlauf</h3><button id="refresh-annotations" class="text-button small">Aktualisieren</button></div><div id="history"><p class="muted small">Noch keine Änderungen.</p></div></section>
-        <section><h3>Session</h3><dl class="session-details"><dt>Speicherung</dt><dd>Temporär</dd><dt>Ergebnisse</dt><dd id="task-count">0 Tasks</dd><dt>Aufnahmebeginn</dt><dd id="recording-start">—</dd><dt>Gültig bis</dt><dd id="expires-at">—</dd></dl><button id="workspace-export" class="text-button">Arbeitsstand sichern …</button><button id="delete-open" class="text-button">Session beenden &amp; löschen …</button></section>
+        <section id="history-section"><div class="section-heading"><h3 data-i18n="Verlauf">Verlauf</h3><button id="refresh-annotations" class="text-button small" data-i18n="Aktualisieren">Aktualisieren</button></div><div id="history"><p class="muted small" data-i18n="Noch keine Änderungen.">Noch keine Änderungen.</p></div></section>
+        <section><h3 data-i18n="Session">Session</h3><dl class="session-details"><dt data-i18n="Speicherung">Speicherung</dt><dd data-i18n="Temporär">Temporär</dd><dt data-i18n="Ergebnisse">Ergebnisse</dt><dd id="task-count" data-i18n="0 Tasks">0 Tasks</dd><dt data-i18n="Aufnahmebeginn">Aufnahmebeginn</dt><dd id="recording-start">—</dd><dt data-i18n="Gültig bis">Gültig bis</dt><dd id="expires-at">—</dd></dl><button id="workspace-export" class="text-button" data-i18n="Arbeitsstand sichern">Arbeitsstand sichern</button><button id="delete-open" class="text-button" data-i18n="Session beenden &amp; löschen">Session beenden &amp; löschen</button></section>
       </aside>
     </section>
   </div>
-  <div id="selection-menu" class="selection-menu" role="menu" aria-label="Auswahl bearbeiten" hidden>
+  <div id="selection-menu" class="selection-menu" role="menu" aria-label="Auswahl bearbeiten" hidden data-i18n-aria-label="Auswahl bearbeiten">
     <div id="selection-menu-summary" class="small muted"></div>
-    <button id="context-edit" role="menuitem">Korrigieren …</button>
-    <button id="context-delete" role="menuitem" class="danger" hidden>Änderung löschen</button>
-    <button id="context-delete-prediction" role="menuitem" disabled hidden>Vorhersage löschen</button>
-    <p id="context-limit" class="small muted" hidden>Die Server-API unterstützt kein Löschen von Modellvorhersagen.</p>
+    <button id="context-edit" role="menuitem" data-i18n="Korrigieren">Korrigieren</button>
+    <button id="context-delete" role="menuitem" class="danger" hidden data-i18n="Änderung löschen">Änderung löschen</button>
+    <button id="context-delete-prediction" role="menuitem" disabled hidden data-i18n="Vorhersage löschen">Vorhersage löschen</button>
+    <p id="context-limit" class="small muted" hidden data-i18n="Die Server-API unterstützt kein Löschen von Modellvorhersagen.">Die Server-API unterstützt kein Löschen von Modellvorhersagen.</p>
   </div>
   <dialog id="correction-dialog" aria-labelledby="correction-title">
     <form id="correction-form">
-      <div class="dialog-heading"><h2 id="correction-title">Auswahl korrigieren</h2><button id="correction-close" type="button" aria-label="Dialog schließen">×</button></div>
-      <label for="correction-task">Aufgabe</label><select id="correction-task" required></select>
-      <div class="correction-times"><div><label for="correction-start">Start (Sekunden)</label><input id="correction-start" type="number" min="0" step="any" required></div><div><label for="correction-end">Ende (Sekunden)</label><input id="correction-end" type="number" min="0" step="any" required></div></div>
-      <label for="correction-label">Klasse</label><select id="correction-label" required></select>
+      <div class="dialog-heading"><h2 id="correction-title" data-i18n="Auswahl korrigieren">Auswahl korrigieren</h2><button id="correction-close" type="button" aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div>
+      <label for="correction-task" data-i18n="Aufgabe">Aufgabe</label><select id="correction-task" required></select>
+      <div class="correction-times"><div><label for="correction-start" data-i18n="Start (Sekunden)">Start (Sekunden)</label><input id="correction-start" type="number" min="0" step="any" required></div><div><label for="correction-end" data-i18n="Ende (Sekunden)">Ende (Sekunden)</label><input id="correction-end" type="number" min="0" step="any" required></div></div>
+      <label for="correction-label" data-i18n="Klasse">Klasse</label><select id="correction-label" required></select>
       <p id="correction-preview" class="small muted" aria-live="polite"></p>
       <p id="correction-error" class="small form-error" role="alert" hidden></p>
-      <div class="form-actions"><button id="apply-correction" type="submit" class="primary">Speichern</button><button id="correction-cancel" type="button">Abbrechen</button></div>
+      <div class="form-actions"><button id="apply-correction" type="submit" class="primary" data-i18n="Speichern">Speichern</button><button id="correction-cancel" type="button" data-i18n="Abbrechen">Abbrechen</button></div>
     </form>
   </dialog>
-  <dialog id="channels-dialog"><form method="dialog"><div class="dialog-heading"><h2>Kanäle</h2><button aria-label="Dialog schließen">×</button></div></form><p class="muted small">Nur ausgewählte Kanäle werden geladen. Mit den Pfeilen die Reihenfolge ändern.</p><div id="channel-list"></div><div class="form-actions"><button id="channels-apply" class="primary">Anwenden</button></div></dialog>
-  <dialog id="inference-dialog"><form method="dialog"><div class="dialog-heading"><h2>Modelle ausführen</h2><button aria-label="Dialog schließen">×</button></div></form><p class="muted small">Weitere Aufgaben können einmalig inferiert werden. Bereits vorhandene Aufgaben bleiben erhalten.</p><div id="inference-models"></div><div class="form-actions"><button id="inference-start" class="primary">Inferenz starten</button></div></dialog>
-  <dialog id="export-dialog"><form method="dialog"><div class="dialog-heading"><h2>Exportieren</h2><button aria-label="Dialog schließen">×</button></div></form><label for="export-mode">Format</label><select id="export-mode"><option value="results">Ergebnisse (JSON)</option><option value="workspace">Vollständiger Arbeitsstand (Sleepwalker-ZIP)</option></select><div id="export-options" class="export-options"><label><input type="checkbox" value="predictions" checked> Modellvorhersagen</label><label><input type="checkbox" value="probabilities" checked> Wahrscheinlichkeiten</label><label><input type="checkbox" value="annotations" checked> Manuelle Änderungen</label><label><input type="checkbox" value="metadata" checked> Metadaten</label></div><p id="export-note" class="muted small">Der Export wird auf dem Server erstellt und anschließend heruntergeladen.</p><button id="export-start" class="primary">Export erstellen</button><a id="export-download" class="button" hidden>Herunterladen</a></dialog>
-  <dialog id="close-dialog"><form method="dialog"><div class="dialog-heading"><h2>Session schließen</h2><button aria-label="Dialog schließen">×</button></div></form><p>Änderungen liegen in einer temporären Session. Für eine spätere Fortsetzung zuerst den Arbeitsstand sichern.</p><div class="close-actions"><button id="close-save" class="primary">Arbeitsstand sichern …</button><button id="close-keep">Zur Startseite, Session behalten</button><button id="close-delete" class="danger">Session beenden &amp; löschen</button></div><p class="muted small">Löschen entfernt die EDF, Vorhersagen und Änderungen von diesem Server. Ein laufender Job wird abgebrochen.</p></dialog>
-  <dialog id="help-dialog"><form method="dialog"><div class="dialog-heading"><h2>Bedienung</h2><button aria-label="Dialog schließen">×</button></div></form><p>Im Signalplot ziehen, um ein Intervall zu markieren. Über „Verschieben“ die Zeitachse bewegen; mit dem Mausrad zoomen.</p><p>Unter den Signalen eine Vorhersagespur anklicken, um Zeit und Aufgabe auszuwählen. Ziehen in einer Spur markiert ein Intervall. Rechtsklick auf die Auswahl öffnet das Menü zum Korrigieren oder Löschen eigener Änderungen. Ein Klick auf einen Klassenabschnitt rahmt diesen ein.</p><dl class="session-details"><dt>← / →</dt><dd>Zeitfenster wechseln</dd><dt>Escape</dt><dd>Dialog schließen</dd></dl><p>Die GUI nutzt den Resampler des ausgewählten Servers. Zum Verbinden einer anderen Instanz muss dort ebenfalls diese GUI laufen.</p><p class="muted small">Tab schließen beendet keine Session. Nicht mehr aktive Sessions werden vom Server nach dessen Ablaufzeit gelöscht.</p></dialog>
+  <dialog id="channels-dialog"><form method="dialog"><div class="dialog-heading"><h2 data-i18n="Kanäle">Kanäle</h2><button aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div></form><p class="muted small" data-i18n="Nur ausgewählte Kanäle werden geladen. Mit den Pfeilen die Reihenfolge ändern.">Nur ausgewählte Kanäle werden geladen. Mit den Pfeilen die Reihenfolge ändern.</p><div id="channel-list"></div><div class="form-actions"><button id="channels-apply" class="primary" data-i18n="Anwenden">Anwenden</button></div></dialog>
+  <dialog id="inference-dialog"><form method="dialog"><div class="dialog-heading"><h2 data-i18n="Modelle ausführen">Modelle ausführen</h2><button aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div></form><p class="muted small" data-i18n="Weitere Aufgaben können einmalig inferiert werden. Bereits vorhandene Aufgaben bleiben erhalten.">Weitere Aufgaben können einmalig inferiert werden. Bereits vorhandene Aufgaben bleiben erhalten.</p><div id="inference-models"></div><div class="form-actions"><button id="inference-start" class="primary" data-i18n="Inferenz starten">Inferenz starten</button></div></dialog>
+  <dialog id="export-dialog"><form method="dialog"><div class="dialog-heading"><h2 data-i18n="Exportieren">Exportieren</h2><button aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div></form><label for="export-mode" data-i18n="Format">Format</label><select id="export-mode"><option value="results" data-i18n="Ergebnisse (JSON)">Ergebnisse (JSON)</option><option value="workspace" data-i18n="Vollständiger Arbeitsstand (Sleepwalker-ZIP)">Vollständiger Arbeitsstand (Sleepwalker-ZIP)</option></select><div id="export-options" class="export-options"><label><input type="checkbox" value="predictions" checked><span data-i18n="Modellvorhersagen"> Modellvorhersagen</span></label><label><input type="checkbox" value="probabilities" checked><span data-i18n="Wahrscheinlichkeiten"> Wahrscheinlichkeiten</span></label><label><input type="checkbox" value="annotations" checked><span data-i18n="Manuelle Änderungen"> Manuelle Änderungen</span></label><label><input type="checkbox" value="metadata" checked><span data-i18n="Metadaten"> Metadaten</span></label></div><p id="export-note" class="muted small" data-i18n="Der Export wird auf dem Server erstellt und anschließend heruntergeladen.">Der Export wird auf dem Server erstellt und anschließend heruntergeladen.</p><button id="export-start" class="primary" data-i18n="Export erstellen">Export erstellen</button><a id="export-download" class="button" hidden data-i18n="Herunterladen">Herunterladen</a></dialog>
+  <dialog id="close-dialog"><form method="dialog"><div class="dialog-heading"><h2 data-i18n="Session schließen">Session schließen</h2><button aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div></form><p data-i18n="Änderungen liegen in einer temporären Session. Für eine spätere Fortsetzung zuerst den Arbeitsstand sichern.">Änderungen liegen in einer temporären Session. Für eine spätere Fortsetzung zuerst den Arbeitsstand sichern.</p><div class="close-actions"><button id="close-save" class="primary" data-i18n="Arbeitsstand sichern">Arbeitsstand sichern</button><button id="close-keep" data-i18n="Zur Startseite, Session behalten">Zur Startseite, Session behalten</button><button id="close-delete" class="danger" data-i18n="Session beenden &amp; löschen">Session beenden &amp; löschen</button></div><p class="muted small" data-i18n="Löschen entfernt die EDF, Vorhersagen und Änderungen von diesem Server. Ein laufender Job wird abgebrochen.">Löschen entfernt die EDF, Vorhersagen und Änderungen von diesem Server. Ein laufender Job wird abgebrochen.</p></dialog>
+  <dialog id="help-dialog"><form method="dialog"><div class="dialog-heading"><h2 data-i18n="Bedienung">Bedienung</h2><button aria-label="Dialog schließen" data-i18n-aria-label="Dialog schließen">×</button></div></form><p data-i18n="Im Signalplot ziehen, um ein Intervall zu markieren. Über „Verschieben“ die Zeitachse bewegen; mit dem Mausrad zoomen.">Im Signalplot ziehen, um ein Intervall zu markieren. Über „Verschieben“ die Zeitachse bewegen; mit dem Mausrad zoomen.</p><p data-i18n="Unter den Signalen eine Vorhersagespur anklicken, um Zeit und Aufgabe auszuwählen. Ziehen in einer Spur markiert ein Intervall. Rechtsklick auf die Auswahl öffnet das Menü zum Korrigieren oder Löschen eigener Änderungen. Ein Klick auf einen Klassenabschnitt rahmt diesen ein.">Unter den Signalen eine Vorhersagespur anklicken, um Zeit und Aufgabe auszuwählen. Ziehen in einer Spur markiert ein Intervall. Rechtsklick auf die Auswahl öffnet das Menü zum Korrigieren oder Löschen eigener Änderungen. Ein Klick auf einen Klassenabschnitt rahmt diesen ein.</p><dl class="session-details"><dt>← / →</dt><dd data-i18n="Zeitfenster wechseln">Zeitfenster wechseln</dd><dt data-i18n="Escape">Escape</dt><dd data-i18n="Dialog schließen">Dialog schließen</dd></dl><p data-i18n="Die GUI nutzt den Resampler des ausgewählten Servers. Zum Verbinden einer anderen Instanz muss dort ebenfalls diese GUI laufen.">Die GUI nutzt den Resampler des ausgewählten Servers. Zum Verbinden einer anderen Instanz muss dort ebenfalls diese GUI laufen.</p><p class="muted small" data-i18n="Tab schließen beendet keine Session. Nicht mehr aktive Sessions werden vom Server nach dessen Ablaufzeit gelöscht.">Tab schließen beendet keine Session. Nicht mehr aktive Sessions werden vom Server nach dessen Ablaufzeit gelöscht.</p></dialog>
 </body>
 </html>

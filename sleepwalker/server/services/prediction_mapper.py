@@ -1,5 +1,7 @@
 import math
 import re
+from bisect import bisect_left
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from numbers import Real
@@ -35,6 +37,30 @@ class EventPrediction:
     end: float
     label: str
     probabilities: dict[str, float]
+
+
+def epoch_starts(result: PredictionResult, recording_start: datetime) -> list[float]:
+    """Read the actual epoch timeline without mapping or changing probabilities."""
+    _require_kind(result, PredictionKind.EPOCH)
+    return sorted({
+        _relative_seconds(value, recording_start) - result.resolution / 2
+        for _, time_column in _prediction_prefixes(result)
+        for value in result.frame[time_column]
+    })
+
+
+def resolve_epoch_start(start: float, duration: float, resolution: float, starts: Sequence[float]) -> float:
+    """Match a requested start to a sorted epoch timeline, with 1 µs tolerance."""
+    tolerance = 1e-6
+    if not all(math.isfinite(value) for value in (start, duration, resolution)) or resolution <= 0 or start < 0:
+        raise ValueError("Invalid epoch annotation range.")
+    index = bisect_left(starts, start)
+    for candidate_index in (index, index - 1):
+        if 0 <= candidate_index < len(starts):
+            candidate = starts[candidate_index]
+            if 0 <= candidate and candidate + resolution <= duration + tolerance and math.isclose(start, candidate, rel_tol=0.0, abs_tol=tolerance):
+                return candidate
+    raise ValueError("Epoch start must match an existing prediction interval.")
 
 
 def validate_prediction_result(result: PredictionResult, recording_start: datetime) -> None:

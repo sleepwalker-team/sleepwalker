@@ -66,6 +66,9 @@ def main() -> None:
         request = json.loads(request_path.read_text(encoding="utf-8"))
         predict(request, request_path.parent)
         response["ok"] = True
+    except (MemoryError, torch.OutOfMemoryError):
+        traceback.print_exc()
+        response["code"] = "RESOURCE_EXHAUSTED"
     except (OSError, KeyError, TypeError, ValueError):
         traceback.print_exc()
         response["code"] = "MODEL_INCOMPATIBLE"

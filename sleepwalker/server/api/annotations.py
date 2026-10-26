@@ -10,6 +10,7 @@ from ..services.annotation_service import (
     AnnotationService,
 )
 from ..services.session_service import SessionService
+from ..services.prediction_mapper import epoch_starts, resolve_epoch_start
 from ..stores.annotation_store import AnnotationEdit, AnnotationOperation
 from ..stores.prediction_store import PredictionKind, PredictionResult, PredictionStore
 from ..stores.session_store import SessionState
@@ -94,7 +95,7 @@ def create_annotation(
             message="Session not found.",
         )
 
-    if session.state != SessionState.READY or session.duration is None:
+    if session.state != SessionState.READY or session.duration is None or session.recording_start is None:
         raise APIError(
             status_code=status.HTTP_409_CONFLICT,
             code="INVALID_SESSION_STATE",
@@ -133,7 +134,10 @@ def create_annotation(
     if payload.operation == AnnotationOperation.SET_LABEL:
         start = _required_number(payload.start, "start")
         label = _valid_label(payload.label, task)
-        _validate_epoch_start(start, session.duration, task.resolution)
+        try:
+            start = resolve_epoch_start(start, session.duration, task.resolution, epoch_starts(task, session.recording_start))
+        except ValueError as exc:
+            raise APIError(status_code=status.HTTP_400_BAD_REQUEST, code="INVALID_REQUEST", message=str(exc)) from exc
         edit = annotation_service.set_label(session.id, task.task, start, label)
     elif payload.operation == AnnotationOperation.ADD_EVENT:
         start = _required_number(payload.start, "start")
@@ -232,22 +236,6 @@ def _valid_label(label: str | None, task: PredictionResult) -> str:
         )
 
     return value
-
-
-def _validate_epoch_start(start: float, duration: float, resolution: float) -> None:
-    aligned = math.isclose(
-        start / resolution,
-        round(start / resolution),
-        rel_tol=0.0,
-        abs_tol=1e-9,
-    )
-
-    if start < 0.0 or start + resolution > duration or not aligned:
-        raise APIError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="INVALID_REQUEST",
-            message="Epoch start is outside the recording or not aligned to the task resolution.",
-        )
 
 
 def _validate_event_range(start: float, end: float, duration: float) -> None:

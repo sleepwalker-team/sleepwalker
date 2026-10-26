@@ -318,3 +318,43 @@ auf allen acht Kanälen, in der Gesamtansicht und nach Kanal-/Sessionwechseln
 geprüft. Der Lauf mit EDF-Längen von 690 und 3600 Sekunden bestand auch auf der
 laufenden GUI auf Port 6007. Zusätzlich bestanden die 16 GUI-Integrationstests
 und der bestehende Navigationstest mit verspäteten Resampler-Antworten.
+
+Die Signalnavigation bewegt die vorhandenen Kurven unmittelbar im Browser.
+Plotly-Updates laufen nacheinander; erst nach der Bewegung wird der sichtbare
+Zeitbereich zum Resampling geschickt. Mausrad und Pinch zoomen ohne Nachlauf direkt um die
+Mausposition, horizontale Trackpad-Gesten verschieben den Ausschnitt. Schnelles
+Ziehen hat einen kurzen, auf 65 Pixel begrenzten Nachlauf. An Aufnahmegrenzen
+bleiben Zeitachse und Kurven unverzerrt. Eine dezente Randmarkierung liegt exakt
+auf der Zeichenfläche und blendet nach dem Loslassen in etwa 160 ms aus. Neue Gesten unterbrechen laufende Animationen.
+Intervallauswahl verwendet weiterhin die native, genaue Plotly-Auswahl;
+`prefers-reduced-motion` deaktiviert Randanimation und Nachlauf beim Verschieben.
+
+`python -m ui.tests.browser_motion_check` prüft unmittelbare Bewegung vor dem
+Loslassen, konstante Fensterbreite, pixelgenaue Randposition, Zoom ohne Nachlauf
+und reduzierte Bewegung. Zusätzlich sind die Browserläufe für Aufnahmegrenzen,
+schnelle Navigation mit verspäteten Antworten und Korrekturen relevant.
+
+Die Sprachauswahl in der Kopfzeile schaltet die Oberfläche zwischen Deutsch
+und Englisch um. Die Auswahl wird unter `sleepwalker.language` im Browser
+gespeichert. Der Wechsel erfordert kein Neuladen und erhält Session, Zeitfenster,
+Kanalwahl, Markierung und Modellwahl. Übersetzt werden auch Dialoge, Status,
+Klassenbezeichnungen, Canvas-Spuren und Beschriftungen für assistive Technologien.
+EDF-Kanalnamen, Modellnamen und API-Kennungen bleiben erhalten. Buttons verwenden
+keine Auslassungspunkte; laufende Ladezustände sind weiterhin ausdrücklich benannt.
+
+Die Texte liegen in `ui/assets/i18n.js`; statische HTML-Texte und Attribute
+sind mit `data-i18n` markiert, dynamische Texte verwenden `t`.
+`node --test ui/tests/test_i18n.mjs` prüft Sprache, Speicherung, Platzhalter
+und mehrteilige Meldungen. `python -m ui.tests.browser_language_check` prüft
+Umschalten, erhaltene Auswahl und Session, englische Korrekturen mit unveränderten
+API-Kennungen sowie Wiederaufnahme nach F5.
+
+Der Sonne-/Mond-Schalter in der Kopfzeile wechselt zwischen heller und dunkler
+Darstellung. `sleepwalker.theme` speichert die Auswahl im Browser. Der Wechsel
+erhält Session, Zeitfenster und Markierung und benötigt keinen Serverneustart.
+CSS-Variablen steuern Bedienelemente und Canvas-Spuren; die Plotly-Bridge passt
+Hintergrund, Signalfarbe, Raster und Beschriftungen lokal an. Die Klassenfarben
+bleiben in beiden Darstellungen gleich. Im Dunkelmodus sind Auswahlrahmen hell.
+`python -m ui.tests.browser_theme_check` prüft Icon und Sprache, Wiederaufnahme,
+Plotly-Farben, unveränderte Daten und Zeitbereiche, Markierungen, Korrekturen
+und kompakte Fenster.

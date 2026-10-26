@@ -1,20 +1,26 @@
-import {isNegativeClass, labelColor} from "./colors.js?v=20261026-bounds-1";
-import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-bounds-1";
-import {submitCompatibleModels} from "./inference.js?v=20261026-bounds-1";
-import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-bounds-1";
+import {t, language, locale, setLanguage, applyTranslations, translationFor, renderTranslation} from "./i18n.js?v=20261026-theme-1";
+import {isNegativeClass, labelColor} from "./colors.js?v=20261026-theme-1";
+import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-theme-1";
+import {submitCompatibleModels} from "./inference.js?v=20261026-theme-1";
+import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-theme-1";
 
-import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261026-bounds-1";
+import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261026-theme-1";
 
 const $ = id => document.getElementById(id);
-const text = (id, value) => { $(id).textContent = value; };
+const localizedText = new Map();
+const text = (id, value) => {
+  const translation = translationFor(value);
+  if (translation) localizedText.set(id, translation); else localizedText.delete(id);
+  $(id).textContent = value;
+};
 const show = (id, visible = true) => { $(id).hidden = !visible; };
 const sessionPath = id => `/api/v1/sessions/${encodeURIComponent(id)}`;
 const taskNames = {sleep:"Schlafstadium",sleep_stage:"Schlafstadium",arousal:"Arousal",breathing:"Atmung",desaturation:"Desaturation"};
 const classNames = {wake:"W",w:"W",n1:"N1",n2:"N2",n3:"N3",rem:"REM",arousal:"Arousal",no_arousal:"Kein Arousal",apnea:"Apnoe",hypopnea:"Hypopnoe","regular breathing":"Reguläre Atmung",desaturation:"Desaturation","no desaturation":"Keine Desaturation"};
-const taskName = task => taskNames[task.task || task.id] || task.name || task.id || task.task;
-const className = label => classNames[String(label).toLowerCase()] || label;
+const taskName = task => taskNames[task.task || task.id] ? t(taskNames[task.task || task.id]) : task.name || task.id || task.task;
+const className = label => classNames[String(label).toLowerCase()] ? t(classNames[String(label).toLowerCase()]) : label;
 const state = {
-  connected:false, file:null, models:[], session:null, title:"Aufzeichnung", channels:[], channelDraft:[],
+  connected:false, file:null, models:[], session:null, title:t("Aufzeichnung"), channels:[], channelDraft:[],
   range:[0,120], time:0, interval:null, taskId:null, tasks:[], predictions:new Map(),
   annotations:{edits:[],labels:[],events:[]}, expanded:new Set(), absolute:false,
   view:makeViewId(), revision:0, frameReady:false, plotLoaded:false, generation:0, rangeRequest:0,
@@ -59,18 +65,18 @@ function notice(message, error=false) {
 }
 function errorMessage(error) {
   const messages = {
-    SESSION_NOT_FOUND:"Die Session ist abgelaufen oder wurde gelöscht. EDF oder Workspace erneut öffnen.",
-    INVALID_STUDY:"Die Datei ist keine lesbare EDF-Aufzeichnung.", FILE_TOO_LARGE:"Die Datei überschreitet die Uploadgrenze des Servers.",
-    MISSING_REQUIRED_CHANNEL:`Modell „${state.models.find(model=>model.id===error.details?.model_id)?.name||error.details?.model_id||"unbekannt"}“: keine passende Kanalzuordnung für ${error.details?.channels?.join(", ")||"die benötigten Eingänge"}. Die Signale können fehlen oder anders heißen.`,
-    COMPUTE_UNAVAILABLE:"Die Inferenzumgebung ist auf diesem Server nicht verfügbar.",
-    JOB_ALREADY_RUNNING:"Für diese Session läuft bereits ein Job.",
-    MODEL_INCOMPATIBLE:"Das Modell ist mit dieser Aufnahme oder den vorhandenen Ergebnissen nicht kompatibel.",
-    INVALID_BUNDLE:"Der Workspace ist beschädigt oder ungültig.", UNSUPPORTED_FORMAT_VERSION:"Diese Workspace-Version wird vom Server nicht unterstützt.",
-    RESOURCE_EXHAUSTED:"Der Server hat zu wenig Rechenspeicher für diese Inferenz.",
-    EXPORT_NOT_READY:"Der Export ist noch nicht fertig.", INVALID_SESSION_STATE:"Die Session ist noch nicht bereit.",
-    EDIT_NOT_FOUND:"Diese Änderung kann nicht mehr rückgängig gemacht werden. Den Verlauf aktualisieren.",
+    SESSION_NOT_FOUND:t("Die Session ist abgelaufen oder wurde gelöscht. EDF oder Workspace erneut öffnen."),
+    INVALID_STUDY:t("Die Datei ist keine lesbare EDF-Aufzeichnung."), FILE_TOO_LARGE:t("Die Datei überschreitet die Uploadgrenze des Servers."),
+    MISSING_REQUIRED_CHANNEL:t`Modell „${state.models.find(model=>model.id===error.details?.model_id)?.name||error.details?.model_id||t("unbekannt")}“: keine passende Kanalzuordnung für ${error.details?.channels?.join(", ")||t("die benötigten Eingänge")}. Die Signale können fehlen oder anders heißen.`,
+    COMPUTE_UNAVAILABLE:t("Die Inferenzumgebung ist auf diesem Server nicht verfügbar."),
+    JOB_ALREADY_RUNNING:t("Für diese Session läuft bereits ein Job."),
+    MODEL_INCOMPATIBLE:t("Das Modell ist mit dieser Aufnahme oder den vorhandenen Ergebnissen nicht kompatibel."),
+    INVALID_BUNDLE:t("Der Workspace ist beschädigt oder ungültig."), UNSUPPORTED_FORMAT_VERSION:t("Diese Workspace-Version wird vom Server nicht unterstützt."),
+    RESOURCE_EXHAUSTED:t("Der Server hat zu wenig Rechenspeicher für diese Inferenz."),
+    EXPORT_NOT_READY:t("Der Export ist noch nicht fertig."), INVALID_SESSION_STATE:t("Die Session ist noch nicht bereit."),
+    EDIT_NOT_FOUND:t("Diese Änderung kann nicht mehr rückgängig gemacht werden. Den Verlauf aktualisieren."),
   };
-  return messages[error.code] || error.message || "Die Anfrage ist fehlgeschlagen.";
+  return messages[error.code] || t(error.message || "") || t("Die Anfrage ist fehlgeschlagen.");
 }
 function handleError(error) {
   if (error.name === "AbortError") return;
@@ -81,18 +87,18 @@ function handleError(error) {
 }
 function parseError(data,status) {
   const detail = data?.error || {};
-  const error = new Error(typeof detail.message === "string" ? detail.message : `Anfrage fehlgeschlagen (HTTP ${status}).`);
+  const error = new Error(typeof detail.message === "string" ? detail.message : t`Anfrage fehlgeschlagen (HTTP ${status}).`);
   error.code=detail.code; error.details=detail.details; return error;
 }
 async function api(path,{json,...options}={}) {
   if (json !== undefined) { options.body=JSON.stringify(json); options.headers={...options.headers,"Content-Type":"application/json"}; }
   let response;
   try { response=await fetch(path,{credentials:"same-origin",...options}); }
-  catch (error) { if(error.name === "AbortError") throw error; throw new Error("Verbindung zum Server unterbrochen. Die Session bleibt auf dem Server; erneut verbinden oder die Seite neu laden."); }
+  catch (error) { if(error.name === "AbortError") throw error; throw new Error(t("Verbindung zum Server unterbrochen. Die Session bleibt auf dem Server; erneut verbinden oder die Seite neu laden.")); }
   if (response.status === 204) return null;
   const data=await response.json().catch(() => null);
   if (!response.ok) throw parseError(data,response.status);
-  if (data === null) throw new Error("Der Server hat keine gültige Antwort geliefert.");
+  if (data === null) throw new Error(t("Der Server hat keine gültige Antwort geliefert."));
   return data;
 }
 function bind(id,handler) { $(id).addEventListener("click",() => Promise.resolve().then(handler).catch(handleError)); }
@@ -106,22 +112,23 @@ function timeLabel(seconds) {
 }
 
 function renderProfiles() {
-  const select=$("server-profile"); select.replaceChildren(new Option("Aktuelle Instanz","current"));
+  const select=$("server-profile"); select.replaceChildren(new Option(t("Aktuelle Instanz"),"current"));
   const list=$("server-list"); list.replaceChildren();
   for (const profile of profiles.filter(p => p && typeof p.origin === "string").slice(0,10)) {
-    select.add(new Option(profile.name || profile.origin,profile.origin));
+    const name = ["Lokal","Local"].includes(profile.name) ? t("Lokal") : profile.name || profile.origin;
+    select.add(new Option(name,profile.origin));
     const button=element("button",undefined,"saved-server");
-    button.append(element("span",profile.name || profile.origin),element("small",profile.origin));
+    button.append(element("span",name),element("small",profile.origin));
     button.addEventListener("click",() => { $("server-address").value=profile.origin; select.value=profile.origin; });
     list.append(button);
   }
 }
 async function connect() {
   const address=new URL($("server-address").value || location.origin,location.origin);
-  if (!["http:","https:"].includes(address.protocol) || address.username || address.password) throw new Error("Eine HTTP- oder HTTPS-Serveradresse ohne Zugangsdaten eingeben.");
+  if (!["http:","https:"].includes(address.protocol) || address.username || address.password) throw new Error(t("Eine HTTP- oder HTTPS-Serveradresse ohne Zugangsdaten eingeben."));
   if (address.origin !== location.origin) {
     profiles=profiles.filter(p => p.origin !== address.origin);
-    profiles.unshift({origin:address.origin,name:address.hostname === "localhost" || address.hostname === "127.0.0.1" ? "Lokal" : address.host});
+    profiles.unshift({origin:address.origin,name:address.hostname === "localhost" || address.hostname === "127.0.0.1" ? t("Lokal") : address.host});
     writeStorage(localStorage,"sleepwalker.servers",profiles.slice(0,10));
     location.assign(`${address.origin}/ui/`);
     return;
@@ -129,16 +136,16 @@ async function connect() {
   $("connect").disabled=true;
   try {
     const [config,health,models]=await Promise.all([api("/ui/config"),api("/health"),api("/api/v1/models")]);
-    if(config.ui !== "sleepwalker" || health.status !== "ok" || !Array.isArray(models.models)) throw new Error("Die Adresse stellt keine passende Sleepwalker-GUI bereit.");
+    if(config.ui !== "sleepwalker" || health.status !== "ok" || !Array.isArray(models.models)) throw new Error(t("Die Adresse stellt keine passende Sleepwalker-GUI bereit."));
     state.models=models.models; state.connected=true;
-    text("connection-status","Verbunden"); $("connection-status").classList.add("connected");
+    text("connection-status",t("Verbunden")); $("connection-status").classList.add("connected");
     text("server-indicator",location.host); $("server-indicator").classList.add("connected");
-    text("model-count",`${state.models.length} Modelle verfügbar`);
+    text("model-count",t`${state.models.length} Modelle verfügbar`);
     profiles=profiles.filter(p => p.origin !== location.origin);
-    profiles.unshift({origin:location.origin,name:location.hostname === "localhost" || location.hostname === "127.0.0.1" ? "Lokal" : location.host});
+    profiles.unshift({origin:location.origin,name:location.hostname === "localhost" || location.hostname === "127.0.0.1" ? t("Lokal") : location.host});
     writeStorage(localStorage,"sleepwalker.servers",profiles.slice(0,10)); renderProfiles(); renderModels(); renderResume();
   } catch (error) {
-    state.connected=false; text("connection-status","Nicht verbunden"); $("connection-status").classList.remove("connected"); throw error;
+    state.connected=false; text("connection-status",t("Nicht verbunden")); $("connection-status").classList.remove("connected"); throw error;
   } finally { $("connect").disabled=false; updateOpenButtons(); }
 }
 function renderModels() {
@@ -147,12 +154,12 @@ function renderModels() {
   for(const model of state.models) {
     const row=element("tr"),cell=element("td"),label=element("label"),input=element("input"),description=element("span",taskName(model));
     input.type="checkbox"; input.value=model.id; input.dataset.task=model.task; input.checked=!seen.has(model.task); seen.add(model.task);
-    description.append(element("small",model.name),element("small",`Benötigte Eingänge: ${model.input_channels.join(", ")}`)); label.append(input,description); cell.append(label);
+    description.append(element("small",model.name),element("small",t`Benötigte Eingänge: ${model.input_channels.join(", ")}`)); label.append(input,description); cell.append(label);
     row.append(cell,element("td",`${model.output_resolution} s`,"mono"),element("td",model.classes.map(className).join(", "),"model-classes"));
     input.addEventListener("change",() => { if(input.checked) for(const other of tbody.querySelectorAll("input")) if(other !== input && other.dataset.task === input.dataset.task) other.checked=false; updateOpenButtons(); });
     tbody.append(row);
   }
-  if(!state.models.length) { const row=element("tr"),cell=element("td","Keine Modelle auf diesem Server eingerichtet. Signalansicht und Workspace-Import sind verfügbar.","muted");cell.colSpan=3;row.append(cell);tbody.append(row); }
+  if(!state.models.length) { const row=element("tr"),cell=element("td",t("Keine Modelle auf diesem Server eingerichtet. Signalansicht und Workspace-Import sind verfügbar."),"muted");cell.colSpan=3;row.append(cell);tbody.append(row); }
 }
 function updateOpenButtons() {
   $("open-signals").disabled=!state.connected || !state.file || state.busy;
@@ -162,16 +169,16 @@ function updateOpenButtons() {
 }
 function setFile(file) {
   if (!file) return;
-  if (!/\.edf$/i.test(file.name)) { notice("Bitte eine EDF-Datei auswählen.",true); return; }
-  state.file=file; text("file-name",file.name); text("file-size",`${(file.size/1024/1024).toLocaleString("de-DE",{maximumFractionDigits:1})} MiB`); updateOpenButtons();
+  if (!/\.edf$/i.test(file.name)) { notice(t("Bitte eine EDF-Datei auswählen."),true); return; }
+  state.file=file; text("file-name",file.name); text("file-size",`${(file.size/1024/1024).toLocaleString(locale(),{maximumFractionDigits:1})} MiB`); updateOpenButtons();
 }
 function upload(path,file,field) {
   return new Promise((resolve,reject) => {
     const xhr=new XMLHttpRequest(); xhr.open("POST",path);
-    show("upload-progress"); $("upload-meter").value=0; text("upload-status","Upload wird gestartet …");
-    xhr.upload.onprogress=event => { if(event.lengthComputable) { const percent=event.loaded/event.total*100;$("upload-meter").value=percent;text("upload-status",percent>=100 ? "Datei übertragen · wird geprüft …" : `Upload ${Math.round(percent)} %`); } };
-    xhr.onload=() => { let data;try{data=JSON.parse(xhr.responseText);}catch{reject(new Error("Ungültige Antwort beim Upload."));return;} if(xhr.status>=200&&xhr.status<300)resolve(data);else reject(parseError(data,xhr.status)); };
-    xhr.onerror=() => reject(new Error("Upload unterbrochen. Verbindung prüfen. Eine eventuell bereits angelegte Session wird nach Ablauf automatisch bereinigt."));
+    show("upload-progress"); $("upload-meter").value=0; text("upload-status",t("Upload wird gestartet …"));
+    xhr.upload.onprogress=event => { if(event.lengthComputable) { const percent=event.loaded/event.total*100;$("upload-meter").value=percent;text("upload-status",percent>=100 ? t("Datei übertragen · wird geprüft …") : `Upload ${Math.round(percent)} %`); } };
+    xhr.onload=() => { let data;try{data=JSON.parse(xhr.responseText);}catch{reject(new Error(t("Ungültige Antwort beim Upload.")));return;} if(xhr.status>=200&&xhr.status<300)resolve(data);else reject(parseError(data,xhr.status)); };
+    xhr.onerror=() => reject(new Error(t("Upload unterbrochen. Verbindung prüfen. Eine eventuell bereits angelegte Session wird nach Ablauf automatisch bereinigt.")));
     const form=new FormData();form.append(field,file);xhr.send(form);
   });
 }
@@ -189,17 +196,17 @@ function renderResume() {
   const entries=savedSessions(),list=$("recent-sessions");list.replaceChildren();
   show("recent-sessions-panel",!state.session);
   $("refresh-sessions").disabled=!state.connected||state.busy;
-  if(!entries.length){list.append(element("p","Noch keine Sessions in diesem Browser geöffnet.","muted small"));return;}
+  if(!entries.length){list.append(element("p",t("Noch keine Sessions in diesem Browser geöffnet."),"muted small"));return;}
   for(const saved of entries) {
     const row=element("div",undefined,"recent-session");row.dataset.sessionId=saved.id;
     const info=element("div"),status=recentStates.get(saved.id);
-    info.append(element("strong",saved.title||"Aufzeichnung"));
-    const detail=status?.missing?"Nicht mehr verfügbar · abgelaufen oder gelöscht":status?.session?`${status.session.state==="ready"?"Verfügbar":"Wird verarbeitet"} · ${formatTime(status.session.duration||0)}`:status?.error?"Verbindung prüfen · Status unbekannt":"Wird geprüft …";
+    info.append(element("strong",saved.title||t("Aufzeichnung")));
+    const detail=status?.missing?t("Nicht mehr verfügbar · abgelaufen oder gelöscht"):status?.session?`${status.session.state==="ready"?t("Verfügbar"):t("Wird verarbeitet")} · ${formatTime(status.session.duration||0)}`:status?.error?t("Verbindung prüfen · Status unbekannt"):t("Wird geprüft …");
     info.append(element("span",detail,"muted small"),element("span",saved.id,"muted small mono"));
-    const actions=element("div",undefined,"recent-session-actions"),join=element("button","Fortsetzen");
+    const actions=element("div",undefined,"recent-session-actions"),join=element("button",t("Fortsetzen"));
     join.disabled=!state.connected||state.busy||Boolean(status?.missing);join.dataset.action="join";
     join.addEventListener("click",()=>resumeSession(saved.id).catch(handleError));
-    const remove=element("button","Aus Liste entfernen","text-button small");remove.dataset.action="forget";
+    const remove=element("button",t("Aus Liste entfernen"),"text-button small");remove.dataset.action="forget";
     remove.disabled=state.busy;remove.addEventListener("click",()=>{forgetSession(saved.id);renderResume();});
     actions.append(join,remove);row.append(info,actions);list.append(row);
   }
@@ -254,13 +261,12 @@ function chooseChannels(signals) {
 function setViewer(visible) {
   show("entry",!visible);show("viewer",visible);
   for(const id of ["export-open","close-open","inspector-toggle"])show(id,visible);
-  $("nav-file").classList.toggle("active",!visible);$("nav-view").classList.toggle("active",visible);
-  $("nav-view").disabled=!visible;$("nav-history").disabled=!visible;
 }
 function sendPlot(type,extra={}) { const frame=$("signal-frame"); if(frame.contentWindow) frame.contentWindow.postMessage({source:"sleepwalker-ui",type,...extra},location.origin); }
 function requestPlot(action="view") {
   if(!state.frameReady || !state.session || state.session.state!=="ready")return;
   if(!state.channels.length)return;
+  sendPlot("theme",{theme:document.documentElement.dataset.theme || "light"});
   sendPlot("view",{request:{session:state.session.id,view:state.view,channels:state.channels,range:state.range,duration:state.session.duration,initialize:!state.plotLoaded,revision:action==="heartbeat"?state.revision:++state.revision,action}});
   sendPlot("cursor",{time:state.time});
   sendPlot("mode",{mode:state.mode});
@@ -277,22 +283,22 @@ async function activateSession(session,{title,saved}={}) {
   state.selection=null;state.correction=null;closeSelectionMenu();if($("correction-dialog").open)$("correction-dialog").close();
   state.view=makeViewId();
   state.plotLoaded=false;
-  state.session=session; state.title=title || saved?.title || "Aufzeichnung"; state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
+  state.session=session; state.title=title || saved?.title || t("Aufzeichnung"); state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
   const available=(session.signals||[]).map(s=>s.id);
   state.channels=Array.isArray(saved?.channels)?saved.channels.filter(c=>available.includes(c)):chooseChannels(session.signals||[]);
   if(!state.channels.length&&available.length)state.channels=chooseChannels(session.signals);
   state.range=[0,Math.min(120,session.duration||120)];state.time=0;state.interval=null;state.taskId=saved?.taskId||null;
   if(saved?.range&&Number.isFinite(saved.range[0])&&Number.isFinite(saved.range[1])&&session.duration)state.range=clampRange(saved.range[0],saved.range[1]);
   if(Number.isFinite(saved?.time))state.time=Math.max(0,Math.min(saved.time,(session.duration||1)-1e-6));
-  state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?"Aufnahmeuhrzeit":"Zeit seit Aufnahmebeginn");
+  state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));
   setInteractionMode(saved?.mode==="pan"?"pan":"select");setSessionURL(session.id);
-  state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
-  text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString("de-DE") : "—");
+  state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",t`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
+  text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString(locale()) : "—");
   show("plot-loading");show("signal-frame",session.state==="ready");
   state.job=saved?.job||null;state.export=saved?.export||null;
   updateTaskOptions();renderRange();renderContext();rememberSession();
   if(session.state==="ready") {loadFrame();await Promise.all([refreshTasks(),refreshAnnotations()]);}
-  else text("plot-loading","Workspace wird wiederhergestellt …");
+  else text("plot-loading",t("Workspace wird wiederhergestellt …"));
   renderResume();
 }
 async function refreshTasks() {
@@ -306,8 +312,8 @@ function updateTaskOptions() {
   const select=$("task-select");select.replaceChildren();for(const task of state.tasks)select.add(new Option(taskName(task),task.id));
   if(!state.tasks.some(t=>t.id===state.taskId))state.taskId=state.tasks[0]?.id||null;
   if(state.taskId)select.value=state.taskId;
-  select.disabled=!state.tasks.length;text("task-count",`${state.tasks.length} Tasks`);renderContext();drawTimeline();
-  if(!state.job)text("inference-state",state.tasks.length?`${state.tasks.length} Ergebnisspuren`:"Signale bereit");
+  select.disabled=!state.tasks.length;text("task-count",t`${state.tasks.length} Tasks`);renderContext();drawTimeline();
+  if(!state.job)text("inference-state",state.tasks.length?t`${state.tasks.length} Ergebnisspuren`:t("Signale bereit"));
 }
 async function refreshAnnotations() {
   if(!state.session||state.session.state!=="ready")return;
@@ -358,7 +364,7 @@ async function refreshPredictions() {
 }
 let legendKey="";
 function renderTimelineLegend() {
-  const key=JSON.stringify(state.tasks.map(task=>[task.id,task.classes]));
+  const key=language()+JSON.stringify(state.tasks.map(task=>[task.id,task.classes]));
   if(key===legendKey)return;legendKey=key;
   const legend=$("timeline-legend");legend.replaceChildren();
   for(const task of state.tasks){
@@ -374,7 +380,7 @@ function renderTimelineLegend() {
 }
 function drawTimeline() {
   renderTimelineLegend();
-  timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.range,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className});
+  timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.range,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className,t});
 }
 const timeline=new Timeline($("timeline"),{
   select:(task,time,target)=>target?selectRegion(target):selectTime(time,task),
@@ -395,12 +401,12 @@ function renderContext() {
   const prediction=currentPrediction(task,items,state.time);
   const selected=state.interval||(prediction&&task?.kind==="epoch"?[prediction.start,prediction.end]:null);
   text("selection-range",selected?`${timeLabel(selected[0])} – ${timeLabel(selected[1])}`:timeLabel(state.time));
-  const selectionKind={interval:"Markiertes Intervall",event:"Eigenes Ereignis",label:"Eigene Klassenkorrektur"}[state.selection?.kind];
-  text("selection-meta",`${selectionKind?selectionKind+" · ":task?.kind==="epoch"?`${task.resolution}-s-Epoche · `:""}Zeitpunkt ${timeLabel(state.time)}`);
+  const selectionKind={interval:t("Markiertes Intervall"),event:t("Eigenes Ereignis"),label:t("Eigene Klassenkorrektur")}[state.selection?.kind];
+  text("selection-meta",t`${selectionKind?selectionKind+" · ":task?.kind==="epoch"?t`${task.resolution}-s-Epoche · `:""}Zeitpunkt ${timeLabel(state.time)}`);
   text("prediction-label",prediction?className(prediction.label):"—");
   const confidence=prediction?.probabilities?.[prediction.label];text("prediction-confidence",Number.isFinite(confidence)?`${Math.round(confidence*100)} %`:"");
   const human=prediction&&task?.kind==="epoch"?state.annotations.labels.find(e=>e.task===task.id&&Math.abs(e.start-prediction.start)<1e-6):null;
-  text("effective-label",human?`Manuell: ${className(human.label)} · Modell: ${className(prediction.label)}`:prediction?"Modellwahrscheinlichkeit":"Keine Vorhersage an diesem Zeitpunkt.");
+  text("effective-label",human?t`Manuell: ${className(human.label)} · Modell: ${className(prediction.label)}`:prediction?t("Modellwahrscheinlichkeit"):t("Keine Vorhersage an diesem Zeitpunkt."));
   const probabilities=$("probabilities");probabilities.replaceChildren();
   for(const [label,value] of Object.entries(prediction?.probabilities||{})) {
     const row=element("div",undefined,"probability-row"),bar=element("div",undefined,"bar"),fill=element("span");fill.style.width=`${Math.max(0,Math.min(100,value*100))}%`;bar.append(fill);
@@ -408,28 +414,28 @@ function renderContext() {
   }
   show("probability-details",Boolean(prediction));
   $("selection-edit").disabled=state.mutation||!state.selection||!state.tasks.length;
-  text("viewer-status",`Auswahl: ${timeLabel(state.time)}${task?` · ${taskName(task)}`:""}${human?" · manuell korrigiert":""}`);
-  text("timeline-summary",task?`${taskName(task)} bei ${timeLabel(state.time)}: ${human?className(human.label):prediction?className(prediction.label):"keine Vorhersage"}`:"Keine Ergebnisspuren verfügbar.");
+  text("viewer-status",t`Auswahl: ${timeLabel(state.time)}${task?` · ${taskName(task)}`:""}${human?t(" · manuell korrigiert"):""}`);
+  text("timeline-summary",task?t`${taskName(task)} bei ${timeLabel(state.time)}: ${human?className(human.label):prediction?className(prediction.label):t("keine Vorhersage")}`:t("Keine Ergebnisspuren verfügbar."));
 }
 function renderHistory() {
   const container=$("history");container.replaceChildren();const edits=state.annotations.edits;
-  if(!edits.length){container.append(element("p","Noch keine Änderungen.","muted small"));return;}
+  if(!edits.length){container.append(element("p",t("Noch keine Änderungen."),"muted small"));return;}
   const reverted=new Set(edits.filter(e=>e.operation==="revert").map(e=>e.reverted_edit_id));
   const shown=container.dataset.expanded==="true"?edits:[...edits].slice(-8);
   for(const edit of [...shown].reverse()) {
     const row=element("div",undefined,"history-item"),heading=element("div");
-    heading.append(element("span",Number.isFinite(edit.start)?formatTime(edit.start,true):new Date(edit.created_at).toLocaleTimeString("de-DE"),"mono small"));
-    const operation={set_label:`Klasse: ${className(edit.label)}`,add_event:`Ereignis: ${className(edit.label)}`,delete_event:"Ereignis gelöscht",revert:"Rückgängig"}[edit.operation]||edit.operation;
+    heading.append(element("span",Number.isFinite(edit.start)?formatTime(edit.start,true):new Date(edit.created_at).toLocaleTimeString(locale()),"mono small"));
+    const operation={set_label:t`Klasse: ${className(edit.label)}`,add_event:t`Ereignis: ${className(edit.label)}`,delete_event:t("Ereignis gelöscht"),revert:t("Rückgängig")}[edit.operation]||edit.operation;
     heading.append(element("span",operation,"small"));row.append(heading);
-    row.append(element("p",`${taskNames[edit.task]||edit.task||"Verlauf"}${reverted.has(edit.edit_id)?" · zurückgenommen":""}`,"muted small"));
-    if(edit.operation!=="revert"&&!reverted.has(edit.edit_id)) { const button=element("button","Rückgängig","text-button");button.disabled=state.mutation;button.addEventListener("click",()=>annotate({operation:"revert",edit_id:edit.edit_id}).catch(handleError));row.append(button); }
+    row.append(element("p",`${t(taskNames[edit.task]||edit.task)||t("Verlauf")}${reverted.has(edit.edit_id)?t(" · zurückgenommen"):""}`,"muted small"));
+    if(edit.operation!=="revert"&&!reverted.has(edit.edit_id)) { const button=element("button",t("Rückgängig"),"text-button");button.disabled=state.mutation;button.addEventListener("click",()=>annotate({operation:"revert",edit_id:edit.edit_id}).catch(handleError));row.append(button); }
     container.append(row);
   }
-  if(edits.length>8&&container.dataset.expanded!=="true"){const button=element("button",`Alle ${edits.length} Änderungen anzeigen`,"text-button small");button.addEventListener("click",()=>{container.dataset.expanded="true";renderHistory();});container.append(button);}
+  if(edits.length>8&&container.dataset.expanded!=="true"){const button=element("button",t`Alle ${edits.length} Änderungen anzeigen`,"text-button small");button.addEventListener("click",()=>{container.dataset.expanded="true";renderHistory();});container.append(button);}
 }
 async function annotate(payload) {
   if(!state.session||state.mutation)return;
-  await mutateAnnotations(post=>post(payload));notice("Änderung in der temporären Session gespeichert.");
+  await mutateAnnotations(post=>post(payload));notice(t("Änderung in der temporären Session gespeichert."));
 }
 function selectRegion(selection) {
   if(!state.session)return;
@@ -449,11 +455,11 @@ function openSelectionMenu({task=state.taskId,time=state.time,target=null,x,y}) 
   }
   const selection=state.selection;if(!selection)return;
   const spec=state.tasks.find(t=>t.id===selection.task);
-  text("selection-menu-summary",`${spec?taskName(spec):"Auswahl"} · ${formatTime(selection.start,true)}–${formatTime(selection.end,true)}`);
-  text("context-edit",selection.kind==="event"||selection.kind==="label"?"Änderung bearbeiten …":"Korrigieren …");
+  text("selection-menu-summary",`${spec?taskName(spec):t("Auswahl")} · ${formatTime(selection.start,true)}–${formatTime(selection.end,true)}`);
+  text("context-edit",selection.kind==="event"||selection.kind==="label"?t("Änderung bearbeiten"):t("Korrigieren"));
   $("context-edit").disabled=!state.tasks.length;
   const changes=selectedCorrections(selection,spec,state.annotations);
-  show("context-delete",changes.length>0);text("context-delete",changes.length>1?`${changes.length} Änderungen löschen`:"Änderung löschen");
+  show("context-delete",changes.length>0);text("context-delete",changes.length>1?t`${changes.length} Änderungen löschen`:t("Änderung löschen"));
   show("context-delete-prediction",selection.kind==="prediction");show("context-limit",selection.kind==="prediction");
   const menu=$("selection-menu");show("selection-menu");
   menu.style.left=`${Math.max(8,Math.min(x??innerWidth/2,innerWidth-menu.offsetWidth-8))}px`;
@@ -474,7 +480,7 @@ function openCorrection() {
   select.disabled=["event","label","prediction"].includes(state.correction.kind);
   $("correction-start").value=Number(state.correction.start.toFixed(6));$("correction-end").value=Number(state.correction.end.toFixed(6));
   updateCorrectionClasses();show("correction-error",false);updateCorrectionPreview();
-  text("correction-title",state.correction.kind==="event"||state.correction.kind==="label"?"Änderung bearbeiten":"Auswahl korrigieren");
+  text("correction-title",state.correction.kind==="event"||state.correction.kind==="label"?t("Änderung bearbeiten"):t("Auswahl korrigieren"));
   $("correction-dialog").showModal();
 }
 function updateCorrectionClasses() {
@@ -492,9 +498,9 @@ function dialogRange() {
 function updateCorrectionPreview() {
   try {
     const {task,range}=dialogRange();
-    text("correction-preview",task.kind==="epoch"?`${range.count} ${range.count===1?"Epoche":"Epochen"} à ${task.resolution} s: ${formatTime(range.start,true)}–${formatTime(range.end,true)}. Berührte Epochen werden vollständig korrigiert.`:`Ereignis: ${formatTime(range.start,true)}–${formatTime(range.end,true)} (${Number((range.end-range.start).toFixed(3))} s).`);
+    text("correction-preview",task.kind==="epoch"?t`${range.count} ${range.count===1?t("Epoche"):t("Epochen")} à ${task.resolution} s: ${formatTime(range.start,true)}–${formatTime(range.end,true)}. Berührte Epochen werden vollständig korrigiert.`:t`Ereignis: ${formatTime(range.start,true)}–${formatTime(range.end,true)} (${Number((range.end-range.start).toFixed(3))} s).`);
     $("apply-correction").disabled=state.mutation;
-  } catch(error) {text("correction-preview",error.message);$("apply-correction").disabled=true;}
+  } catch(error) {text("correction-preview",t(error.message));$("apply-correction").disabled=true;}
 }
 function closeCorrection() {if(!state.mutation){$("correction-dialog").close();state.correction=null;}}
 async function mutateAnnotations(action) {
@@ -502,7 +508,7 @@ async function mutateAnnotations(action) {
   const id=state.session.id,generation=state.generation;
   state.mutation=true;renderContext();renderHistory();
   const post=payload=>{
-    if(generation!==state.generation)throw new DOMException("Die Session wurde gewechselt.","AbortError");
+    if(generation!==state.generation)throw new DOMException(t("Die Session wurde gewechselt."),"AbortError");
     return api(`${sessionPath(id)}/annotations`,{method:"POST",json:payload});
   };
   try {return await action(post);}
@@ -519,17 +525,17 @@ async function applyCorrection() {
     const event=state.correction.kind==="event"?state.correction:null;
     show("correction-error",false);
     for(const control of $("correction-form").elements)control.disabled=true;
-    const saved=await mutateAnnotations(post=>saveCorrection({task,range,label,event},post,(done,all)=>{count=done;total=all;text("apply-correction",`Speichern ${done}/${all} …`);}));
+    const saved=await mutateAnnotations(post=>saveCorrection({task,range,label,event},post,(done,all)=>{count=done;total=all;text("apply-correction",t`Speichern ${done}/${all}`);}));
     const last=saved?.[saved.length-1];
     selectRegion({kind:task.kind==="epoch"?(range.count===1?"label":"interval"):"event",task:task.id,start:range.start,end:range.end,label,editId:last?.edit_id,eventId:last?.event_id});
     $("correction-dialog").close();state.correction=null;
-    notice(`${task.kind==="epoch"?`${range.count} ${range.count===1?"Epoche":"Epochen"} korrigiert`:event?"Ereignis geändert":"Ereignis hinzugefügt"}.`);
+    notice(`${task.kind==="epoch"?t`${range.count} ${range.count===1?t("Epoche"):t("Epochen")} korrigiert`:event?t("Ereignis geändert"):t("Ereignis hinzugefügt")}.`);
   } catch(error) {
-    text("correction-error",`${count&&total>1?`${count} von ${total} Epochen wurden gespeichert. `:""}${errorMessage(error)}`);show("correction-error");
+    text("correction-error",`${count&&total>1?t`${count} von ${total} Epochen wurden gespeichert. `:""}${errorMessage(error)}`);show("correction-error");
   } finally {
     for(const control of $("correction-form").elements)control.disabled=false;
     $("correction-task").disabled=["event","label","prediction"].includes(state.correction?.kind);
-    text("apply-correction","Speichern");if($("correction-dialog").open)updateCorrectionPreview();
+    text("apply-correction",t("Speichern"));if($("correction-dialog").open)updateCorrectionPreview();
   }
 }
 async function deleteSelectedCorrection() {
@@ -538,22 +544,23 @@ async function deleteSelectedCorrection() {
   if(!changes.length)return;
   let deleted=0;
   try {await mutateAnnotations(async post=>{for(const operation of changes){await post(operation);deleted++;}});}
-  catch(error){if(deleted)throw new Error(`${deleted} von ${changes.length} Änderungen wurden gelöscht. ${errorMessage(error)}`);throw error;}
+  catch(error){if(deleted)throw new Error(t`${deleted} von ${changes.length} Änderungen wurden gelöscht. ${errorMessage(error)}`);throw error;}
   const time=(selection.start+selection.end)/2;
   const next=task?selectionAt(task,state.predictions.get(task.id)||[],state.annotations,time):null;
   if(next)selectRegion(next);else selectTime(time,selection.task);
-  notice(changes.length>1?`${changes.length} Änderungen gelöscht.`:"Änderung gelöscht.");
+  notice(changes.length>1?t`${changes.length} Änderungen gelöscht.`:t("Änderung gelöscht."));
 }
 
 function stopWatchingJob() {state.jobStream?.close();state.jobStream=null;clearTimeout(state.jobTimer);state.jobEpoch++;}
 function renderJob(snapshot) {
-  const states={queued:"Wartet",running:"Läuft",cancelling:"Wird abgebrochen",succeeded:"Abgeschlossen",failed:"Fehlgeschlagen",cancelled:"Abgebrochen"};
-  const phases={loading:"Laden",preprocessing:"Vorverarbeitung",inference:"Inferenz",postprocessing:"Nachverarbeitung",export:"Export",import:"Import"};
-  text("job-phase",`${state.job?.type==="export"?"Export":state.job?.type==="import"?"Workspace-Import":"Inferenz"} · ${phases[snapshot.phase]||states[snapshot.state]||snapshot.state}`);
+  state.jobSnapshot = snapshot;
+  const states={queued:t("Wartet"),running:t("Läuft"),cancelling:t("Wird abgebrochen"),succeeded:t("Abgeschlossen"),failed:t("Fehlgeschlagen"),cancelled:t("Abgebrochen")};
+  const phases={loading:t("Laden"),preprocessing:t("Vorverarbeitung"),inference:t("Inferenz"),postprocessing:t("Nachverarbeitung"),export:t("Export"),import:t("Import")};
+  text("job-phase",`${state.job?.type==="export"?t("Export"):state.job?.type==="import"?t("Workspace-Import"):t("Inferenz")} · ${phases[snapshot.phase]||states[snapshot.state]||snapshot.state}`);
   text("job-message",snapshot.message||states[snapshot.state]||"");
   if(Number.isFinite(snapshot.progress))$("job-meter").value=snapshot.progress;else $("job-meter").removeAttribute("value");
   $("cancel-job").disabled=snapshot.state==="cancelling";
-  text("inference-state",state.job?.type==="inference"?`Inferenz: ${states[snapshot.state]||snapshot.state}`:state.tasks.length?`${state.tasks.length} Ergebnisspuren`:"Signale bereit");
+  text("inference-state",state.job?.type==="inference"?t`Inferenz: ${states[snapshot.state]||snapshot.state}`:state.tasks.length?t`${state.tasks.length} Ergebnisspuren`:t("Signale bereit"));
 }
 function watchJob(job) {
   stopWatchingJob();state.job=job;rememberSession();show("job-panel");$("export-start").disabled=true;$("infer-open").disabled=true;
@@ -564,15 +571,15 @@ function watchJob(job) {
     renderJob(snapshot);
     if(!["succeeded","failed","cancelled"].includes(snapshot.state))return;
     terminal=true;stopWatchingJob();state.job=null;rememberSession();show("job-panel",false);$("export-start").disabled=false;$("infer-open").disabled=false;
-    if(snapshot.state==="failed") {const error=new Error(snapshot.error?.message||"Der Job ist fehlgeschlagen.");error.code=snapshot.error?.code;error.details=snapshot.error?.details;throw error;}
-    if(snapshot.state==="cancelled"){notice("Job abgebrochen. Die Session bleibt verfügbar.");if(job.type==="import")text("plot-loading","Workspace-Import abgebrochen. Session schließen und bei Bedarf erneut öffnen.");return;}
+    if(snapshot.state==="failed") {const error=new Error(snapshot.error?.message||t("Der Job ist fehlgeschlagen."));error.code=snapshot.error?.code;error.details=snapshot.error?.details;throw error;}
+    if(snapshot.state==="cancelled"){notice(t("Job abgebrochen. Die Session bleibt verfügbar."));if(job.type==="import")text("plot-loading",t("Workspace-Import abgebrochen. Session schließen und bei Bedarf erneut öffnen."));return;}
     if(job.type==="export") await finishExport();
     else if(job.type==="import") {
       const session=await api(sessionPath(state.session.id));
       if(generation!==state.generation)return;
-      const title=state.title;await activateSession(session,{title});notice("Arbeitsstand wiederhergestellt.");
+      const title=state.title;await activateSession(session,{title});notice(t("Arbeitsstand wiederhergestellt."));
     } else {
-      await refreshTasks();notice("Inferenz abgeschlossen.");text("inference-state",`${state.tasks.length} Ergebnisspuren · Inferenz abgeschlossen`);
+      await refreshTasks();notice(t("Inferenz abgeschlossen."));text("inference-state",t`${state.tasks.length} Ergebnisspuren · Inferenz abgeschlossen`);
     }
   }
   async function poll() {
@@ -584,7 +591,7 @@ function watchJob(job) {
   if(window.EventSource) {
     const stream=new EventSource(path+"/events");state.jobStream=stream;
     stream.addEventListener("job_update",event=>{let snapshot;try{snapshot=JSON.parse(event.data);}catch{stream.close();poll();return;}update(snapshot).catch(handleError);});
-    stream.addEventListener("job_deleted",()=>{stream.close();stopWatchingJob();state.job=null;show("job-panel",false);$("export-start").disabled=false;$("infer-open").disabled=false;rememberSession();notice("Der Job ist nicht mehr verfügbar.",true);});
+    stream.addEventListener("job_deleted",()=>{stream.close();stopWatchingJob();state.job=null;show("job-panel",false);$("export-start").disabled=false;$("infer-open").disabled=false;rememberSession();notice(t("Der Job ist nicht mehr verfügbar."),true);});
     stream.onerror=()=>{stream.close();if(epoch===state.jobEpoch&&!terminal){state.jobStream=null;poll();}};
   } else poll();
 }
@@ -599,10 +606,10 @@ async function startInference(models) {
     if(result.cancelled)return;
     if(result.accepted) {
       watchJob({id:result.accepted.job_id,type:"inference"});
-      if(result.skipped.length)notice(`Inferenz startet für ${result.models.length} Modell${result.models.length===1?"":"e"}. ${result.skipped.length} Modell${result.skipped.length===1?" wurde":"e wurden"} wegen fehlender Kanalzuordnung übersprungen. Details unter „Kanalzuordnung“.`,true);
+      if(result.skipped.length)notice(t`Inferenz startet für ${result.models.length} Modelle. ${result.skipped.length} Modelle wegen fehlender Kanalzuordnung übersprungen. Details unter „Kanalzuordnung“.`,true);
     } else {
-      text("inference-state","Keine passende Kanalzuordnung für die ausgewählten Modelle");
-      notice("Keines der ausgewählten Modelle konnte gestartet werden. Die benötigten Eingänge und vorhandenen EDF-Kanäle stehen unter „Kanalzuordnung“. Die Signalansicht bleibt verfügbar.",true);
+      text("inference-state",t("Keine passende Kanalzuordnung für die ausgewählten Modelle"));
+      notice(t("Keines der ausgewählten Modelle konnte gestartet werden. Die benötigten Eingänge und vorhandenen EDF-Kanäle stehen unter „Kanalzuordnung“. Die Signalansicht bleibt verfügbar."),true);
     }
   } catch(error) {
     if(error.code==="JOB_ALREADY_RUNNING"&&error.details?.job_id)watchJob({id:error.details.job_id,type:"inference"});
@@ -614,26 +621,26 @@ function renderInputIssues() {
   const container=$("model-input-issues");container.replaceChildren();
   for(const issue of state.inputIssues.values()) {
     const model=state.models.find(item=>item.id===issue.modelId),row=element("div",undefined,"model-input-issue");
-    row.append(element("strong",model?`${taskName(model)} · ${model.name}`:issue.modelId),element("p",`Keine Zuordnung für: ${issue.channels.join(", ")}`,"small"));
+    row.append(element("strong",model?`${taskName(model)} · ${model.name}`:issue.modelId),element("p",t`Keine Zuordnung für: ${issue.channels.join(", ")}`,"small"));
     container.append(row);
   }
   text("model-input-signals",(state.session?.signals||[]).map(signal=>signal.label).join(", "));
 }
 function openInferenceDialog() {
   const container=$("inference-models");container.replaceChildren();const existing=new Set(state.tasks.map(t=>t.id)),seen=new Set();
-  const available=element("details",undefined,"available-signals"),summary=element("summary","Vorhandene EDF-Kanäle");available.append(summary,element("p",(state.session.signals||[]).map(signal=>signal.label).join(", "),"small mono"));container.append(available);
+  const available=element("details",undefined,"available-signals"),summary=element("summary",t("Vorhandene EDF-Kanäle"));available.append(summary,element("p",(state.session.signals||[]).map(signal=>signal.label).join(", "),"small mono"));container.append(available);
   const updateButton=()=>{$("inference-start").disabled=!container.querySelector("input:checked:not(:disabled)")||Boolean(state.job);};
   for(const model of state.models) {
     if(existing.has(model.task))continue;
     const row=element("div",undefined,"channel-row inference-model-row"),label=element("label"),input=element("input"),issue=state.inputIssues.get(model.id),description=element("span",`${taskName(model)} · ${model.name}`);
     input.type="checkbox";input.value=model.id;input.dataset.task=model.task;input.disabled=Boolean(issue);input.checked=!issue&&!seen.has(model.task);if(!issue)seen.add(model.task);
-    description.append(element("small",`Benötigte Eingänge: ${model.input_channels.join(", ")}`));
-    if(issue)description.append(element("small",`Nicht zugeordnet: ${issue.channels.join(", ")}`,"input-issue-text"));
+    description.append(element("small",t`Benötigte Eingänge: ${model.input_channels.join(", ")}`));
+    if(issue)description.append(element("small",t`Nicht zugeordnet: ${issue.channels.join(", ")}`,"input-issue-text"));
     label.append(input,description);row.append(label);container.append(row);
     input.addEventListener("change",()=>{if(input.checked)for(const other of container.querySelectorAll("input"))if(other!==input&&other.dataset.task===input.dataset.task)other.checked=false;updateButton();});
   }
-  if(!container.querySelector("input"))container.append(element("p","Für alle verfügbaren Aufgaben liegen bereits Ergebnisse vor, oder auf diesem Server sind keine Modelle eingerichtet.","muted"));
-  updateButton();$("inference-dialog").showModal();
+  if(!container.querySelector("input"))container.append(element("p",t("Für alle verfügbaren Aufgaben liegen bereits Ergebnisse vor, oder auf diesem Server sind keine Modelle eingerichtet."),"muted"));
+  updateButton();if(!$("inference-dialog").open)$("inference-dialog").showModal();
 }
 async function importWorkspace(file) {
   if(!file||state.busy)return;state.busy=true;updateOpenButtons();
@@ -647,7 +654,7 @@ async function importWorkspace(file) {
 function configureExport() {
   const workspace=$("export-mode").value==="workspace";
   for(const input of $("export-options").querySelectorAll("input")) {input.disabled=workspace;if(workspace)input.checked=true;}
-  text("export-note",workspace?"Enthält die EDF, alle Vorhersagen, Wahrscheinlichkeiten, Metadaten und Änderungen. Kann später wieder geöffnet werden.":"Ergebnisdatei ohne EDF. Wird auf dem Server erstellt und anschließend heruntergeladen.");
+  text("export-note",workspace?t("Enthält die EDF, alle Vorhersagen, Wahrscheinlichkeiten, Metadaten und Änderungen. Kann später wieder geöffnet werden."):t("Ergebnisdatei ohne EDF. Wird auf dem Server erstellt und anschließend heruntergeladen."));
 }
 function openExport(workspace=false) {
   $("export-mode").value=workspace?"workspace":"results";configureExport();show("export-download",Boolean(state.export?.ready));$("export-start").disabled=Boolean(state.job);$("export-dialog").showModal();
@@ -659,16 +666,16 @@ async function startExport() {
     const mode=$("export-mode").value;
     const include=Object.fromEntries([...$("export-options").querySelectorAll("input")].map(input=>[input.value,input.checked]));
     const accepted=await api(`${sessionPath(state.session.id)}/exports`,{method:"POST",json:{format:mode==="workspace"?"sleepwalker":"json",mode,include}});
-    state.export={id:accepted.export_id,job:accepted.job_id,ready:false};watchJob({id:accepted.job_id,type:"export"});text("export-note","Export läuft. Du kannst den Dialog schließen und weiter sichten.");
+    state.export={id:accepted.export_id,job:accepted.job_id,ready:false};watchJob({id:accepted.job_id,type:"export"});text("export-note",t("Export läuft. Du kannst den Dialog schließen und weiter sichten."));
   } catch(error){$("export-start").disabled=false;throw error;}
 }
 async function finishExport() {
   if(!state.export)return;const id=state.export.id,generation=state.generation;
   const result=await api(`/api/v1/exports/${encodeURIComponent(id)}`);
   if(generation!==state.generation)return;
-  if(result.state!=="ready")throw new Error("Der Export ist noch nicht zum Download bereit.");
+  if(result.state!=="ready")throw new Error(t("Der Export ist noch nicht zum Download bereit."));
   state.export.ready=true;rememberSession();const link=$("export-download");link.href=`/api/v1/exports/${encodeURIComponent(id)}/download`;link.download=result.mode==="workspace"?"arbeitsstand.sleepwalker.zip":"sleepwalker-ergebnisse.json";
-  show("export-download");text("export-note","Export fertig. Die Datei wird heruntergeladen; bei Bedarf erneut herunterladen.");link.click();notice("Export fertig. Download gestartet.");
+  show("export-download");text("export-note",t("Export fertig. Die Datei wird heruntergeladen; bei Bedarf erneut herunterladen."));link.click();notice(t("Export fertig. Download gestartet."));
 }
 function closeView(expired=false) {
   closeSelectionMenu();state.selection=null;state.interval=null;state.correction=null;
@@ -676,13 +683,13 @@ function closeView(expired=false) {
   sendPlot("close");stopWatchingJob();state.predictionAbort?.abort();clearTimeout(state.predictionTimer);state.generation++;
   writeStorage(sessionStorage,"sleepwalker.session",null);setSessionURL(null);
   state.session=null;state.tasks=[];state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.job=null;state.export=null;
-  setViewer(false);text("study-title","Aufzeichnung öffnen");text("study-meta","");show("job-panel",false);
+  setViewer(false);text("study-title",t("Aufzeichnung öffnen"));text("study-meta","");show("job-panel",false);
   for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
   renderResume();if(!expired)refreshRecentSessions().catch(handleError);
 }
 async function deleteSession() {
   if(!state.session)return;$("close-delete").disabled=true;
-  try {await api(sessionPath(state.session.id),{method:"DELETE"});forgetSession(state.session.id);closeView();notice("Session gelöscht.");}
+  try {await api(sessionPath(state.session.id),{method:"DELETE"});forgetSession(state.session.id);closeView();notice(t("Session gelöscht."));}
   finally {$("close-delete").disabled=false;}
 }
 function renderChannels() {
@@ -690,7 +697,7 @@ function renderChannels() {
   for(const [index,item] of state.channelDraft.entries()) {
     const row=element("div",undefined,"channel-row"),label=element("label"),input=element("input"),name=element("span",item.signal.label);
     name.append(element("small",`  ${item.signal.unit} · ${item.signal.sample_rate} Hz`));input.type="checkbox";input.checked=item.checked;input.addEventListener("change",()=>item.checked=input.checked);label.append(input,name);row.append(label);
-    for(const [delta,title,caption] of [[-1,"Kanal nach oben","↑"],[1,"Kanal nach unten","↓"]]) {
+    for(const [delta,title,caption] of [[-1,t("Kanal nach oben"),"↑"],[1,t("Kanal nach unten"),"↓"]]) {
       const button=element("button",caption);button.title=title;button.setAttribute("aria-label",`${item.signal.label}: ${title}`);button.disabled=index+delta<0||index+delta>=state.channelDraft.length;
       button.addEventListener("click",()=>{const temp=state.channelDraft[index+delta];state.channelDraft[index+delta]=item;state.channelDraft[index]=temp;renderChannels();});row.append(button);
     }
@@ -717,8 +724,60 @@ window.addEventListener("message",event=>{
   } else if(data.type==="context"&&data.session===state.session.id&&data.view===state.view) {
     const rect=$("signal-frame").getBoundingClientRect();openSelectionMenu({time:data.time,x:rect.left+data.x,y:rect.top+data.y});
   } else if(data.type==="selection"&&data.session===state.session.id&&data.view===state.view)selectTime(data.time);
-  else if(data.type==="error")notice(data.message,true);
+  else if(data.type==="error")notice(t(data.message),true);
 });
+
+function updateThemeControl() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  $("theme-toggle").setAttribute("aria-pressed",String(dark));
+  $("theme-toggle").setAttribute("aria-label",t("Dunkler Modus"));
+  $("theme-toggle").title = dark ? t("Zum hellen Modus wechseln") : t("Zum dunklen Modus wechseln");
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+  updateThemeControl(); drawTimeline();
+  sendPlot("theme",{theme:document.documentElement.dataset.theme});
+}
+function refreshLanguage() {
+  applyTranslations(); updateThemeControl();
+  $("language-select").value = language();
+  for (const [id, message] of localizedText) $(id).textContent = renderTranslation(message);
+  const profile = $("server-profile").value;
+  renderProfiles(); $("server-profile").value = profile;
+  const selectedModels = new Set([...$("models").querySelectorAll("input:checked")].map(input => input.value));
+  renderModels();
+  for (const input of $("models").querySelectorAll("input")) input.checked = selectedModels.has(input.value);
+  if (state.file) setFile(state.file);
+  updateOpenButtons(); renderResume(); renderInputIssues();
+  if (state.session) {
+    updateTaskOptions(); renderHistory();
+    if (state.job && state.jobSnapshot) renderJob(state.jobSnapshot);
+    if ($("channels-dialog").open) renderChannels();
+    if ($("inference-dialog").open) {
+      const selected = new Set([...$("inference-models").querySelectorAll("input:checked")].map(input => input.value));
+      // Rebuild its captions without closing the already open dialog.
+      openInferenceDialog();
+      for (const input of $("inference-models").querySelectorAll("input")) input.checked = selected.has(input.value);
+      $("inference-start").disabled = !$("inference-models").querySelector("input:checked:not(:disabled)") || Boolean(state.job);
+    }
+    if ($("correction-dialog").open && !state.mutation) {
+      const taskId = $("correction-task").value, label = $("correction-label").value;
+      $("correction-task").replaceChildren(...state.tasks.map(task => new Option(taskName(task),task.id)));
+      $("correction-task").value = taskId; updateCorrectionClasses(); $("correction-label").value = label;
+      updateCorrectionPreview();
+    }
+  }
+  closeSelectionMenu();
+}
+applyTranslations();
+applyTheme(document.documentElement.dataset.theme);
+bind("theme-toggle",() => {
+  const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try {localStorage.setItem("sleepwalker.theme",theme);} catch { /* Storage is optional. */ }
+  applyTheme(theme);
+});
+$("language-select").value = language();
+$("language-select").addEventListener("change", () => {setLanguage($("language-select").value); refreshLanguage();});
 
 bind("connect",connect);bind("notice-dismiss",()=>show("notice",false));bind("open-infer",()=>openEDF(true));bind("open-signals",()=>openEDF(false));
 $("server-profile").addEventListener("change",()=>$("server-address").value=$("server-profile").value==="current"?location.origin:$("server-profile").value);
@@ -732,8 +791,8 @@ $("drop-zone").addEventListener("drop",event=>{event.preventDefault();$("drop-zo
 bind("refresh-sessions",refreshRecentSessions);
 bind("previous",()=>navigate(-1));bind("next",()=>navigate(1));
 $("window-size").addEventListener("change",()=>{const width=$("window-size").value==="all"?state.session.duration:Number($("window-size").value);setRange(state.range[0],state.range[0]+width);});
-$("goto-form").addEventListener("submit",event=>{event.preventDefault();const value=$("goto-time").value;if(!/^\d+:[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)){notice("Zeit als HH:MM:SS eingeben.",true);return;}const [h,m,s]=value.split(":").map(Number);const time=h*3600+m*60+s;if(time>=state.session.duration){notice("Der Zeitpunkt liegt außerhalb der Aufnahme.",true);return;}const width=state.range[1]-state.range[0];setRange(time,time+width);selectTime(time);});
-bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?"Aufnahmeuhrzeit":"Zeit seit Aufnahmebeginn");renderRange();renderContext();drawTimeline();rememberSession();});
+$("goto-form").addEventListener("submit",event=>{event.preventDefault();const value=$("goto-time").value;if(!/^\d+:[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)){notice(t("Zeit als HH:MM:SS eingeben."),true);return;}const [h,m,s]=value.split(":").map(Number);const time=h*3600+m*60+s;if(time>=state.session.duration){notice(t("Der Zeitpunkt liegt außerhalb der Aufnahme."),true);return;}const width=state.range[1]-state.range[0];setRange(time,time+width);selectTime(time);});
+bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));renderRange();renderContext();drawTimeline();rememberSession();});
 $("task-select").addEventListener("change",()=>selectTime(state.time,$("task-select").value));
 bind("refresh-annotations",refreshAnnotations);
 bind("select-tool",()=>setInteractionMode("select"));bind("pan-tool",()=>setInteractionMode("pan"));
@@ -760,19 +819,16 @@ bind("channels-open",()=>{
   const signals=state.session.signals||[];const order=[...state.channels,...signals.map(s=>s.id).filter(id=>!state.channels.includes(id))];
   state.channelDraft=order.map(id=>({signal:signals.find(s=>s.id===id),checked:state.channels.includes(id)}));renderChannels();$("channels-dialog").showModal();
 });
-bind("channels-apply",()=>{const channels=state.channelDraft.filter(s=>s.checked).map(s=>s.signal.id);if(!channels.length)throw new Error("Mindestens einen Kanal auswählen.");state.channels=channels;state.plotLoaded=false;$("channels-dialog").close();show("plot-loading");rememberSession();requestPlot();});
+bind("channels-apply",()=>{const channels=state.channelDraft.filter(s=>s.checked).map(s=>s.signal.id);if(!channels.length)throw new Error(t("Mindestens einen Kanal auswählen."));state.channels=channels;state.plotLoaded=false;$("channels-dialog").close();show("plot-loading");rememberSession();requestPlot();});
 bind("infer-open",openInferenceDialog);
-bind("inference-start",async()=>{const models=[...$("inference-models").querySelectorAll("input:checked")].map(input=>input.value);if(!models.length)throw new Error("Mindestens ein Modell auswählen.");$("inference-dialog").close();await startInference(models);});
+bind("inference-start",async()=>{const models=[...$("inference-models").querySelectorAll("input:checked")].map(input=>input.value);if(!models.length)throw new Error(t("Mindestens ein Modell auswählen."));$("inference-dialog").close();await startInference(models);});
 bind("cancel-job",async()=>{if(state.job){await api(`/api/v1/jobs/${encodeURIComponent(state.job.id)}/cancel`,{method:"POST"});$("cancel-job").disabled=true;}});
 bind("export-open",()=>openExport());bind("workspace-export",()=>openExport(true));bind("export-start",startExport);
 $("export-mode").addEventListener("change",configureExport);
 for(const id of ["close-open","delete-open"])bind(id,()=>$("close-dialog").showModal());
 bind("close-save",()=>{$("close-dialog").close();openExport(true);});
 bind("close-keep",()=>{rememberSession();closeView();});bind("close-delete",deleteSession);
-bind("nav-file",()=>{if(state.session)$("close-dialog").showModal();});
-bind("nav-view",()=>{$("viewer").scrollIntoView({behavior:"auto"});});
-bind("nav-history",()=>{ $("viewer").classList.remove("inspector-hidden");$("inspector-toggle").setAttribute("aria-expanded","true");$("history-section").scrollIntoView({behavior:"auto",block:"center"}); });
-bind("nav-help",()=>$("help-dialog").showModal());
+bind("help-open",()=>$("help-dialog").showModal());
 bind("inspector-toggle",()=>{const hidden=$("viewer").classList.toggle("inspector-hidden");$("inspector-toggle").setAttribute("aria-expanded",String(!hidden));});
 document.addEventListener("keydown",event=>{if(!state.session||document.querySelector("dialog[open]")||event.target.closest("input,select,textarea,button,summary"))return;if(event.key==="ArrowLeft"||event.key==="ArrowRight"){event.preventDefault();navigate(event.key==="ArrowLeft"?-1:1);}});
 window.addEventListener("pagehide",()=>{rememberSession();sendPlot("close");state.jobStream?.close();});

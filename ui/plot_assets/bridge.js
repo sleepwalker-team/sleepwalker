@@ -12,16 +12,26 @@
   const intervalBox = document.createElement("div");
   intervalBox.className = "signal-interval";
   intervalBox.hidden = true;
-  let interval = null, mode = "select", applyingMode = false;
+  let interval = null, mode = "select", applyingLayout = false, panGesture = null;
   function geometry() {
     const gd = graph();
     if (gd?._fullLayout?._size) send("geometry", {left: gd._fullLayout._size.l, right: gd._fullLayout._size.r, width: gd._fullLayout.width});
     drawCursor();
     drawInterval();
-    const gdMode = gd?.layout?.dragmode;
-    if (gd && gdMode !== mode && !applyingMode && window.Plotly) {
-      applyingMode = true;
-      window.Plotly.relayout(gd, {dragmode:mode, selectdirection:"h"}).finally(() => { applyingMode = false; });
+    const update = {};
+    if (gd?.layout && gd.layout.dragmode !== mode) {update.dragmode=mode;update.selectdirection="h";}
+    // Native Plotly limits stop the gesture itself, before a resampler round trip.
+    // Apply on every subplot and after channel/session changes. This also upgrades
+    // already-running UI instances whose initial Python figure has no limits yet.
+    if (gd?.layout && Number.isFinite(request?.duration) && request.duration>0) {
+      for (const axis of Object.keys(gd.layout).filter(key=>/^xaxis\d*$/.test(key))) {
+        if (gd.layout[axis].minallowed!==0) update[axis+".minallowed"]=0;
+        if (gd.layout[axis].maxallowed!==request.duration) update[axis+".maxallowed"]=request.duration;
+      }
+    }
+    if (gd && Object.keys(update).length && !applyingLayout && window.Plotly) {
+      applyingLayout = true;
+      window.Plotly.relayout(gd, update).finally(() => { applyingLayout = false; geometry(); });
     }
   }
   function drawInterval() {
@@ -132,6 +142,16 @@
           }
           const pair = key.endsWith(".range") ? value : [relayout[axis + ".range[0]"], relayout[axis + ".range[1]"]];
           if (Array.isArray(pair) && pair.length === 2 && pair.every(Number.isFinite) && pair[1] > pair[0]) {
+            // Plotly clips the two endpoints separately at its native limits.
+            // Keep a pan from becoming an accidental zoom when an edge is hit.
+            const gesture=panGesture;panGesture=null;
+            if(gesture?.moved&&gesture.view===request.view&&gesture.session===request.session&&Math.abs(pair[1]-pair[0]-gesture.width)>1e-6){
+              const width=Math.min(gesture.width,request.duration),start=Math.max(0,Math.min(pair[0],request.duration-width));
+              const gd=graph(),update={};
+              for(const axis of Object.keys(gd.layout).filter(key=>/^xaxis\d*$/.test(key)))update[axis+".range"]=[start,start+width];
+              window.Plotly.relayout(gd,update);
+              return;
+            }
             send("range", {range: pair, session: request.session, view: request.view});
             break;
           }
@@ -144,7 +164,15 @@
     else window.clearInterval(announce);
   }, 300);
   window.addEventListener("resize", geometry);
-  document.addEventListener("pointerdown", event => {if(event.button===0)send("dismiss");},true);
+  document.addEventListener("pointerdown", event => {
+    if(event.button!==0)return;
+    send("dismiss");panGesture=null;
+    const axis=graph()?._fullLayout?.xaxis;
+    if(mode==="pan"&&request&&axis&&event.target.closest(".nsewdrag"))panGesture={pointer:event.pointerId,x:event.clientX,width:axis.range[1]-axis.range[0],session:request.session,view:request.view,moved:false};
+  },true);
+  document.addEventListener("pointerup",event=>{if(panGesture?.pointer===event.pointerId)panGesture.moved=Math.abs(event.clientX-panGesture.x)>2;},true);
+  document.addEventListener("pointercancel",()=>{panGesture=null;},true);
+  document.addEventListener("wheel",()=>{panGesture=null;},{capture:true,passive:true});
   document.addEventListener("contextmenu", event => {
     const gd = graph(), layout = gd?._fullLayout;
     if (!request || !layout?.xaxis || !event.target.closest("#signals")) return;

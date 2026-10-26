@@ -1,6 +1,9 @@
-import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-corrections-2";
-import {submitCompatibleModels} from "./inference.js?v=20261026-corrections-2";
-import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-corrections-2";
+import {isNegativeClass, labelColor} from "./colors.js?v=20261026-bounds-1";
+import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-bounds-1";
+import {submitCompatibleModels} from "./inference.js?v=20261026-bounds-1";
+import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-bounds-1";
+
+import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261026-bounds-1";
 
 const $ = id => document.getElementById(id);
 const text = (id, value) => { $(id).textContent = value; };
@@ -35,10 +38,22 @@ function element(tag, content, cls) {
 }
 function readStorage(storage,key,fallback) { try { return JSON.parse(storage.getItem(key)) ?? fallback; } catch { return fallback; } }
 function writeStorage(storage,key,value) { try { if (value === null) storage.removeItem(key); else storage.setItem(key,JSON.stringify(value)); } catch { /* Browsing without persistence is supported. */ } }
+const recentKey="sleepwalker.sessions";
+const recentStates=new Map();
+let recentCheck=0;
+function savedSessions() {return knownSessions(readStorage(localStorage,recentKey,[]));}
 function rememberSession() {
   if (!state.session) return;
-  writeStorage(sessionStorage,"sleepwalker.session",{id:state.session.id,job:state.job,export:state.export,range:state.range,time:state.time,taskId:state.taskId,channels:state.channels});
+  const snapshot=sessionSnapshot(state);
+  writeStorage(sessionStorage,"sleepwalker.session",snapshot);
+  writeStorage(localStorage,recentKey,rememberKnownSession(savedSessions(),snapshot));
 }
+function setSessionURL(id) {history.replaceState(null,"",sessionURL(location.href,id));}
+function forgetSession(id) {
+  writeStorage(localStorage,recentKey,savedSessions().filter(item=>item.id!==id));recentStates.delete(id);
+  if(readStorage(sessionStorage,"sleepwalker.session",null)?.id===id)writeStorage(sessionStorage,"sleepwalker.session",null);
+}
+
 function notice(message, error=false) {
   text("notice-text",message); $("notice").classList.toggle("error",error); show("notice");
 }
@@ -60,7 +75,7 @@ function errorMessage(error) {
 function handleError(error) {
   if (error.name === "AbortError") return;
   if (error.code === "SESSION_NOT_FOUND" && state.session) {
-    closeView(true); writeStorage(sessionStorage,"sleepwalker.session",null); renderResume();
+    const id=state.session.id;closeView(true);recentStates.set(id,{missing:true});renderResume();
   }
   notice(errorMessage(error),true);
 }
@@ -171,10 +186,64 @@ async function openEDF(infer) {
   } finally {state.busy=false;show("upload-progress",false);updateOpenButtons();}
 }
 function renderResume() {
-  const saved=readStorage(sessionStorage,"sleepwalker.session",null);
-  show("resume-panel",Boolean(saved?.id && !state.session));
-  if(saved?.id) text("resume-text","Auf diesem Server ist ein Verweis auf deine letzte Session vorhanden.");
+  const entries=savedSessions(),list=$("recent-sessions");list.replaceChildren();
+  show("recent-sessions-panel",!state.session);
+  $("refresh-sessions").disabled=!state.connected||state.busy;
+  if(!entries.length){list.append(element("p","Noch keine Sessions in diesem Browser geöffnet.","muted small"));return;}
+  for(const saved of entries) {
+    const row=element("div",undefined,"recent-session");row.dataset.sessionId=saved.id;
+    const info=element("div"),status=recentStates.get(saved.id);
+    info.append(element("strong",saved.title||"Aufzeichnung"));
+    const detail=status?.missing?"Nicht mehr verfügbar · abgelaufen oder gelöscht":status?.session?`${status.session.state==="ready"?"Verfügbar":"Wird verarbeitet"} · ${formatTime(status.session.duration||0)}`:status?.error?"Verbindung prüfen · Status unbekannt":"Wird geprüft …";
+    info.append(element("span",detail,"muted small"),element("span",saved.id,"muted small mono"));
+    const actions=element("div",undefined,"recent-session-actions"),join=element("button","Fortsetzen");
+    join.disabled=!state.connected||state.busy||Boolean(status?.missing);join.dataset.action="join";
+    join.addEventListener("click",()=>resumeSession(saved.id).catch(handleError));
+    const remove=element("button","Aus Liste entfernen","text-button small");remove.dataset.action="forget";
+    remove.disabled=state.busy;remove.addEventListener("click",()=>{forgetSession(saved.id);renderResume();});
+    actions.append(join,remove);row.append(info,actions);list.append(row);
+  }
 }
+async function refreshRecentSessions() {
+  if(!state.connected)return;
+  const check=++recentCheck;
+  renderResume();
+  await Promise.all(savedSessions().map(async saved=>{
+    try {const session=await api(sessionPath(saved.id));if(check===recentCheck)recentStates.set(saved.id,{session});}
+    catch(error){if(check===recentCheck)recentStates.set(saved.id,error.code==="SESSION_NOT_FOUND"?{missing:true}:{error:true});}
+  }));
+  if(check===recentCheck)renderResume();
+}
+async function resumeSession(id) {
+  if(state.busy||!id)return;
+  state.busy=true;updateOpenButtons();renderResume();
+  const tab=readStorage(sessionStorage,"sleepwalker.session",null);
+  const saved=(tab?.id===id?tab:savedSessions().find(item=>item.id===id))||{id};
+  try {
+    const session=await api(sessionPath(id));recentStates.set(id,{session});
+    await activateSession(session,{saved,title:saved.title});
+    if(saved.job)watchJob(saved.job);
+    else if(saved.export?.ready){state.export=saved.export;$("export-download").href=`/api/v1/exports/${encodeURIComponent(saved.export.id)}/download`;}
+  } catch(error) {
+    if(error.code==="SESSION_NOT_FOUND"){
+      recentStates.set(id,{missing:true});
+      if(readStorage(sessionStorage,"sleepwalker.session",null)?.id===id)writeStorage(sessionStorage,"sleepwalker.session",null);
+      if(new URL(location.href).searchParams.get("session")===id){setSessionURL(null);writeStorage(sessionStorage,"sleepwalker.session",null);}
+    }
+    throw error;
+  } finally {state.busy=false;updateOpenButtons();renderResume();}
+}
+async function startUI() {
+  const previous=readStorage(sessionStorage,"sleepwalker.session",null);
+  if(previous?.id)writeStorage(localStorage,recentKey,rememberKnownSession(savedSessions(),previous));
+  await connect();
+  const requested=new URL(location.href).searchParams.get("session")||previous?.id;
+  if(requested&&!state.session&&!state.busy) {
+    try {await resumeSession(requested);}catch(error){handleError(error);}
+  }
+  if(!state.session)await refreshRecentSessions();
+}
+
 function chooseChannels(signals) {
   const priorities=[/EEG|C3|C4|F3|F4/i,/EOG/i,/Airflow|Flow|Nasal/i,/Thorax|Chest/i,/SpO2|SaO2|SPO2/i];
   const chosen=[];
@@ -208,13 +277,15 @@ async function activateSession(session,{title,saved}={}) {
   state.selection=null;state.correction=null;closeSelectionMenu();if($("correction-dialog").open)$("correction-dialog").close();
   state.view=makeViewId();
   state.plotLoaded=false;
-  state.session=session; state.title=title || "Aufzeichnung"; state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set();state.inputIssues=new Map();renderInputIssues();
+  state.session=session; state.title=title || saved?.title || "Aufzeichnung"; state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
   const available=(session.signals||[]).map(s=>s.id);
-  state.channels=saved?.channels?.filter(c=>available.includes(c))||chooseChannels(session.signals||[]);
+  state.channels=Array.isArray(saved?.channels)?saved.channels.filter(c=>available.includes(c)):chooseChannels(session.signals||[]);
   if(!state.channels.length&&available.length)state.channels=chooseChannels(session.signals);
   state.range=[0,Math.min(120,session.duration||120)];state.time=0;state.interval=null;state.taskId=saved?.taskId||null;
   if(saved?.range&&Number.isFinite(saved.range[0])&&Number.isFinite(saved.range[1])&&session.duration)state.range=clampRange(saved.range[0],saved.range[1]);
   if(Number.isFinite(saved?.time))state.time=Math.max(0,Math.min(saved.time,(session.duration||1)-1e-6));
+  state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?"Aufnahmeuhrzeit":"Zeit seit Aufnahmebeginn");
+  setInteractionMode(saved?.mode==="pan"?"pan":"select");setSessionURL(session.id);
   state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
   text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString("de-DE") : "—");
   show("plot-loading");show("signal-frame",session.state==="ready");
@@ -285,14 +356,31 @@ async function refreshPredictions() {
     state.predictions=new Map(data);renderContext();drawTimeline();
   } finally {if(request===state.rangeRequest&&!controller.signal.aborted)show("prediction-loading",false);}
 }
+let legendKey="";
+function renderTimelineLegend() {
+  const key=JSON.stringify(state.tasks.map(task=>[task.id,task.classes]));
+  if(key===legendKey)return;legendKey=key;
+  const legend=$("timeline-legend");legend.replaceChildren();
+  for(const task of state.tasks){
+    const group=element("div",undefined,"legend-task");group.append(element("span",taskName(task),"legend-task-name"));
+    for(const label of task.classes){
+      const item=element("span",undefined,"legend-class"),swatch=element("span",undefined,isNegativeClass(label)?"legend-line":"legend-swatch");
+      swatch.style.setProperty("--class-color",labelColor(label));swatch.setAttribute("aria-hidden","true");
+      item.append(swatch,element("span",className(label)));group.append(item);
+    }
+    legend.append(group);
+  }
+  legend.hidden=!state.tasks.length;
+}
 function drawTimeline() {
+  renderTimelineLegend();
   timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.range,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className});
 }
 const timeline=new Timeline($("timeline"),{
   select:(task,time,target)=>target?selectRegion(target):selectTime(time,task),
   interval:(task,start,end)=>selectRegion({kind:"interval",task,start,end}),
   context:openSelectionMenu,
-  toggle:task=>{if(state.expanded.has(task))state.expanded.delete(task);else state.expanded.add(task);drawTimeline();},
+  toggle:task=>{if(state.expanded.has(task))state.expanded.delete(task);else state.expanded.add(task);drawTimeline();rememberSession();},
 });
 function selectTime(time,taskId=state.taskId,keepInterval=false) {
   if(!state.session)return;state.time=Math.max(0,Math.min(time,state.session.duration-1e-6));state.taskId=taskId;
@@ -374,7 +462,7 @@ function openSelectionMenu({task=state.taskId,time=state.time,target=null,x,y}) 
 }
 function setInteractionMode(mode) {
   state.mode=mode;$("select-tool").setAttribute("aria-pressed",String(mode==="select"));$("pan-tool").setAttribute("aria-pressed",String(mode==="pan"));
-  sendPlot("mode",{mode});
+  sendPlot("mode",{mode});rememberSession();
 }
 function openCorrection() {
   closeSelectionMenu();
@@ -586,14 +674,15 @@ function closeView(expired=false) {
   closeSelectionMenu();state.selection=null;state.interval=null;state.correction=null;
   if($("correction-dialog").open)$("correction-dialog").close();
   sendPlot("close");stopWatchingJob();state.predictionAbort?.abort();clearTimeout(state.predictionTimer);state.generation++;
+  writeStorage(sessionStorage,"sleepwalker.session",null);setSessionURL(null);
   state.session=null;state.tasks=[];state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.job=null;state.export=null;
   setViewer(false);text("study-title","Aufzeichnung öffnen");text("study-meta","");show("job-panel",false);
   for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
-  renderResume();if(expired)show("resume-panel",false);
+  renderResume();if(!expired)refreshRecentSessions().catch(handleError);
 }
 async function deleteSession() {
   if(!state.session)return;$("close-delete").disabled=true;
-  try {await api(sessionPath(state.session.id),{method:"DELETE"});writeStorage(sessionStorage,"sleepwalker.session",null);closeView();notice("Session gelöscht.");}
+  try {await api(sessionPath(state.session.id),{method:"DELETE"});forgetSession(state.session.id);closeView();notice("Session gelöscht.");}
   finally {$("close-delete").disabled=false;}
 }
 function renderChannels() {
@@ -640,16 +729,11 @@ $("workspace-file").addEventListener("change",()=>importWorkspace($("workspace-f
 $("drop-zone").addEventListener("dragover",event=>{event.preventDefault();$("drop-zone").classList.add("dragging");});
 $("drop-zone").addEventListener("dragleave",()=>$("drop-zone").classList.remove("dragging"));
 $("drop-zone").addEventListener("drop",event=>{event.preventDefault();$("drop-zone").classList.remove("dragging");if(!state.busy)setFile(event.dataTransfer.files[0]);});
-bind("resume",async()=>{
-  const saved=readStorage(sessionStorage,"sleepwalker.session",null);if(!saved?.id)return;
-  try {const session=await api(sessionPath(saved.id));await activateSession(session,{saved});if(saved.job)watchJob(saved.job);else if(saved.export?.ready){state.export=saved.export;$("export-download").href=`/api/v1/exports/${encodeURIComponent(saved.export.id)}/download`;}}
-  catch(error){if(error.code==="SESSION_NOT_FOUND"){writeStorage(sessionStorage,"sleepwalker.session",null);renderResume();}throw error;}
-});
-bind("forget-resume",()=>{writeStorage(sessionStorage,"sleepwalker.session",null);renderResume();});
+bind("refresh-sessions",refreshRecentSessions);
 bind("previous",()=>navigate(-1));bind("next",()=>navigate(1));
 $("window-size").addEventListener("change",()=>{const width=$("window-size").value==="all"?state.session.duration:Number($("window-size").value);setRange(state.range[0],state.range[0]+width);});
 $("goto-form").addEventListener("submit",event=>{event.preventDefault();const value=$("goto-time").value;if(!/^\d+:[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)){notice("Zeit als HH:MM:SS eingeben.",true);return;}const [h,m,s]=value.split(":").map(Number);const time=h*3600+m*60+s;if(time>=state.session.duration){notice("Der Zeitpunkt liegt außerhalb der Aufnahme.",true);return;}const width=state.range[1]-state.range[0];setRange(time,time+width);selectTime(time);});
-bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?"Aufnahmeuhrzeit":"Zeit seit Aufnahmebeginn");renderRange();renderContext();drawTimeline();});
+bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?"Aufnahmeuhrzeit":"Zeit seit Aufnahmebeginn");renderRange();renderContext();drawTimeline();rememberSession();});
 $("task-select").addEventListener("change",()=>selectTime(state.time,$("task-select").value));
 bind("refresh-annotations",refreshAnnotations);
 bind("select-tool",()=>setInteractionMode("select"));bind("pan-tool",()=>setInteractionMode("pan"));
@@ -694,4 +778,6 @@ document.addEventListener("keydown",event=>{if(!state.session||document.querySel
 window.addEventListener("pagehide",()=>{rememberSession();sendPlot("close");state.jobStream?.close();});
 setInterval(()=>{if(state.session&&document.visibilityState==="visible")requestPlot("heartbeat");},45000);
 document.addEventListener("visibilitychange",()=>{if(state.session&&document.visibilityState==="visible"){requestPlot();refreshAnnotations().catch(handleError);}});
-renderProfiles();updateOpenButtons();renderResume();connect().catch(handleError);
+window.addEventListener("storage",event=>{if(event.key===recentKey&&!state.session)refreshRecentSessions().catch(handleError);});
+window.addEventListener("pageshow",event=>{if(event.persisted&&state.session){state.plotLoaded=false;requestPlot();refreshAnnotations().catch(handleError);}});
+renderProfiles();updateOpenButtons();renderResume();startUI().catch(handleError);

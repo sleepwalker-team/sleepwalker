@@ -40,7 +40,7 @@ def time_range(data, duration):
     return None
 
 
-def style_figure(figure, signals, bounds, revision):
+def style_figure(figure, signals, bounds, revision, duration):
     figure = copy.deepcopy(figure)
     layout = figure.setdefault("layout", {})
     layout.update({
@@ -57,6 +57,7 @@ def style_figure(figure, signals, bounds, revision):
             "range": bounds, "autorange": False, "title": None,
             "showticklabels": False, "showgrid": True, "gridcolor": "#e9eae8",
             "zeroline": False, "fixedrange": False,
+            "minallowed": 0, "maxallowed": duration,
         })
         yaxis = layout["yaxis" + axis]
         yaxis.update({"title": None, "gridcolor": "#eff0ed", "zeroline": False, "nticks": 3, "fixedrange": True})
@@ -158,7 +159,7 @@ class PlotController:
                     patch = self.service.update_figure(session_id, viewport, view_id=view_id)
                     apply_assignments(initial, patch)
                     view.channels = tuple(channels)
-                    result = style_figure(initial, [available[c] for c in channels], bounds, f"{session_id}:{view_id}:{','.join(channels)}")
+                    result = style_figure(initial, [available[c] for c in channels], bounds, f"{session_id}:{view_id}:{','.join(channels)}", duration)
                     view.initial = result
                 else:
                     result = self.service.update_figure(session_id, viewport, view_id=view_id)

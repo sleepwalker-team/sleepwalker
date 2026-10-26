@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>Sleepwalker</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2325292b'/%3E%3Cpath d='M3 17h6l3-8 5 15 4-10 3 3h5' stroke='white' fill='none'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/ui/assets/styles.css?v=20261026-corrections-2">
-  <script type="module" src="/ui/assets/app.js?v=20261026-corrections-2"></script>
+  <link rel="stylesheet" href="/ui/assets/styles.css?v=20261026-bounds-1">
+  <script type="module" src="/ui/assets/app.js?v=20261026-bounds-1"></script>
 </head>
 <body>
   <nav class="rail" aria-label="Navigation">
@@ -57,7 +57,11 @@
         </section>
       </div>
       <div class="entry-footer"><span class="muted">Arbeitsstand fortsetzen</span><label class="text-button file-button" for="workspace-file">Workspace öffnen …</label><input id="workspace-file" class="visually-hidden" type="file" accept=".zip"></div>
-      <div id="resume-panel" class="resume-panel" hidden><span id="resume-text"></span><button id="resume">Session fortsetzen</button><button id="forget-resume" class="text-button">Verweis entfernen</button></div>
+      <section id="recent-sessions-panel" class="recent-sessions-panel" aria-label="Zuletzt geöffnete Sessions">
+        <div class="section-heading"><h3>Zuletzt geöffnete Sessions</h3><button id="refresh-sessions" class="text-button">Aktualisieren</button></div>
+        <p class="muted small">In diesem Browser auf diesem Server geöffnete Aufzeichnungen. Fortsetzen ist möglich, solange die Session auf dem Server besteht.</p>
+        <div id="recent-sessions" aria-live="polite"></div>
+      </section>
     </section>
     <section id="viewer" class="viewer" aria-label="Signalviewer" hidden>
       <main class="workspace">
@@ -80,9 +84,10 @@
           <div class="plot-heading"><h3>Signale</h3><span id="range-label" class="mono muted"></span></div>
           <div id="plot-loading" class="plot-loading" role="status">Signalansicht wird geladen …</div>
           <iframe id="signal-frame" title="Physiologische Signalverläufe" referrerpolicy="same-origin"></iframe>
-          <div class="prediction-heading"><h3>Vorhersagen</h3><span class="muted small">Modell und manuelle Korrekturen</span></div>
+          <div class="prediction-heading"><h3>Vorhersagen</h3><span class="muted small">M = manuell · schwarze Umrandung = Auswahl</span></div>
           <div id="prediction-loading" class="muted small" role="status" hidden>Vorhersagen werden geladen …</div>
           <canvas id="timeline" tabindex="0" aria-label="Vorhersagespuren: mit Klick Zeitpunkt und Aufgabe auswählen, mit Ziehen Intervall markieren"></canvas>
+          <div id="timeline-legend" class="timeline-legend" aria-label="Klassenfarben" hidden></div>
           <div id="timeline-summary" class="visually-hidden" aria-live="polite"></div>
         </div>
         <div class="workspace-footer muted small">Ziehen: Intervall markieren · Rechtsklick: Auswahl bearbeiten · Scrollen: zoomen · Verschieben über das Mauswerkzeug</div>
@@ -118,7 +123,7 @@
   <dialog id="channels-dialog"><form method="dialog"><div class="dialog-heading"><h2>Kanäle</h2><button aria-label="Dialog schließen">×</button></div></form><p class="muted small">Nur ausgewählte Kanäle werden geladen. Mit den Pfeilen die Reihenfolge ändern.</p><div id="channel-list"></div><div class="form-actions"><button id="channels-apply" class="primary">Anwenden</button></div></dialog>
   <dialog id="inference-dialog"><form method="dialog"><div class="dialog-heading"><h2>Modelle ausführen</h2><button aria-label="Dialog schließen">×</button></div></form><p class="muted small">Weitere Aufgaben können einmalig inferiert werden. Bereits vorhandene Aufgaben bleiben erhalten.</p><div id="inference-models"></div><div class="form-actions"><button id="inference-start" class="primary">Inferenz starten</button></div></dialog>
   <dialog id="export-dialog"><form method="dialog"><div class="dialog-heading"><h2>Exportieren</h2><button aria-label="Dialog schließen">×</button></div></form><label for="export-mode">Format</label><select id="export-mode"><option value="results">Ergebnisse (JSON)</option><option value="workspace">Vollständiger Arbeitsstand (Sleepwalker-ZIP)</option></select><div id="export-options" class="export-options"><label><input type="checkbox" value="predictions" checked> Modellvorhersagen</label><label><input type="checkbox" value="probabilities" checked> Wahrscheinlichkeiten</label><label><input type="checkbox" value="annotations" checked> Manuelle Änderungen</label><label><input type="checkbox" value="metadata" checked> Metadaten</label></div><p id="export-note" class="muted small">Der Export wird auf dem Server erstellt und anschließend heruntergeladen.</p><button id="export-start" class="primary">Export erstellen</button><a id="export-download" class="button" hidden>Herunterladen</a></dialog>
-  <dialog id="close-dialog"><form method="dialog"><div class="dialog-heading"><h2>Session schließen</h2><button aria-label="Dialog schließen">×</button></div></form><p>Änderungen liegen in einer temporären Session. Für eine spätere Fortsetzung zuerst den Arbeitsstand sichern.</p><div class="close-actions"><button id="close-save" class="primary">Arbeitsstand sichern …</button><button id="close-keep">Ansicht schließen, Session behalten</button><button id="close-delete" class="danger">Session beenden &amp; löschen</button></div><p class="muted small">Löschen entfernt die EDF, Vorhersagen und Änderungen von diesem Server. Ein laufender Job wird abgebrochen.</p></dialog>
+  <dialog id="close-dialog"><form method="dialog"><div class="dialog-heading"><h2>Session schließen</h2><button aria-label="Dialog schließen">×</button></div></form><p>Änderungen liegen in einer temporären Session. Für eine spätere Fortsetzung zuerst den Arbeitsstand sichern.</p><div class="close-actions"><button id="close-save" class="primary">Arbeitsstand sichern …</button><button id="close-keep">Zur Startseite, Session behalten</button><button id="close-delete" class="danger">Session beenden &amp; löschen</button></div><p class="muted small">Löschen entfernt die EDF, Vorhersagen und Änderungen von diesem Server. Ein laufender Job wird abgebrochen.</p></dialog>
   <dialog id="help-dialog"><form method="dialog"><div class="dialog-heading"><h2>Bedienung</h2><button aria-label="Dialog schließen">×</button></div></form><p>Im Signalplot ziehen, um ein Intervall zu markieren. Über „Verschieben“ die Zeitachse bewegen; mit dem Mausrad zoomen.</p><p>Unter den Signalen eine Vorhersagespur anklicken, um Zeit und Aufgabe auszuwählen. Ziehen in einer Spur markiert ein Intervall. Rechtsklick auf die Auswahl öffnet das Menü zum Korrigieren oder Löschen eigener Änderungen. Ein Klick auf einen Klassenabschnitt rahmt diesen ein.</p><dl class="session-details"><dt>← / →</dt><dd>Zeitfenster wechseln</dd><dt>Escape</dt><dd>Dialog schließen</dd></dl><p>Die GUI nutzt den Resampler des ausgewählten Servers. Zum Verbinden einer anderen Instanz muss dort ebenfalls diese GUI laufen.</p><p class="muted small">Tab schließen beendet keine Session. Nicht mehr aktive Sessions werden vom Server nach dessen Ablaufzeit gelöscht.</p></dialog>
 </body>
 </html>

@@ -1,10 +1,5 @@
-const palette = ["#7b8d98", "#ac9065", "#73908a", "#9b8380", "#878194", "#88916c"];
-const stageColors = {wake:"#aaa38b", w:"#aaa38b", n1:"#a1adb3", n2:"#7b8d98", n3:"#4c606c", rem:"#8a7b91"};
-const negative = label => /^(no[ _]|kein|regular breathing$|none$)/i.test(label);
-export function labelColor(label, taskIndex = 0, classIndex = 0) {
-  if (negative(label)) return "#e0e4df";
-  return stageColors[String(label).toLowerCase()] || palette[(taskIndex + classIndex) % palette.length];
-}
+import {isNegativeClass, labelColor, labelTextColor} from "./colors.js?v=20261026-bounds-1";
+export {labelColor};
 export function currentPrediction(task, predictions, time) {
   if (!task) return null;
   if (task.kind === "continuous") {
@@ -88,20 +83,36 @@ export class Timeline {
     c.font = "11px Arial, sans-serif"; c.textBaseline = "middle";
     const plotWidth = this.width - this.left - this.right;
     const xx = t => this.left + (t - range[0]) / (range[1] - range[0]) * plotWidth;
+    const segment=(label,start,end,y,manual=false)=>{
+      const x=xx(Math.max(range[0],start)),w=xx(Math.min(range[1],end))-x;
+      if(w<=0)return;
+      const negative=isNegativeClass(label);
+      if(manual)c.clearRect(x,y+5,w,22);
+      if(!negative){c.fillStyle=labelColor(label);c.fillRect(x,y+7,Math.max(.5,w),16);}
+      else if(manual){c.strokeStyle="#c9cdcb";c.lineWidth=1;c.beginPath();c.moveTo(x,y+15.5);c.lineTo(x+w,y+15.5);c.stroke();}
+      c.fillStyle=negative?"#262a2c":labelTextColor(label);
+      const caption=className(label);
+      if(!negative&&w>c.measureText(caption).width+(manual?28:10)){c.textAlign="center";c.fillText(caption,x+w/2,y+15);c.textAlign="left";}
+      if(manual){
+        if(w>=18){c.save();c.font="bold 9px Arial, sans-serif";c.fillText("M",x+3,y+15);c.restore();}
+        else {c.fillStyle="#161a1c";c.beginPath();c.moveTo(x,y+5);c.lineTo(x+Math.min(5,w),y+5);c.lineTo(x,y+10);c.closePath();c.fill();}
+      }
+    };
     if (!tasks.length) { c.fillStyle = "#6e7476"; c.fillText("Noch keine Vorhersagen. Modelle können über ‘Modelle …’ gestartet werden.",16,27,Math.max(100,this.width-32)); return; }
     for (const row of this.rows) {
-      const {task, klass, y} = row, index = tasks.indexOf(task);
+      const {task, klass, y} = row;
       const items = predictions.get(task.id) || [];
       const label = klass ? `  ${className(klass)}` : taskName(task);
       c.save(); c.beginPath(); c.rect(10,y,this.left - 18,32); c.clip();
       c.fillStyle = task.id === taskId ? "#262a2c" : "#626a6c";
       c.fillText((klass ? "" : expanded.has(task.id) ? "▾ " : "▸ ") + label,12,y+15); c.restore();
-      c.fillStyle="#f0f1ee"; c.fillRect(this.left,y+5,plotWidth,20);
+      const baseline=y+(task.kind==="continuous"?25.5:15.5);
+      c.strokeStyle="#c9cdcb";c.lineWidth=1;c.beginPath();c.moveTo(this.left,baseline);c.lineTo(this.width-this.right,baseline);c.stroke();
       c.save(); c.beginPath(); c.rect(this.left,y,plotWidth,32); c.clip();
       if (task.kind === "continuous") {
-        const labels = klass ? [klass] : task.classes;
+        const labels = klass ? [klass] : task.classes.filter(label=>!isNegativeClass(label));
         for (const cls of labels) {
-          c.strokeStyle = labelColor(cls,index,task.classes.indexOf(cls)); c.lineWidth=1;
+          c.strokeStyle = labelColor(cls); c.lineWidth=isNegativeClass(cls)?1:1.8;
           c.beginPath(); let prev=null;
           for (const point of items) {
             const prob=point.probabilities[cls]; if (!Number.isFinite(prob)) continue;
@@ -116,31 +127,24 @@ export class Timeline {
         for (const p of items) {
           if (annotations.labels.some(e => e.task===task.id && Math.abs(e.start-p.start)<1e-6)) continue;
           if (klass && p.label !== klass) continue;
-          const start=Math.max(range[0],p.start), end=Math.min(range[1],p.end), x=xx(start), w=xx(end)-x;
-          c.fillStyle=labelColor(p.label,index); c.fillRect(x,y+5,Math.max(.5,w),20);
-          if (w>42 && !negative(p.label)) { c.fillStyle="#ffffff"; c.textAlign="center"; c.fillText(className(p.label),x+w/2,y+15,Math.max(20,w-5)); c.textAlign="left"; }
+          segment(p.label,p.start,p.end,y);
         }
       }
       for (const edit of annotations.labels.filter(e => e.task===task.id)) {
         const end=edit.start+task.resolution;
         if (end<=range[0] || edit.start>=range[1] || (klass && edit.label!==klass)) continue;
-        const x=xx(Math.max(range[0],edit.start)), w=xx(Math.min(range[1],end))-x;
-        c.fillStyle=labelColor(edit.label,index);c.fillRect(x,y+5,Math.max(.5,w),20);
-        if(w>42){c.fillStyle="#ffffff";c.textAlign="center";c.fillText(className(edit.label),x+w/2,y+15,Math.max(20,w-5));c.textAlign="left";}
-        c.strokeStyle="#262a2c"; c.lineWidth=1.2; c.strokeRect(x+.5,y+3.5,Math.max(1,w-1),24);
-        c.fillStyle=labelColor(edit.label,index); c.fillRect(x,y+27,Math.max(1,w),3);
+        segment(edit.label,edit.start,end,y,true);
       }
       for (const event of annotations.events.filter(e => e.task===task.id)) {
         if (event.end<=range[0] || event.start>=range[1] || (klass && event.label!==klass)) continue;
-        const x=xx(Math.max(range[0],event.start)), w=xx(Math.min(range[1],event.end))-x;
-        c.strokeStyle="#262a2c"; c.setLineDash([3,2]); c.strokeRect(x+.5,y+2.5,Math.max(1,w-1),26); c.setLineDash([]);
+        segment(event.label,event.start,event.end,y,true);
       }
       const marked = this.drag && this.drag.row.task.id === task.id && Math.abs(this.drag.current-this.drag.x)>5
         ? {start:this.timeAt(Math.min(this.drag.x,this.drag.current)), end:this.timeAt(Math.max(this.drag.x,this.drag.current)),kind:"interval"}
         : selection?.task===task.id ? selection : null;
       if (marked && (!klass || !marked.label || marked.label===klass)) {
         const x=xx(Math.max(range[0],marked.start)), w=xx(Math.min(range[1],marked.end))-x;
-        if(w>0) {c.fillStyle="#567b8420";c.fillRect(x,y+1,w,30);c.strokeStyle="#365d68";c.lineWidth=2;c.strokeRect(x+1,y+1,Math.max(1,w-2),30);}
+        if(w>0) {c.strokeStyle="#161a1c";c.lineWidth=2;c.setLineDash(marked.kind==="interval"?[4,2]:[]);c.strokeRect(x+1,y+2,Math.max(1,w-2),27);c.setLineDash([]);}
       }
       c.restore();
     }
@@ -154,5 +158,5 @@ export class Timeline {
     c.textAlign="left";
   }
 }
-import {selectionAt} from "./corrections.js?v=20261026-corrections-2";
+import {selectionAt} from "./corrections.js?v=20261026-bounds-1";
 

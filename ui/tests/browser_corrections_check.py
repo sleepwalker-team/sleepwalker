@@ -73,7 +73,7 @@ def main():
         expect(page.locator("#selection-range")).to_have_text("00:00:00 – 00:00:30")
         assert page.locator("#timeline").evaluate("""canvas=>{
             const data=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
-            let selected=0;for(let i=0;i<data.length;i+=4)if(data[i]===54&&data[i+1]===93&&data[i+2]===104)selected++;
+            let selected=0;for(let i=0;i<data.length;i+=4)if(data[i]===22&&data[i+1]===26&&data[i+2]===28)selected++;
             return selected>100;
         }""")
         page.locator("#context-edit").click();save("n1")

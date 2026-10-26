@@ -30,6 +30,18 @@ def main():
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
         expect(page.locator("#task-select option")).to_have_count(3, timeout=30000)
         expect(page.locator("#prediction-label")).to_have_text("N2", timeout=30000)
+        expect(page.locator("#timeline-legend .legend-task")).to_have_count(3)
+        # Verify the rendered design, including transparent space above a thin
+        # event baseline, rather than only checking color constants in code.
+        pixels=page.locator("#timeline").evaluate("""canvas=>{
+            const c=canvas.getContext('2d'),dpr=devicePixelRatio;
+            const at=(time,y)=>[...c.getImageData(Math.floor((126+time/120*(canvas.clientWidth-148))*dpr),Math.floor(y*dpr),1,1).data];
+            return {sleep:at(10,17),event:at(17,52),gap:at(30,52),baseline:at(30,58)};
+        }""")
+        assert pixels["sleep"][:3]==[36,92,240],pixels
+        assert pixels["event"][:3]==[244,121,22],pixels
+        assert pixels["gap"][3]==0,pixels
+        assert pixels["baseline"][:3]==[201,205,203],pixels
         expect(page.locator("#model-input-report")).to_be_visible()
         expect(page.locator("#model-input-issues")).to_contain_text("TEST · unmatched inputs")
         expect(page.locator("#model-input-issues")).to_contain_text("C3-M2, E1-M2, Chin EMG, ECG")
@@ -109,12 +121,12 @@ def main():
         page.locator("#close-open").click()
         page.locator("#close-keep").click()
         expect(page.locator("#entry")).to_be_visible()
-        page.locator("#resume").click()
+        page.locator(f'[data-session-id="{session_id}"] [data-action="join"]').click()
         expect(page.locator("#viewer")).to_be_visible()
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
         page.reload()
         expect(page.locator("#connection-status")).to_have_text("Verbunden")
-        page.locator("#resume").click()
+        expect(page.locator("#viewer")).to_be_visible()
         expect(page.locator("#task-select option")).to_have_count(3)
         page.locator("#close-open").click()
         page.locator("#close-delete").click()

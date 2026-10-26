@@ -93,6 +93,8 @@ def test_initial_visible_range_uses_original_samples_without_second_read(api):
     assert initial["layout"]["xaxis"]["range"] == [50.12, 50.13]
     assert initial["layout"]["yaxis"]["fixedrange"] is True
     assert initial["layout"]["xaxis"]["fixedrange"] is False
+    assert initial["layout"]["xaxis"]["minallowed"] == 0
+    assert initial["layout"]["xaxis"]["maxallowed"] == 100
     assert 20 in initial["data"][0]["y"]
     assert len(initial["data"][0]["x"]) <= 2000
     patch, status = controller.render(command(session, revision=2), {"xaxis.range[0]": 10, "xaxis.range[1]": 10.2})
@@ -120,6 +122,9 @@ def test_zoom_resamples_every_subplot_at_the_visible_resolution(api):
     for trace in initial["data"]:
         assert 20 in trace["y"]
         assert len(trace["x"]) <= 12
+    for axis in ["xaxis", "xaxis2"]:
+        assert initial["layout"][axis]["minallowed"] == 0
+        assert initial["layout"][axis]["maxallowed"] == session.duration
     patch, _ = ui.render(command(session, channels=["EEG", "EOG"], revision=2, range=[20., 20.1]))
     apply_assignments(initial, patch)
     for trace in initial["data"]:

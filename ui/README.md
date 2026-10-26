@@ -7,6 +7,8 @@ Der gesamte neue Code liegt in `ui/`. `sleepwalker/server/` bleibt unverändert.
 [Vorschau des Viewers](screenshots/viewer.png) · [Einstieg](screenshots/entry.png)
 [Intervallauswahl und Rechtsklick](screenshots/correction-menu.png) ·
 [Korrekturdialog](screenshots/correction-dialog.png) · [Korrigierte Spuren](screenshots/corrections.png)
+· [Zuletzt geöffnete Sessions](screenshots/sessions.png)
+· [Neue Vorhersagespuren](screenshots/predictions.png)
 (Browseraufnahmen mit synthetischen Testdaten).
 
 ## Start
@@ -109,7 +111,10 @@ Der Docker-Build wurde in dieser Arbeitsumgebung mangels Docker nicht ausgeführ
   Mit dem Mausrad zoomen. Die unteren Spuren verwenden denselben Zeitbereich.
   Die Navigation verändert ausschließlich die Zeitachse; die Amplitudenachsen
   bleiben beim Ziehen und Zoomen gesperrt. Pfeiltasten links/rechts wechseln das
-  sichtbare Fenster.
+  sichtbare Fenster. Die Zeitachsen aller Kanäle sind direkt auf 0 bis zum Ende
+  der Aufnahme begrenzt. Herauszoomen kann höchstens die gesamte EDF zeigen;
+  Verschieben am Rand behält die Fensterbreite bei. Die Grenzen werden beim
+  Wechsel der EDF oder der sichtbaren Kanäle neu gesetzt.
 - Einen Klassenabschnitt anklicken, um ihn auszuwählen und einzurahmen. Ziehen
   markiert ein Intervall auch direkt in einer Vorhersagespur. Ein Rechtsklick
   auf die Auswahl öffnet das Menü zum Korrigieren oder Bearbeiten. Alternativ
@@ -120,11 +125,20 @@ Der Docker-Build wurde in dieser Arbeitsumgebung mangels Docker nicht ausgeführ
 - Vorhersagen richten sich nach `kind` und `resolution` der API. Die derzeitigen
   Modellpakete liefern epochenbasierte Klassen auch für Arousal, Atmung und
   Desaturation. Lücken sind fehlende Vorhersagen und keine negativen Klassen.
+- Die Spuren verwenden dünne graue Grundlinien statt Hintergrundbalken. Aktive
+  Klassen erscheinen als kräftige, flache Segmente: W gelb, N1 hellblau, N2 blau,
+  N3 violett, REM magenta, Arousal orange, Apnoe rot und Desaturation türkis.
+  Negative Klassen erhalten keine farbige Fläche. Klassennamen und eine kompakte
+  Farblegende ergänzen die Farben. Kontinuierliche Aufgaben bleiben Kurven;
+  ihre negativen Gegenklassen können über die aufgeklappten Klassenspuren
+  betrachtet werden. Farben bleiben bei einem Wechsel der Aufgabenreihenfolge gleich.
 - Im Dialog Aufgabe, Start, Ende und Klasse einstellen und **Speichern** wählen.
   Bei Epochen werden alle berührten vollständigen Epochen korrigiert; der Dialog
   zeigt ihre tatsächlichen Grenzen und Anzahl vor dem Speichern. Event- und
   kontinuierliche Tasks erhalten menschliche Ereignisse mit frei gewählten Grenzen.
-  Korrigierte Klassen stehen mit Umrandung in der Spur; die ursprüngliche
+  Korrigierte Klassen tragen ein kleines **M** in der Spur. Eine schwarze
+  Umrandung kennzeichnet die aktuelle Auswahl; bei Intervallen ist sie gestrichelt.
+  Die ursprüngliche
   Modellvorhersage und ihre Wahrscheinlichkeiten bleiben im Detailpanel sichtbar.
   Das frühere Korrekturformular im rechten Panel entfällt.
 - Eigene Änderungen lassen sich direkt anklicken und über das Rechtsklickmenü
@@ -148,10 +162,26 @@ Der Docker-Build wurde in dieser Arbeitsumgebung mangels Docker nicht ausgeführ
   Ein solcher Workspace lässt sich auf der Startseite wieder öffnen. Downloads
   kommen direkt vom Export-Endpunkt, ohne große Dateien als Browser-Blob zu laden.
 - **Schließen …** erlaubt Speichern, Behalten der temporären Session oder
-  ausdrückliches Löschen. Nach einem Reload kann die letzte Session im selben
-  Tab fortgesetzt werden, solange sie auf dem Server noch existiert. Ein Tab
-  speichert dafür ausschließlich Session-/Jobkennungen und die UI-Auswahl in
-  `sessionStorage`, keine EDF-, Signal- oder Vorhersagearrays.
+  ausdrückliches Löschen. **Zur Startseite, Session behalten** verlässt die Ansicht,
+  ohne die Aufzeichnung vom Server zu löschen.
+- **F5** öffnet dieselbe Session automatisch. Ihre ID steht in der URL als
+  `/ui/?session=…`; dieser Link kann auch in einem anderen Tab geöffnet werden.
+  Zeitfenster, Kanalauswahl, Zeitpunkt, ausgewählte Aufgabe, aufgeklappte Spuren
+  und Mauswerkzeug werden wiederhergestellt. Bekannte laufende Jobs werden wieder
+  verbunden. Ein alter Verweis aus der bisherigen GUI wird beim ersten Laden übernommen.
+- Die Startseite zeigt bis zu 20 **zuletzt geöffnete Sessions dieses Browsers**
+  auf derselben Serveradresse. Der aktuelle Status wird über die vorhandenen
+  Session-Endpunkte geprüft. **Fortsetzen** öffnet eine verfügbare Session;
+  **Aus Liste entfernen** entfernt nur den Browsereintrag. Nach bewusstem Verlassen
+  bleibt auch ein Reload auf der Startseite. Abgelaufene oder gelöschte Sessions
+  werden entsprechend angezeigt. Eine vorübergehende Verbindungsstörung entfernt
+  keine Verweise und erlaubt einen erneuten Versuch.
+- Die browserweite Liste und deren Ansichtsmetadaten liegen in `localStorage`;
+  die aktuelle Session und ihre Ansicht zusätzlich pro Tab in `sessionStorage`.
+  Darin liegen Dateiname, Session-/Jobkennungen und UI-Auswahl, keine EDF-, Signal-
+  oder Vorhersagearrays. Die Liste ist keine serverweite Auflistung: Die unveränderte
+  API bietet dafür keinen Endpunkt. Sessions bleiben temporär und bestehen nur,
+  solange der Server sie bereitstellt.
 
 ## Integration
 
@@ -205,6 +235,8 @@ Die Behandlung abgewiesener Modelle lässt sich zusätzlich mit Node.js prüfen:
 ```bash
 node ui/tests/test_inference.mjs
 node ui/tests/test_corrections.mjs
+node ui/tests/test_sessions.mjs
+node ui/tests/test_colors.mjs
 ```
 
 Die Integrationstests prüfen den unveränderten API-Vertrag, echte EDF-Uploads,
@@ -218,7 +250,9 @@ python -m ui.tests.browser_app --port 6019
 # In einem zweiten Terminal:
 python -m ui.tests.browser_check --url http://localhost:6019
 python -m ui.tests.browser_plot_check --url http://localhost:6019
+python -m ui.tests.browser_bounds_check --url http://localhost:6019
 python -m ui.tests.browser_corrections_check --url http://localhost:6019
+python -m ui.tests.browser_sessions_check --url http://localhost:6019
 ```
 
 Die Browser-Testinstanz verwendet ausschließlich die EDF-Testdatei und explizite,
@@ -264,3 +298,23 @@ und alle drei Browserläufe (Arbeitsablauf, Signalnavigation, Korrekturen). Für
 Auch die laufende GUI auf Port 6009 wurde mit einer eigenen Demo-Session und allen
 vier vorhandenen CPU-Modellen geprüft: Inferenz, Klassenauswahl per Maus,
 Kontextkorrektur und anschließendes gemeinsames Löschen der Korrekturen bestanden.
+
+Session-Wiederaufnahme: vier zusätzliche JavaScript-Tests, 16 GUI-Integrationstests
+und der vollständige Arbeitsablauf mit automatischer Wiederaufnahme bestanden.
+Der eigene Session-Browserlauf prüft F5 mit Zeitfenster und Kanalwahl, mehrere
+Aufzeichnungen und Tabs, direkte Links, bewusstes Verlassen, lokales Entfernen,
+abgelaufene Sessions und vorübergehende Verbindungsfehler. Dieser Lauf bestand
+auch gegen die laufende GUI auf Port 6007 mit eigenen Test-Sessions.
+
+Die neue Spurdarstellung wurde mit drei Tests für lesbare Textkontraste,
+negative Klassen und feste Farben sowie pixelgenauen Browserprüfungen für
+Segmente und freie Flächen an der Grundlinie getestet. 16 GUI-Integrationstests,
+der vollständige GUI-Ablauf und der Korrektur-Browserlauf bestanden. Zusätzlich
+wurde die laufende GUI auf Port 6007 mit allen vier vorhandenen CPU-Modellen
+und einer eigenen Demo-Session einschließlich Korrektur und Löschung geprüft.
+
+Die Aufnahmegrenzen wurden mit echtem Ziehen und Mausrad-Zoom an beiden Enden,
+auf allen acht Kanälen, in der Gesamtansicht und nach Kanal-/Sessionwechseln
+geprüft. Der Lauf mit EDF-Längen von 690 und 3600 Sekunden bestand auch auf der
+laufenden GUI auf Port 6007. Zusätzlich bestanden die 16 GUI-Integrationstests
+und der bestehende Navigationstest mit verspäteten Resampler-Antworten.

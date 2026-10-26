@@ -1,8 +1,11 @@
 import hashlib
 import json
+import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -11,6 +14,9 @@ from fastapi import UploadFile
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024**3
+SESSION_DIRECTORY_PATTERN = re.compile(
+    r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 
 
 class FileTooLargeError(Exception):
@@ -21,24 +27,54 @@ class FileTooLargeError(Exception):
 
 
 class TemporaryStorage:
-    def __init__(
-        self,
-        root: Path | None = None,
-        *,
-        max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
-    ) -> None:
+    def __init__(self, root: Path | None = None, *, max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES) -> None:
         if max_file_size_bytes <= 0:
             raise ValueError("Maximum upload file size must be positive.")
 
         self.root = root or Path(tempfile.gettempdir()) / "sleepwalker"
         self.max_file_size_bytes = max_file_size_bytes
         self.root.mkdir(parents=True, exist_ok=True)
+        self._owns_root = False
 
-    async def save_files(
-        self,
-        session_id: str,
-        files: list[UploadFile],
-    ) -> list[Path]:
+    @contextmanager
+    def exclusive_access(self):
+        import fcntl
+
+        lock_path = self.root / ".server.lock"
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("Temporary storage is already used by another server.") from exc
+
+            self._owns_root = True
+            try:
+                yield
+            finally:
+                self._owns_root = False
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def cleanup_orphan_sessions(self, known_session_ids: set[str]) -> list[str]:
+        if not self._owns_root:
+            raise RuntimeError("Storage ownership is required before cleaning orphan sessions.")
+
+        deleted = []
+        for directory in self.root.iterdir():
+            if (
+                SESSION_DIRECTORY_PATTERN.fullmatch(directory.name) is not None
+                and directory.name not in known_session_ids
+                and not directory.is_symlink() and directory.is_dir()
+            ):
+                shutil.rmtree(directory)
+                deleted.append(directory.name)
+
+        return deleted
+
+    async def save_files(self, session_id: str, files: list[UploadFile]) -> list[Path]:
         session_dir = self.root / session_id
         session_dir.mkdir(parents=True, exist_ok=False)
 
@@ -85,12 +121,7 @@ class TemporaryStorage:
         session_dir = self.root / session_id
         shutil.rmtree(session_dir, ignore_errors=True)
 
-    def write_json_export(
-        self,
-        session_id: str,
-        export_id: str,
-        payload: dict,
-    ) -> Path:
+    def write_json_export(self, session_id: str, export_id: str, payload: dict) -> Path:
         export_directory = self.root / session_id / "exports"
         export_directory.mkdir(parents=True, exist_ok=True)
         destination = export_directory / f"{export_id}.json"
@@ -106,14 +137,7 @@ class TemporaryStorage:
             temporary_path.unlink(missing_ok=True)
             raise
 
-    def write_workspace_export(
-        self,
-        session_id: str,
-        export_id: str,
-        documents: dict,
-        sources: dict[str, Path],
-        check_cancelled: Callable[[], None],
-    ) -> Path:
+    def write_workspace_export(self, session_id: str, export_id: str, documents: dict, sources: dict[str, Path], check_cancelled: Callable[[], None]) -> Path:
         export_directory = self.root / session_id / "exports"
         export_directory.mkdir(parents=True, exist_ok=True)
         destination = export_directory / f"{export_id}.sleepwalker.zip"

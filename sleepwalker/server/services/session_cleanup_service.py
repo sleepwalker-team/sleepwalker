@@ -2,6 +2,7 @@ from threading import RLock
 
 from .annotation_service import AnnotationService
 from .job_service import JobService
+from .plotly_service import PlotlyService
 from .session_service import SessionService
 from ..storage.temporary_storage import TemporaryStorage
 from ..stores.export_store import ExportStore
@@ -18,6 +19,7 @@ class SessionCleanupService:
         prediction_store: PredictionStore,
         annotation_service: AnnotationService,
         export_store: ExportStore,
+        plotly_service: PlotlyService | None = None,
     ) -> None:
         self.session_service = session_service
         self.job_service = job_service
@@ -25,29 +27,37 @@ class SessionCleanupService:
         self.prediction_store = prediction_store
         self.annotation_service = annotation_service
         self.export_store = export_store
+        self.plotly_service = plotly_service
         self._pending_deletions: set[str] = set()
         self._lock = RLock()
 
     def cleanup_expired(self) -> list[str]:
         deleted_session_ids = []
+        now = self.session_service.clock()
 
-        for session in self.session_service.list_expired():
-            if self.job_service.has_active_job(session.id):
-                continue
+        with self._lock:
+            for session in self.session_service.list_expired(at=now):
+                if self.job_service.has_active_job(session.id):
+                    continue
 
-            if self.delete_session(session.id):
-                deleted_session_ids.append(session.id)
+                # A finishing job may have renewed the deadline after listing.
+                if session.expires_at > now:
+                    continue
+
+                if self.delete_session(session.id):
+                    deleted_session_ids.append(session.id)
 
         return deleted_session_ids
 
     def delete_session(self, session_id: str) -> bool:
-        session = self.session_service.delete(session_id)
+        with self._lock:
+            session = self.session_service.delete(session_id)
 
-        if session is None:
-            return False
+            if session is None:
+                return False
 
-        self._delete_session_resources(session_id)
-        return True
+            self._delete_session_resources(session_id)
+            return True
 
     def request_delete(self, session_id: str) -> bool:
         with self._lock:
@@ -55,6 +65,9 @@ class SessionCleanupService:
 
             if session is None:
                 return False
+
+            if self.plotly_service is not None:
+                self.plotly_service.delete_session(session_id)
 
             active_jobs = self.job_service.list_active_jobs(session_id)
 
@@ -88,6 +101,8 @@ class SessionCleanupService:
             return True
 
     def _delete_session_resources(self, session_id: str) -> None:
+        if self.plotly_service is not None:
+            self.plotly_service.delete_session(session_id)
         self.storage.delete_session(session_id)
         self.prediction_store.delete_session(session_id)
         self.annotation_service.delete_session(session_id)

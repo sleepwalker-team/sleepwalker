@@ -1,0 +1,519 @@
+{
+  "capabilities": [
+    "classification"
+  ],
+  "classification": {
+    "tasks": {
+      "arousal": {
+        "classes": [
+          "no_arousal",
+          "arousal"
+        ],
+        "default": "no_arousal",
+        "n_steps": 40,
+        "percentage": 0.5,
+        "soft_boundaries": true,
+        "target_offset": "0 days 00:00:20",
+        "target_resolution": "0 days 00:00:01"
+      },
+      "breathing": {
+        "classes": [
+          "apnea",
+          "hypopnea",
+          "regular breathing"
+        ],
+        "default": "regular breathing",
+        "n_steps": 8,
+        "percentage": 0.5,
+        "soft_boundaries": true,
+        "target_offset": "0 days 00:00:20",
+        "target_resolution": "0 days 00:00:05"
+      },
+      "desaturation": {
+        "classes": [
+          "desaturation",
+          "no desaturation"
+        ],
+        "default": "no desaturation",
+        "n_steps": 8,
+        "percentage": 0.5,
+        "soft_boundaries": true,
+        "target_offset": "0 days 00:00:00",
+        "target_resolution": "0 days 00:00:10"
+      },
+      "sleep": {
+        "classes": [
+          "wake",
+          "n1",
+          "n2",
+          "n3",
+          "rem"
+        ],
+        "default": null,
+        "n_steps": 1,
+        "percentage": 0.5,
+        "soft_boundaries": false,
+        "target_offset": "0 days 00:00:25",
+        "target_resolution": "0 days 00:00:30"
+      }
+    },
+    "type": "multitask"
+  },
+  "config": {
+    "data": {
+      "channels": [],
+      "event_mapping": {
+        "apnea": "apnea",
+        "arousal": "arousal",
+        "central-apnea": "apnea",
+        "desaturation": "desaturation",
+        "hypopnea": "hypopnea",
+        "mixed-apnea": "apnea",
+        "n1": "n1",
+        "n2": "n2",
+        "n3": "n3",
+        "obstructive-apnea": "apnea",
+        "rem": "rem",
+        "wake": "wake"
+      },
+      "files": {
+        "train": {
+          "fold": "holdout",
+          "name": "sleepwalker.trainer.utils.splits.load_files",
+          "partition": "validation",
+          "path": "data/hsp-split.yml"
+        }
+      },
+      "label": "HSP",
+      "name": "sleepwalker.datasets.HSP.HSP",
+      "num_workers": 32,
+      "prepare_patient": {
+        "keep_events": [
+          "wake",
+          "n1",
+          "n2",
+          "n3",
+          "rem"
+        ],
+        "labels": [
+          "wake",
+          "n1",
+          "n2",
+          "n3",
+          "rem"
+        ],
+        "min_seconds": 15,
+        "name": "sleepwalker.training.callbacks.prepare_patient_events"
+      },
+      "prepare_target": {
+        "name": "sleepwalker.trainer.utils.targets.prepare_multitask_target",
+        "task_config": {
+          "arousal": {
+            "class_counts": {
+              "arousal": 86141,
+              "no_arousal": 9509827
+            },
+            "default": "no_arousal",
+            "labels": [
+              "no_arousal",
+              "arousal"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 40,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "20s",
+            "target_resolution": "1s"
+          },
+          "breathing": {
+            "class_counts": {
+              "apnea": 64123,
+              "hypopnea": 78825,
+              "regular breathing": 1772702
+            },
+            "default": "regular breathing",
+            "labels": [
+              "apnea",
+              "hypopnea",
+              "regular breathing"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 8,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "20s",
+            "target_resolution": "5s"
+          },
+          "desaturation": {
+            "class_counts": {
+              "desaturation": 104047,
+              "no desaturation": 1794418
+            },
+            "default": "no desaturation",
+            "labels": [
+              "desaturation",
+              "no desaturation"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 8,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "0s",
+            "target_resolution": "10s"
+          },
+          "sleep": {
+            "class_counts": {
+              "n1": 31027,
+              "n2": 113132,
+              "n3": 30822,
+              "rem": 30763,
+              "wake": 44256
+            },
+            "default": null,
+            "labels": [
+              "wake",
+              "n1",
+              "n2",
+              "n3",
+              "rem"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 1,
+            "target_offset": "25s",
+            "target_resolution": "30s"
+          }
+        }
+      },
+      "remove_unmapped_events": true,
+      "sample_frequency": 1,
+      "stride": "30s",
+      "total_input": "80s"
+    },
+    "model": {
+      "context_init_std": 0.005,
+      "experts": {
+        "name": "sleepwalker.models.StackedClassifierModel.load_aligned_classifiers",
+        "outputs": {
+          "arousal": {
+            "class_counts": {
+              "arousal": 86141,
+              "no_arousal": 9509827
+            },
+            "default": "no_arousal",
+            "labels": [
+              "no_arousal",
+              "arousal"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 40,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "20s",
+            "target_resolution": "1s"
+          },
+          "breathing": {
+            "class_counts": {
+              "apnea": 64123,
+              "hypopnea": 78825,
+              "regular breathing": 1772702
+            },
+            "default": "regular breathing",
+            "labels": [
+              "apnea",
+              "hypopnea",
+              "regular breathing"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 8,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "20s",
+            "target_resolution": "5s"
+          },
+          "desaturation": {
+            "class_counts": {
+              "desaturation": 104047,
+              "no desaturation": 1794418
+            },
+            "default": "no desaturation",
+            "labels": [
+              "desaturation",
+              "no desaturation"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 8,
+            "soft_boundaries": true,
+            "step_mask": {
+              "columns": [
+                "n1",
+                "n2",
+                "n3",
+                "rem"
+              ],
+              "percentage": 0.5
+            },
+            "target_offset": "0s",
+            "target_resolution": "10s"
+          },
+          "sleep": {
+            "class_counts": {
+              "n1": 31027,
+              "n2": 113132,
+              "n3": 30822,
+              "rem": 30763,
+              "wake": 44256
+            },
+            "default": null,
+            "labels": [
+              "wake",
+              "n1",
+              "n2",
+              "n3",
+              "rem"
+            ],
+            "loss_function": "torch.nn.functional.cross_entropy",
+            "loss_mode": "inverse-log",
+            "sequence_len": 1,
+            "target_offset": "25s",
+            "target_resolution": "30s"
+          }
+        },
+        "packages": {
+          "arousal": "models/sw-arousal",
+          "breathing": "models/sw-breathing",
+          "desaturation": "models/sw-desaturation",
+          "sleep": "models/sw-sleep"
+        }
+      },
+      "name": "sleepwalker.models.StackedClassifierModel.StackedClassifierModel",
+      "regime": "joint"
+    },
+    "model_statistics": {
+      "communication_scalars_per_window": 559,
+      "total_parameters": 8149721,
+      "trainable_parameters": 8149721
+    },
+    "run": {
+      "batch_size": 32,
+      "experiment_name": "joint-hsp-development",
+      "expert_task": "multitask",
+      "log_path": "/raid/sleepwalker/results/recording-normalized/train",
+      "model_name": "stacked-classifier-joint-sleepwalker",
+      "n_samples": 250000,
+      "num_workers_dataloader": 16,
+      "package_path": "models/joint",
+      "patient_group_size": 16,
+      "patients_per_epoch": 512,
+      "tags": {
+        "dataset": "HSP",
+        "phase": "development",
+        "regime": "joint"
+      },
+      "telemetry": {
+        "interval": 1.0
+      },
+      "test_repeats": [],
+      "use_mlflow": false
+    },
+    "run_id": "train-joint",
+    "seed": 17,
+    "trainer": {
+      "epochs": 10,
+      "eval_every": 0,
+      "log_batches": false,
+      "lr_scheduler": {
+        "max_lr": 0.0005,
+        "name": "torch.optim.lr_scheduler.OneCycleLR",
+        "pct_start": 0.1
+      },
+      "name": "sleepwalker.trainer.MultiLabelTrainer.MultiLabelTrainer",
+      "optimizer": {
+        "lr": 1e-05,
+        "name": "torch.optim.AdamW",
+        "weight_decay": 0.0001
+      },
+      "return_best": false,
+      "save_every": 2,
+      "task_config": {
+        "arousal": {
+          "class_counts": {
+            "arousal": 86141,
+            "no_arousal": 9509827
+          },
+          "default": "no_arousal",
+          "labels": [
+            "no_arousal",
+            "arousal"
+          ],
+          "loss_function": "torch.nn.functional.cross_entropy",
+          "loss_mode": "inverse-log",
+          "sequence_len": 40,
+          "soft_boundaries": true,
+          "step_mask": {
+            "columns": [
+              "n1",
+              "n2",
+              "n3",
+              "rem"
+            ],
+            "percentage": 0.5
+          },
+          "target_offset": "20s",
+          "target_resolution": "1s"
+        },
+        "breathing": {
+          "class_counts": {
+            "apnea": 64123,
+            "hypopnea": 78825,
+            "regular breathing": 1772702
+          },
+          "default": "regular breathing",
+          "labels": [
+            "apnea",
+            "hypopnea",
+            "regular breathing"
+          ],
+          "loss_function": "torch.nn.functional.cross_entropy",
+          "loss_mode": "inverse-log",
+          "sequence_len": 8,
+          "soft_boundaries": true,
+          "step_mask": {
+            "columns": [
+              "n1",
+              "n2",
+              "n3",
+              "rem"
+            ],
+            "percentage": 0.5
+          },
+          "target_offset": "20s",
+          "target_resolution": "5s"
+        },
+        "desaturation": {
+          "class_counts": {
+            "desaturation": 104047,
+            "no desaturation": 1794418
+          },
+          "default": "no desaturation",
+          "labels": [
+            "desaturation",
+            "no desaturation"
+          ],
+          "loss_function": "torch.nn.functional.cross_entropy",
+          "loss_mode": "inverse-log",
+          "sequence_len": 8,
+          "soft_boundaries": true,
+          "step_mask": {
+            "columns": [
+              "n1",
+              "n2",
+              "n3",
+              "rem"
+            ],
+            "percentage": 0.5
+          },
+          "target_offset": "0s",
+          "target_resolution": "10s"
+        },
+        "sleep": {
+          "class_counts": {
+            "n1": 31027,
+            "n2": 113132,
+            "n3": 30822,
+            "rem": 30763,
+            "wake": 44256
+          },
+          "default": null,
+          "labels": [
+            "wake",
+            "n1",
+            "n2",
+            "n3",
+            "rem"
+          ],
+          "loss_function": "torch.nn.functional.cross_entropy",
+          "loss_mode": "inverse-log",
+          "sequence_len": 1,
+          "target_offset": "25s",
+          "target_resolution": "30s"
+        }
+      },
+      "warmup_device": "cpu"
+    }
+  },
+  "dataset_class": "sleepwalker.datasets.PairedDataset.PairedDataset",
+  "format_version": "sleepwalker-packaged-model-v1",
+  "git_commit": "8db9e8dd19f60ef40abce45103a26b803ea69179",
+  "input_channels": {
+    "arousal": [
+      "EEG",
+      "EOG",
+      "Chin EMG",
+      "ECG"
+    ],
+    "breathing": [
+      "Abdomen",
+      "Chest",
+      "Airflow",
+      "SpO2"
+    ],
+    "desaturation": [
+      "SpO2"
+    ],
+    "sleep": [
+      "eeg"
+    ]
+  },
+  "model_class": "sleepwalker.models.StackedClassifierModel.StackedClassifierModel",
+  "name": "joint-hsp-development",
+  "payload": "model.pt",
+  "sha256": "c6ffbf0dfc3c42f440c1a183ad3998f93545224311a4a81ae8534495f14d5518",
+  "task": "multitask"
+}

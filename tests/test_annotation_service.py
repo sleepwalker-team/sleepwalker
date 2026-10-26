@@ -79,3 +79,20 @@ def test_annotation_service_deletes_session_edits() -> None:
     assert service.delete_session("sess-test") == 1
     assert service.store.get(session_edit.id) is None
     assert service.store.get(other_edit.id) is other_edit
+
+
+def test_annotation_snapshot_keeps_history_and_resolved_state_consistent() -> None:
+    service = AnnotationService(AnnotationStore())
+    label = service.set_label("sess-test", "sleep_stage", 30.0, "n2")
+    event = service.add_event("sess-test", "arousal", 12.0, 18.0, "arousal")
+    snapshot = service.snapshot("sess-test")
+    service.set_label("sess-test", "sleep_stage", 30.0, "n3")
+    service.delete_event("sess-test", event.event_id)
+
+    assert snapshot.edits == [label, event]
+    assert snapshot.labels == [label]
+    assert snapshot.events == [event]
+    current = service.snapshot("sess-test")
+    assert len(current.edits) == 4
+    assert current.labels[0].label == "n3"
+    assert current.events == []

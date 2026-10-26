@@ -345,7 +345,12 @@ def test_import_http_lifecycle_and_repeated_imports(tmp_path):
             assert prediction.json()["predictions"] == expected["tasks"][0]["predictions"]
             signal = client.get(f"/api/v1/sessions/{session_id}/signals/EEG?start=0&end=1&max_points=10")
             assert signal.status_code == 200
-            edit_ids.append({edit.id for edit in app.state.annotation_service.list_edits(session_id)})
+            annotations = client.get(f"/api/v1/sessions/{session_id}/annotations")
+            assert annotations.status_code == 200
+            assert len(annotations.json()["edits"]) == 3
+            assert len(annotations.json()["events"]) == 1
+            assert annotations.json()["labels"] == []
+            edit_ids.append({edit["edit_id"] for edit in annotations.json()["edits"]})
             exported = client.post(
                 f"/api/v1/sessions/{session_id}/exports",
                 json={"format": "sleepwalker", "mode": "workspace"},
@@ -367,7 +372,7 @@ def test_import_http_rejects_invalid_zip_and_cleans_upload(tmp_path):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_BUNDLE"
     assert app.state.session_service.store.list() == []
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 def test_import_http_rejects_unsupported_version(tmp_path):
@@ -390,4 +395,4 @@ def test_import_http_rejects_oversized_upload(tmp_path):
         response = client.post("/api/v1/sessions/import", files={"bundle": ("large.zip", b"12345")})
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}

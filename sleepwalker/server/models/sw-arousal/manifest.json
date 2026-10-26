@@ -1,0 +1,279 @@
+{
+  "capabilities": [
+    "embeddings",
+    "classification"
+  ],
+  "classification": {
+    "classes": [
+      "no_arousal",
+      "arousal"
+    ],
+    "sequence_len": 40,
+    "target_offset": "0 days 00:00:10",
+    "target_resolution": "0 days 00:00:40",
+    "type": "single-head-multiclass"
+  },
+  "config": {
+    "data": {
+      "channels": [
+        {
+          "logical_name": "EEG",
+          "physical_names": [
+            "C3-M2",
+            "C4-M1",
+            "F3-M2",
+            "F4-M1",
+            "O1-M2",
+            "O2-M1",
+            "CZ-M2",
+            "CZ-M1",
+            "C3-M1",
+            "C4-M2",
+            "F3-M1",
+            "F4-M2",
+            "O1-M1",
+            "O2-M2"
+          ],
+          "preprocessors": [
+            {
+              "name": "sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit",
+              "target": "uV"
+            },
+            {
+              "fs": 100,
+              "name": "sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer"
+            }
+          ],
+          "read_mode": "physical"
+        },
+        {
+          "logical_name": "EOG",
+          "physical_names": [
+            "E1-M2",
+            "E2-M1",
+            "E2-M2",
+            "E1",
+            "E2",
+            "Eye Up",
+            "Eye Down"
+          ],
+          "preprocessors": [
+            {
+              "name": "sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit",
+              "target": "uV"
+            },
+            {
+              "fs": 100,
+              "name": "sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer"
+            }
+          ],
+          "read_mode": "physical"
+        },
+        {
+          "logical_name": "Chin EMG",
+          "physical_names": [
+            "CHIN1-CHIN2",
+            "Chin1-Chin2",
+            "CHIN1-CHIN3",
+            "Chin1-Chin3",
+            "CHIN2-CHIN3",
+            "Chin2-Chin3",
+            "Chin3-Chin2",
+            "Chin3",
+            "Chin2",
+            "CHIN1",
+            "CHIN2",
+            "CHIN3",
+            "CHIN",
+            "CHINz",
+            "EMG"
+          ],
+          "preprocessors": [
+            {
+              "clip_range": null,
+              "fs": 100,
+              "highcut": 45,
+              "lowcut": 10,
+              "name": "sleepwalker.datasets.normalizer.SignalFilterNormalizer.SignalFilterNormalizer",
+              "normalize": false,
+              "notch_freq": null,
+              "notch_q": 30.0
+            },
+            {
+              "name": "sleepwalker.datasets.normalizer.RecordingNormalizer.RecordingZScore"
+            }
+          ],
+          "read_mode": "digital"
+        },
+        {
+          "logical_name": "ECG",
+          "physical_names": [
+            "EKG",
+            "ECG",
+            "ECG-LA",
+            "ECG-RA",
+            "ECG-LL",
+            "ECG-V1",
+            "ECG-V2"
+          ],
+          "preprocessors": [
+            {
+              "fs": 100,
+              "highcut": 45,
+              "lowcut": 0.5,
+              "name": "sleepwalker.datasets.normalizer.SignalFilterNormalizer.SignalFilterNormalizer",
+              "normalize": false,
+              "notch_freq": null,
+              "notch_q": 30.0
+            },
+            {
+              "name": "sleepwalker.datasets.normalizer.RecordingNormalizer.RecordingZScore"
+            }
+          ],
+          "read_mode": "digital"
+        }
+      ],
+      "event_mapping": {
+        "arousal": "arousal",
+        "n1": "sleep",
+        "n2": "sleep",
+        "n3": "sleep",
+        "rem": "sleep"
+      },
+      "files": "data/hsp-split.yml",
+      "label": "HSP",
+      "name": "sleepwalker.datasets.HSP.HSP",
+      "num_workers": 32,
+      "output_classes": [
+        "no_arousal",
+        "arousal"
+      ],
+      "prepare_patient": {
+        "keep_events": [
+          "sleep"
+        ],
+        "labels": [
+          "sleep"
+        ],
+        "min_seconds": 15,
+        "name": "sleepwalker.training.callbacks.prepare_patient_events"
+      },
+      "prepare_target": {
+        "name": "sleepwalker.trainer.utils.targets.prepare_multiclass_target",
+        "sequence_len": 40,
+        "soft_boundaries": true,
+        "step_mask": {
+          "columns": [
+            "sleep"
+          ],
+          "percentage": 0.5
+        },
+        "target_classes": [
+          "no_arousal",
+          "arousal"
+        ],
+        "target_offset": "10s",
+        "target_resolution": "40s"
+      },
+      "sample_frequency": 100,
+      "strict": false,
+      "stride": "40s",
+      "total_input": "60s"
+    },
+    "model": {
+      "activation": "elu",
+      "channel": [
+        64,
+        128,
+        128,
+        256
+      ],
+      "dropout_p": 0,
+      "epoch_len": "1s",
+      "kernel": [
+        5,
+        5,
+        3,
+        3
+      ],
+      "maxpool": [
+        5,
+        5,
+        3,
+        3
+      ],
+      "mlp_size": 512,
+      "name": "sleepwalker.models.UTime.UTime",
+      "norm": "channel"
+    },
+    "model_statistics": {
+      "total_parameters": 1439850,
+      "trainable_parameters": 1439850
+    },
+    "run": {
+      "batch_size": 128,
+      "experiment_name": "arousal-hsp-development",
+      "expert_task": "arousal",
+      "log_path": "/raid/sleepwalker/results/recording-normalized/train",
+      "model_name": "sleepwalker",
+      "n_samples": 250000,
+      "num_workers_dataloader": 16,
+      "package_path": "models/sw-arousal",
+      "patients_per_epoch": 512,
+      "tags": {
+        "dataset": "HSP",
+        "phase": "development",
+        "task": "arousal"
+      },
+      "telemetry": {
+        "interval": 1.0
+      },
+      "test_repeats": [
+        1
+      ],
+      "use_mlflow": false
+    },
+    "run_id": "train-arousal",
+    "seed": 17,
+    "trainer": {
+      "class_counts": {
+        "arousal": 86141,
+        "no_arousal": 9509827
+      },
+      "epochs": 100,
+      "loss_function": "torch.nn.functional.cross_entropy",
+      "loss_mode": "inverse-log",
+      "lr_scheduler": {
+        "final_div_factor": 100.0,
+        "max_lr": 0.0005,
+        "name": "torch.optim.lr_scheduler.OneCycleLR",
+        "pct_start": 0.1
+      },
+      "name": "sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer",
+      "optimizer": {
+        "lr": 1e-05,
+        "name": "torch.optim.AdamW",
+        "weight_decay": 0.0001
+      },
+      "return_best": false,
+      "save_every": 10,
+      "sequence_len": 40,
+      "target_offset": "10s",
+      "target_resolution": "40s"
+    }
+  },
+  "dataset_class": "sleepwalker.datasets.UnlabelledDataset.UnlabelledDataset",
+  "format_version": "sleepwalker-packaged-model-v1",
+  "git_commit": "8db9e8dd19f60ef40abce45103a26b803ea69179",
+  "input_channels": [
+    "EEG",
+    "EOG",
+    "Chin EMG",
+    "ECG"
+  ],
+  "model_class": "sleepwalker.models.UTime.UTime",
+  "name": "arousal-hsp-development",
+  "payload": "model.pt",
+  "sha256": "8a0b5890edec3c4ca1504dc56ec1f8dd938778e5bad6916ab704aaea5d253d81",
+  "task": "arousal"
+}

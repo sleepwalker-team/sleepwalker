@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 
 import pandas as pd
@@ -189,3 +190,134 @@ def test_add_event_rejects_epoch_task() -> None:
             "task_kind": "epoch",
         },
     }
+
+
+def test_get_annotations_returns_empty_lists_for_unannotated_session() -> None:
+    app, session, _service = create_annotation_app()
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}/annotations")
+
+    assert response.status_code == 200
+    assert response.json() == {"edits": [], "labels": [], "events": []}
+
+
+def test_get_annotations_resolves_label_history_without_changing_model_predictions() -> None:
+    app, session, _service = create_annotation_app()
+    prediction_store = app.state.prediction_store
+    result = prediction_store.get_by_task(session.id, "sleep_stage")
+    prediction_store.delete_session(session.id)
+    prediction_store.add(replace(
+        result,
+        frame=pd.DataFrame({
+            "time": [45.0], "prob__wake": [0.05], "prob__n1": [0.05],
+            "prob__n2": [0.8], "prob__n3": [0.05], "prob__rem": [0.05],
+        }),
+    ))
+    url = f"/api/v1/sessions/{session.id}/annotations"
+
+    with TestClient(app) as client:
+        original_predictions = client.get(f"/api/v1/sessions/{session.id}/predictions/sleep_stage").json()
+        first = client.post(url, json={
+            "operation": "set_label", "task": "sleep_stage", "start": 30.0, "label": "n1",
+        }).json()
+        second = client.post(url, json={
+            "operation": "set_label", "task": "sleep_stage", "start": 30.0, "label": "n3",
+        }).json()
+        before_revert = client.get(url).json()
+        assert before_revert["edits"] == [first, second]
+        assert before_revert["labels"] == [second]
+        assert before_revert["events"] == []
+
+        revert_second = client.post(url, json={"operation": "revert", "edit_id": second["edit_id"]}).json()
+        after_revert = client.get(url).json()
+        assert after_revert["edits"] == [first, second, revert_second]
+        assert after_revert["labels"] == [first]
+
+        revert_first = client.post(url, json={"operation": "revert", "edit_id": first["edit_id"]}).json()
+        fully_reverted = client.get(url).json()
+        assert fully_reverted["labels"] == []
+        assert fully_reverted["edits"] == [first, second, revert_second, revert_first]
+        after_predictions = client.get(f"/api/v1/sessions/{session.id}/predictions/sleep_stage").json()
+        assert after_predictions == original_predictions
+        assert original_predictions["predictions"][0]["label"] == "n2"
+
+
+@pytest.mark.parametrize("kind", [PredictionKind.CONTINUOUS, PredictionKind.EVENT])
+def test_get_annotations_resolves_event_deletions_and_reverts(kind) -> None:
+    app, session, _service = create_annotation_app(
+        task="arousal", classes=("no_arousal", "arousal"), kind=kind,
+    )
+    url = f"/api/v1/sessions/{session.id}/annotations"
+    with TestClient(app) as client:
+        first = client.post(url, json={
+            "operation": "add_event", "task": "arousal", "start": 10.0, "end": 20.0, "label": "arousal",
+        }).json()
+        second = client.post(url, json={
+            "operation": "add_event", "task": "arousal", "start": 30.0, "end": 40.0, "label": "arousal",
+        }).json()
+        deleted = client.post(url, json={
+            "operation": "delete_event", "task": "arousal", "event_id": first["event_id"],
+        }).json()
+        after_delete = client.get(url).json()
+        assert after_delete["events"] == [second]
+        assert after_delete["labels"] == []
+        assert after_delete["edits"] == [first, second, deleted]
+
+        revert_delete = client.post(url, json={"operation": "revert", "edit_id": deleted["edit_id"]}).json()
+        assert client.get(url).json()["events"] == [first, second]
+        revert_second = client.post(url, json={"operation": "revert", "edit_id": second["edit_id"]}).json()
+        after_reverts = client.get(url).json()
+        assert after_reverts["events"] == [first]
+        assert after_reverts["edits"] == [first, second, deleted, revert_delete, revert_second]
+
+
+def test_get_annotations_only_returns_requested_session_data() -> None:
+    app, session, service = create_annotation_app()
+    local = service.set_label(session.id, "sleep_stage", 0.0, "n1")
+    other = app.state.session_service.create([])
+    other.state = SessionState.READY
+    foreign_label = service.set_label(other.id, "sleep_stage", 0.0, "n3")
+    foreign_event = service.add_event(other.id, "arousal", 1.0, 2.0, "arousal")
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}/annotations")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [edit["edit_id"] for edit in body["edits"]] == [local.id]
+    assert body["labels"] == body["edits"]
+    assert body["events"] == []
+    assert foreign_label.id not in response.text
+    assert foreign_event.id not in response.text
+
+
+@pytest.mark.parametrize("state", [SessionState.CREATED, SessionState.PROCESSING, SessionState.FAILED])
+def test_get_annotations_rejects_session_that_is_not_ready(state) -> None:
+    app, session, _service = create_annotation_app()
+    session.state = state
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}/annotations")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "INVALID_SESSION_STATE"
+    assert response.json()["error"]["details"] == {"state": state.value}
+
+
+def test_get_annotations_rejects_unknown_session() -> None:
+    with TestClient(create_app()) as client:
+        response = client.get("/api/v1/sessions/sess-unknown/annotations")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+def test_get_annotations_rejects_deleted_session_and_removes_history() -> None:
+    app, session, service = create_annotation_app()
+    service.set_label(session.id, "sleep_stage", 0.0, "n1")
+    with TestClient(app) as client:
+        assert client.delete(f"/api/v1/sessions/{session.id}").status_code == 204
+        response = client.get(f"/api/v1/sessions/{session.id}/annotations")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
+    assert service.list_edits(session.id) == []

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -12,17 +13,18 @@ class AnnotationEditNotFoundError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class AnnotationSnapshot:
+    edits: list[AnnotationEdit]
+    labels: list[AnnotationEdit]
+    events: list[AnnotationEdit]
+
+
 class AnnotationService:
     def __init__(self, store: AnnotationStore) -> None:
         self.store = store
 
-    def set_label(
-        self,
-        session_id: str,
-        task: str,
-        start: float,
-        label: str,
-    ) -> AnnotationEdit:
+    def set_label( self, session_id: str, task: str, start: float, label: str) -> AnnotationEdit:
         return self._add_edit(
             session_id=session_id,
             operation=AnnotationOperation.SET_LABEL,
@@ -31,14 +33,7 @@ class AnnotationService:
             label=label,
         )
 
-    def add_event(
-        self,
-        session_id: str,
-        task: str,
-        start: float,
-        end: float,
-        label: str,
-    ) -> AnnotationEdit:
+    def add_event(self, session_id: str, task: str, start: float, end: float, label: str,) -> AnnotationEdit:
         return self._add_edit(
             session_id=session_id,
             operation=AnnotationOperation.ADD_EVENT,
@@ -50,15 +45,8 @@ class AnnotationService:
         )
 
     def delete_event(self, session_id: str, event_id: str) -> AnnotationEdit:
-        event = next(
-            (
-                event
-                for event in self.current_events(session_id)
-                if event.event_id == event_id
-            ),
-            None,
-        )
-
+        event = next((event for event in self.current_events(session_id) if event.event_id == event_id), None,)
+        
         if event is None:
             raise AnnotationEventNotFoundError(event_id)
 
@@ -88,36 +76,39 @@ class AnnotationService:
         )
 
     def current_events(self, session_id: str) -> list[AnnotationEdit]:
+        return self.snapshot(session_id).events
+
+    def current_labels(self, session_id: str) -> list[AnnotationEdit]:
+        return self.snapshot(session_id).labels
+
+    def snapshot(self, session_id: str) -> AnnotationSnapshot:
         edits = self.store.list_for_session(session_id)
-        reverted_ids = self._reverted_edit_ids(session_id)
+        reverted_ids = {
+            edit.reverted_edit_id for edit in edits
+            if edit.operation == AnnotationOperation.REVERT and edit.reverted_edit_id is not None
+        }
         deleted_event_ids = {
             edit.event_id
             for edit in edits
-            if edit.operation == AnnotationOperation.DELETE_EVENT
-            and edit.id not in reverted_ids
+            if edit.operation == AnnotationOperation.DELETE_EVENT and edit.id not in reverted_ids
         }
-        return [
+        events = [
             edit
             for edit in edits
-            if edit.operation == AnnotationOperation.ADD_EVENT
-            and edit.id not in reverted_ids
+            if edit.operation == AnnotationOperation.ADD_EVENT and edit.id not in reverted_ids 
             and edit.event_id not in deleted_event_ids
         ]
 
-    def current_labels(self, session_id: str) -> list[AnnotationEdit]:
-        reverted_ids = self._reverted_edit_ids(session_id)
         current: dict[tuple[str, float], AnnotationEdit] = {}
 
-        for edit in self.store.list_for_session(session_id):
+        for edit in edits:
             if (
                 edit.operation == AnnotationOperation.SET_LABEL
-                and edit.id not in reverted_ids
-                and edit.task is not None
-                and edit.start is not None
+                and edit.id not in reverted_ids and edit.task is not None and edit.start is not None
             ):
                 current[(edit.task, edit.start)] = edit
 
-        return list(current.values())
+        return AnnotationSnapshot(edits=edits, labels=list(current.values()), events=events)
 
     def list_edits(self, session_id: str) -> list[AnnotationEdit]:
         return self.store.list_for_session(session_id)
@@ -130,12 +121,7 @@ class AnnotationService:
             and edit.reverted_edit_id is not None
         }
 
-    def _add_edit(
-        self,
-        session_id: str,
-        operation: AnnotationOperation,
-        **values,
-    ) -> AnnotationEdit:
+    def _add_edit( self, session_id: str, operation: AnnotationOperation, **values) -> AnnotationEdit:
         edit = AnnotationEdit(
             id=f"edit_{uuid4()}",
             session_id=session_id,

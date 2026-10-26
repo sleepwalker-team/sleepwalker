@@ -1,15 +1,24 @@
 import json
+import logging
 import math
+import re
 from collections.abc import Iterable
-from dataclasses import dataclass
-from json import JSONDecodeError
+from dataclasses import dataclass, field
 from pathlib import Path
-from zipfile import BadZipFile, ZipFile
+
+import pandas as pd
 
 from ..stores.prediction_store import PredictionKind
 
+logger = logging.getLogger(__name__)
+PACKAGE_FORMAT = "sleepwalker-packaged-model-v1"
+
 
 class InvalidModelPackageError(Exception):
+    pass
+
+
+class UnsupportedModelPackageError(InvalidModelPackageError):
     pass
 
 
@@ -24,133 +33,109 @@ class ModelInfo:
     output_resolution: float
     package_path: Path
     output_kind: PredictionKind = PredictionKind.EPOCH
+    channel_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    payload_sha256: str | None = None
 
 
-def _read_non_empty_string(model: dict, field: str) -> str:
-    value = model[field]
+def read_string(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise TypeError(f"Model field '{field}' must be a non-empty string.")
+        raise ValueError("Expected a non-empty string.")
     return value
 
 
-def _read_string_list(model: dict, field: str) -> tuple[str, ...]:
-    value = model[field]
-    if (
-        not isinstance(value, list)
-        or not value
-        or any(not isinstance(item, str) or not item.strip() for item in value)
-    ):
-        raise TypeError(
-            f"Model field '{field}' must be a non-empty list of strings."
-        )
-    return tuple(value)
-
-
-def _read_positive_number(model: dict, field: str) -> float:
-    value = model[field]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"Model field '{field}' must be a number.")
-
-    result = float(value)
-    if not math.isfinite(result) or result <= 0:
-        raise ValueError(f"Model field '{field}' must be positive.")
-    return result
-
-
-def _read_output_kind(model: dict) -> PredictionKind:
-    value = model.get("output_kind", PredictionKind.EPOCH.value)
-
-    try:
-        return PredictionKind(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Model field 'output_kind' must be one of: "
-            f"{', '.join(kind.value for kind in PredictionKind)}."
-        ) from exc
+def read_strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("Expected a non-empty list of strings.")
+    values = tuple(read_string(item) for item in value)
+    if len(set(values)) != len(values):
+        raise ValueError("Duplicate values are not allowed.")
+    return values
 
 
 def read_model_manifest(package_path: Path) -> ModelInfo:
+    """Read administrator-supplied JSON only; never deserialize weights in the API."""
     try:
-        with ZipFile(package_path, "r") as package:
-            metadata = json.loads(package.read("meta.json").decode("utf-8"))
-    except (
-        OSError,
-        BadZipFile,
-        KeyError,
-        UnicodeDecodeError,
-        JSONDecodeError,
-    ) as exc:
-        raise InvalidModelPackageError(
-            f"Invalid model package: {package_path.name}"
-        ) from exc
+        metadata = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict) or metadata.get("format_version") != PACKAGE_FORMAT:
+            raise InvalidModelPackageError(f"Unsupported model package format: {package_path.name}")
 
-    if (
-        not isinstance(metadata, dict)
-        or metadata.get("format") != "sleepwalker-swmodel-v1"
-    ):
-        raise InvalidModelPackageError(
-            f"Unsupported model package format: {package_path.name}"
-        )
+        contract = metadata["classification"]
+        if not isinstance(contract, dict):
+            raise ValueError("Missing classification contract.")
+        if contract.get("type") == "multitask":
+            raise UnsupportedModelPackageError(f"Multi-task package is not enabled yet: {package_path.name}")
+        if contract.get("type") != "single-head-multiclass":
+            raise ValueError("Unsupported classification contract.")
 
-    try:
-        model = metadata["model"]
-        if not isinstance(model, dict):
-            raise TypeError("The model field must be an object.")
+        name = read_string(metadata["name"])
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is None:
+            raise ValueError("Package name must also be a URL-safe model ID.")
+        sequence_len = contract["sequence_len"]
+        if isinstance(sequence_len, bool) or not isinstance(sequence_len, int) or sequence_len <= 0:
+            raise ValueError("Classification sequence_len must be a positive integer.")
+        resolution = pd.to_timedelta(read_string(contract["target_resolution"])).total_seconds() / sequence_len
+        if not math.isfinite(resolution) or resolution <= 0:
+            raise ValueError("Classification resolution must be positive.")
+
+        channels = read_strings(metadata["input_channels"])
+        channel_configs = metadata["config"]["data"]["channels"]
+        if not isinstance(channel_configs, list) or len(channel_configs) != len(channels):
+            raise ValueError("Invalid channel configuration.")
+        aliases = {
+            read_string(channel["logical_name"]): read_strings(channel["physical_names"])
+            for channel in channel_configs
+        }
+        if tuple(aliases) != channels:
+            raise ValueError("Channel configuration must match logical input channels in order.")
+        capabilities = read_strings(metadata["capabilities"])
+        if "classification" not in capabilities:
+            raise ValueError("Package does not declare classification capability.")
+
+        payload = read_string(metadata["payload"])
+        payload_path = package_path / payload
+        if Path(payload).name != payload or "\\" in payload or not payload_path.resolve().is_relative_to(package_path.resolve()):
+            raise ValueError("Payload must be a file inside its model package.")
+        if not payload_path.is_file():
+            raise ValueError("Model payload is missing.")
+        checksum = read_string(metadata["sha256"])
+        if re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+            raise ValueError("Invalid payload SHA256 digest.")
 
         return ModelInfo(
-            id=_read_non_empty_string(model, "id"),
-            name=_read_non_empty_string(model, "name"),
-            task=_read_non_empty_string(model, "task"),
-            classes=_read_string_list(model, "classes"),
-            input_channels=_read_string_list(model, "input_channels"),
-            capabilities=_read_string_list(model, "capabilities"),
-            output_resolution=_read_positive_number(model, "output_resolution"),
-            package_path=package_path,
-            output_kind=_read_output_kind(model),
+            id=name, name=name, task=read_string(metadata["task"]),
+            classes=read_strings(contract["classes"]), input_channels=channels, capabilities=capabilities,
+            output_resolution=resolution, package_path=package_path,
+            channel_aliases=aliases, payload_sha256=checksum,
         )
-
-    except (KeyError, TypeError, ValueError) as exc:
-        raise InvalidModelPackageError(
-            f"Invalid model metadata: {package_path.name}"
-        ) from exc
+    except (OSError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise InvalidModelPackageError(f"Invalid model metadata: {package_path.name}") from exc
 
 
 class ModelRegistry:
-    def __init__(
-        self,
-        models: Iterable[ModelInfo] = (),
-    ) -> None:
+    def __init__(self, models: Iterable[ModelInfo] = ()) -> None:
         self._models: dict[str, ModelInfo] = {}
-
         for model in models:
             self.add(model)
 
     def add(self, model: ModelInfo) -> None:
         if model.id in self._models:
             raise ValueError(f"Model ID is already registered: {model.id}")
-
         self._models[model.id] = model
 
     def get(self, model_id: str) -> ModelInfo | None:
         return self._models.get(model_id)
 
     def list(self) -> list[ModelInfo]:
-        return sorted(
-            self._models.values(),
-            key=lambda model: model.id,
-        )
+        return sorted(self._models.values(), key=lambda model: model.id)
 
 
 def load_model_registry(model_directory: Path) -> ModelRegistry:
     if not model_directory.is_dir():
-        raise ValueError(
-            f"Model directory does not exist: {model_directory}"
-        )
-
-    package_paths = sorted(
-        path
-        for path in model_directory.glob("*.swmodel")
-        if path.is_file()
-    )
-
-    return ModelRegistry(read_model_manifest(path) for path in package_paths)
+        raise ValueError(f"Model directory does not exist: {model_directory}")
+    registry = ModelRegistry()
+    for manifest in sorted(model_directory.glob("*/manifest.json")):
+        try:
+            registry.add(read_model_manifest(manifest.parent.resolve()))
+        except UnsupportedModelPackageError as exc:
+            logger.warning("%s", exc)
+    return registry

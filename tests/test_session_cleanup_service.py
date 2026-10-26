@@ -200,3 +200,28 @@ def test_cleanup_removes_export_metadata_and_file(tmp_path) -> None:
     assert cleanup_service.delete_session(session.id) is True
     assert export_store.get("export-test") is None
     assert not export_path.exists()
+
+
+def test_cleanup_rechecks_deadline_when_job_finishes_during_cleanup(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    sessions = SessionService(SessionStore(), clock=lambda: now)
+    jobs = JobService(JobStore(), on_completion=sessions.renew_after_job)
+    sessions.active_job_check = jobs.has_active_job
+    session = sessions.create([])
+    job = jobs.create(session.id, "inference")
+    jobs.mark_running(job.id, JobPhase.INFERENCE, "Running")
+    now += timedelta(hours=3)
+    original_check = jobs.has_active_job
+
+    def finish_then_check(session_id):
+        jobs.mark_succeeded(job.id)
+        return original_check(session_id)
+
+    monkeypatch.setattr(jobs, "has_active_job", finish_then_check)
+    cleanup = SessionCleanupService(
+        session_service=sessions, job_service=jobs,
+        storage=TemporaryStorage(tmp_path / "uploads"), prediction_store=PredictionStore(),
+        annotation_service=AnnotationService(AnnotationStore()), export_store=ExportStore(),
+    )
+    assert cleanup.cleanup_expired() == []
+    assert sessions.store.get(session.id) is session

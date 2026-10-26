@@ -81,6 +81,31 @@ def test_start_inference_creates_queued_job() -> None:
     assert runner.model_ids == [model.id]
 
 
+def test_start_inference_accepts_physical_signal_aliases() -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    session.state = SessionState.READY
+    session.signals = [SignalInfo(id="C3-M2", label="C3-M2", unit="uV", sample_rate=100)]
+    model = replace(create_model(), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
+    runner = SuccessfulInferenceRunner()
+    with TestClient(create_app(session_service=service, model_registry=ModelRegistry([model]), inference_runner=runner)) as client:
+        response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
+    assert response.status_code == 202
+    assert runner.model_ids == [model.id]
+
+
+def test_start_inference_does_not_accept_logical_name_instead_of_declared_aliases() -> None:
+    service = SessionService(SessionStore())
+    session = service.create(source_files=[])
+    session.state = SessionState.READY
+    session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=100)]
+    model = replace(create_model(), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
+    with TestClient(create_app(session_service=service, model_registry=ModelRegistry([model]), inference_runner=SuccessfulInferenceRunner())) as client:
+        response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MISSING_REQUIRED_CHANNEL"
+
+
 def test_start_inference_rejects_unknown_session() -> None:
     model = create_model()
 

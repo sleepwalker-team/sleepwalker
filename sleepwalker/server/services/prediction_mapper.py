@@ -37,10 +37,7 @@ class EventPrediction:
     probabilities: dict[str, float]
 
 
-def validate_prediction_result(
-    result: PredictionResult,
-    recording_start: datetime,
-) -> None:
+def validate_prediction_result(result: PredictionResult, recording_start: datetime) -> None:
     if result.kind == PredictionKind.EPOCH:
         map_epoch_predictions(result, recording_start)
     elif result.kind == PredictionKind.CONTINUOUS:
@@ -49,10 +46,7 @@ def validate_prediction_result(
         map_event_predictions(result, recording_start)
 
 
-def map_epoch_predictions(
-    result: PredictionResult,
-    recording_start: datetime,
-) -> list[EpochPrediction]:
+def map_epoch_predictions(result: PredictionResult, recording_start: datetime) -> list[EpochPrediction]:
     _require_kind(result, PredictionKind.EPOCH)
     half_resolution = result.resolution / 2.0
     predictions = []
@@ -71,10 +65,7 @@ def map_epoch_predictions(
     return predictions
 
 
-def map_continuous_predictions(
-    result: PredictionResult,
-    recording_start: datetime,
-) -> list[ContinuousPrediction]:
+def map_continuous_predictions(result: PredictionResult, recording_start: datetime) -> list[ContinuousPrediction]:
     _require_kind(result, PredictionKind.CONTINUOUS)
     return [
         ContinuousPrediction(
@@ -85,10 +76,7 @@ def map_continuous_predictions(
     ]
 
 
-def map_event_predictions(
-    result: PredictionResult,
-    recording_start: datetime,
-) -> list[EventPrediction]:
+def map_event_predictions(result: PredictionResult, recording_start: datetime) -> list[EventPrediction]:
     _require_kind(result, PredictionKind.EVENT)
     probability_columns = {
         label: _probability_column("", label)
@@ -127,10 +115,7 @@ def map_event_predictions(
     return sorted(predictions, key=lambda prediction: (prediction.start, prediction.end))
 
 
-def _map_probability_samples(
-    result: PredictionResult,
-    recording_start: datetime,
-) -> list[ProbabilitySample]:
+def _map_probability_samples(result: PredictionResult, recording_start: datetime) -> list[ProbabilitySample]:
     grouped: dict[float, list[dict[str, float]]] = {}
 
     for prefix, time_column in _prediction_prefixes(result):
@@ -168,10 +153,7 @@ def _map_probability_samples(
     ]
 
 
-def _read_probabilities(
-    row: pd.Series,
-    columns: dict[str, str],
-) -> dict[str, float]:
+def _read_probabilities(row: pd.Series, columns: dict[str, str]) -> dict[str, float]:
     probabilities = {
         label: float(row[column])
         for label, column in columns.items()

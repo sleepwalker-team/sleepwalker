@@ -6,11 +6,5 @@ from .model_registry import ModelInfo
 
 
 class InferenceRunner(Protocol):
-    def run(
-        self,
-        session: Session,
-        models: list[ModelInfo],
-        report_progress: ProgressCallback,
-        check_cancelled: CancellationCheck,
-    ) -> None:
+    def run(self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> None:
         ...

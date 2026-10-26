@@ -12,28 +12,14 @@ from .workspace_export_service import WorkspaceExportService
 
 
 class ExportService:
-    def __init__(
-        self,
-        store: ExportStore,
-        result_export_service: ResultExportService,
-        storage: TemporaryStorage,
-        workspace_export_service: WorkspaceExportService,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__( self, store: ExportStore, result_export_service: ResultExportService, storage: TemporaryStorage, workspace_export_service: WorkspaceExportService, clock: Callable[[], datetime] | None = None) -> None:
         self.store = store
         self.result_export_service = result_export_service
         self.storage = storage
         self.workspace_export_service = workspace_export_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def create(
-        self,
-        session: Session,
-        job_id: str,
-        *,
-        format: str = "json",
-        mode: str = "results",
-    ) -> Export:
+    def create(self, session: Session, job_id: str,*, format: str = "json", mode: str = "results",) -> Export:
         export = Export(
             id=f"export_{uuid4()}",
             session_id=session.id,
@@ -50,14 +36,7 @@ class ExportService:
     def get(self, export_id: str) -> Export | None:
         return self.store.get(export_id)
 
-    def run(
-        self,
-        export: Export,
-        session: Session,
-        options: ResultExportOptions,
-        report_progress: ProgressCallback,
-        check_cancelled: CancellationCheck,
-    ) -> None:
+    def run(self, export: Export, session: Session, options: ResultExportOptions, report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> None:
         export.state = ExportState.RUNNING
         report_progress(JobPhase.EXPORTING, 0.0, "Preparing export")
         if export.mode == "workspace":

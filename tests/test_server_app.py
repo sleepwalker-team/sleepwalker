@@ -1,5 +1,5 @@
-import json
-from zipfile import ZipFile
+from pathlib import Path
+import sys
 
 from sleepwalker.server.app import create_app, create_local_app
 from sleepwalker.server.services.package_inference_runner import PackageInferenceRunner
@@ -25,31 +25,16 @@ def test_create_app_uses_provided_model_registry() -> None:
     assert app.state.model_registry is registry
 
 
-def test_create_local_app_connects_registry_store_and_runner(tmp_path) -> None:
-    package_path = tmp_path / "sleep-model.swmodel"
-    metadata = {
-        "format": "sleepwalker-swmodel-v1",
-        "model": {
-            "id": "sleep-model",
-            "name": "Sleep model",
-            "task": "sleep_stage",
-            "classes": ["wake", "n1"],
-            "input_channels": ["eeg"],
-            "capabilities": ["classification"],
-            "output_resolution": 30.0,
-        },
-    }
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", json.dumps(metadata))
-
-    app = create_local_app(tmp_path, device="cpu", batch_size=16)
+def test_create_local_app_connects_registry_store_and_runner(tmp_path, make_model_package) -> None:
+    make_model_package("sleep-model")
+    app = create_local_app(tmp_path, inference_python=Path(sys.executable), device="cpu", batch_size=16)
 
     assert app.state.model_registry.get("sleep-model") is not None
     assert isinstance(app.state.inference_runner, PackageInferenceRunner)
     assert app.state.inference_runner.prediction_store is app.state.prediction_store
     assert app.state.inference_runner.device == "cpu"
     assert app.state.inference_runner.batch_size == 16
+    assert app.state.inference_runner.prediction_client.python_executable == Path(sys.executable).absolute()
 
 def test_app_cleans_expired_sessions_on_startup() -> None:
     created_at = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)

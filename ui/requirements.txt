@@ -1,0 +1,8 @@
+# Install in the API environment, separate from the model inference environment.
+-r ../sleepwalker/server/requirements-plotly.txt
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.18
+numpy>=1.24
+pandas>=2.0
+pyedflib>=0.1.39

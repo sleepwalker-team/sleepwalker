@@ -190,7 +190,7 @@ def test_invalid_edf_removes_session_and_temporary_files(session_api):
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_STUDY"
     assert not store._sessions
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 def test_file_too_large_removes_session_and_temporary_files(tmp_path) -> None:
@@ -222,7 +222,7 @@ def test_file_too_large_removes_session_and_temporary_files(tmp_path) -> None:
         }
     }
     assert not store._sessions
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 @pytest.mark.parametrize("filename", ["recording.nif", "recording.ndf"])
@@ -243,7 +243,7 @@ def test_native_nox_study_is_rejected_and_cleaned_up(session_api, filename):
     assert response.json()["error"]["code"] == "INVALID_STUDY"
     assert "not supported" in response.json()["error"]["message"]
     assert not store._sessions
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 def test_missing_files_returns_invalid_request_error(session_api):
@@ -258,7 +258,7 @@ def test_missing_files_returns_invalid_request_error(session_api):
     assert error["message"] == "Request validation failed."
     assert error["details"]["errors"]
     assert not store._sessions
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 def test_internal_error_is_hidden_and_session_is_cleaned_up(
@@ -297,7 +297,7 @@ def test_internal_error_is_hidden_and_session_is_cleaned_up(
     }
     assert "implementation detail" not in response.text
     assert not store._sessions
-    assert list(storage.root.iterdir()) == []
+    assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
 def test_get_session_includes_prediction_tasks(tmp_path) -> None:

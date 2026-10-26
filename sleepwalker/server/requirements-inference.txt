@@ -1,0 +1,22 @@
+# Install only into the separate inference venv (Python 3.10).
+# CPU runtime; CUDA deployments need a separately tested Torch build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+sleepwalker @ git+https://github.com/sleepwalker-team/sleepwalker.git@2c77bf61671a2d3690d6a29d73fd5eece7e1c544
+
+# Versions used for the delivered packages' CPU integration tests.
+cloudpickle==3.1.2
+einops==0.8.2
+pyarrow==24.0.0
+matplotlib==3.10.9
+mne==1.12.1
+numpy==2.2.6
+pandas==2.3.3
+pyedflib==0.1.42
+PyYAML==6.0.3
+requests==2.34.2
+scikit-learn==1.7.2
+scipy==1.15.3
+torchinfo==1.8.0
+tqdm==4.68.4
+xmltodict==1.0.4

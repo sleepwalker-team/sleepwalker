@@ -1,314 +1,130 @@
 import json
+from dataclasses import replace
 from pathlib import Path
-from zipfile import ZipFile
 
 import pytest
 
-from sleepwalker.server.services.model_registry import (
-    InvalidModelPackageError,
-    ModelInfo,
-    ModelRegistry,
-    load_model_registry,
-    read_model_manifest,
-)
+from sleepwalker.server.services.model_registry import InvalidModelPackageError, ModelInfo, ModelRegistry, UnsupportedModelPackageError, load_model_registry, read_model_manifest
 from sleepwalker.server.stores.prediction_store import PredictionKind
 
 
-def make_model(model_id: str) -> ModelInfo:
-    return ModelInfo(
-        id=model_id,
-        name=f"Model {model_id}",
-        task="sleep_stage",
-        classes=("wake", "n1", "n2", "n3", "rem"),
-        input_channels=("eeg",),
-        capabilities=("classification",),
-        output_resolution=30.0,
-        package_path=Path(f"/models/{model_id}.swmodel"),
-    )
+def make_model(model_id):
+    return ModelInfo(id=model_id, name=model_id, task="sleep", classes=("wake", "n1"), input_channels=("eeg",), capabilities=("classification",), output_resolution=30, package_path=Path("/models") / model_id)
 
 
-def test_registry_gets_registered_model() -> None:
-    model = make_model("sleep-staging-attnsleep")
+def save_manifest(path, metadata):
+    (path / "manifest.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def test_registry_gets_registered_model():
+    model = make_model("sleep-model")
     registry = ModelRegistry([model])
-
     assert registry.get(model.id) is model
-    assert registry.get("unknown-model") is None
+    assert registry.get("unknown") is None
 
 
-def test_registry_lists_models_sorted_by_id() -> None:
-    registry = ModelRegistry(
-        [
-            make_model("model-z"),
-            make_model("model-a"),
-        ]
-    )
-
-    assert [model.id for model in registry.list()] == ["model-a", "model-z"]
+def test_registry_lists_models_sorted_by_id():
+    assert [model.id for model in ModelRegistry([make_model("z"), make_model("a")]).list()] == ["a", "z"]
 
 
-def test_registry_rejects_duplicate_model_id() -> None:
-    registry = ModelRegistry([make_model("duplicate")])
-
+def test_registry_rejects_duplicate_model_id():
     with pytest.raises(ValueError, match="already registered"):
-        registry.add(make_model("duplicate"))
-        
-def test_read_model_manifest_from_swmodel_package(tmp_path) -> None:
-    package_path = tmp_path / "sleep-model.swmodel"
+        ModelRegistry([make_model("duplicate"), make_model("duplicate")])
 
-    metadata = {
-        "format": "sleepwalker-swmodel-v1",
-        "model": {
-            "id": "sleep-model",
-            "name": "Sleep Stage Model",
-            "task": "sleep_stage",
-            "classes": ["wake", "n1", "n2", "n3", "rem"],
-            "input_channels": ["eeg"],
-            "capabilities": ["classification"],
-            "output_resolution": 30.0,
-        },
-    }
 
-    with ZipFile(package_path, "w") as package:
-        package.writestr(
-            "meta.json",
-            json.dumps(metadata),
-        )
-
-    model = read_model_manifest(package_path)
-
+def test_read_model_manifest_without_loading_payload(make_model_package):
+    path, metadata = make_model_package()
+    before = (path / "model.pt").read_bytes()
+    model = read_model_manifest(path)
+    assert model == replace(make_model("test-model"), package_path=path, channel_aliases={"eeg": ("C3-M2", "C4-M1")}, payload_sha256=metadata["sha256"])
     assert model.output_kind == PredictionKind.EPOCH
-    assert model == ModelInfo(
-        id="sleep-model",
-        name="Sleep Stage Model",
-        task="sleep_stage",
-        classes=("wake", "n1", "n2", "n3", "rem"),
-        input_channels=("eeg",),
-        capabilities=("classification",),
-        output_resolution=30.0,
-        package_path=package_path,
-    )
+    assert (path / "model.pt").read_bytes() == before
 
 
-def test_read_model_manifest_reads_output_kind(tmp_path) -> None:
-    package_path = tmp_path / "continuous-model.swmodel"
-    metadata = make_manifest_metadata()
-    metadata["model"]["output_kind"] = "continuous"
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", json.dumps(metadata))
-
-    model = read_model_manifest(package_path)
-
-    assert model.output_kind == PredictionKind.CONTINUOUS
+@pytest.mark.parametrize(("sequence_len", "target_resolution", "expected"), [(1, "30s", 30), (40, "40s", 1), (8, "40s", 5), (8, "80s", 10)])
+def test_manifest_uses_resolution_per_output_step(make_model_package, sequence_len, target_resolution, expected):
+    path, _ = make_model_package(sequence_len=sequence_len, target_resolution=target_resolution)
+    assert read_model_manifest(path).output_resolution == expected
 
 
-def test_read_model_manifest_rejects_invalid_output_kind(tmp_path) -> None:
-    package_path = tmp_path / "invalid-output-kind.swmodel"
-    metadata = make_manifest_metadata()
-    metadata["model"]["output_kind"] = "interval-ish"
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", json.dumps(metadata))
-
+@pytest.mark.parametrize(("field", "value"), [("name", ""), ("name", "../escape"), ("task", None), ("input_channels", "eeg"), ("capabilities", []), ("capabilities", ["embeddings"]), ("sha256", "bad"), ("payload", "../weights.pt"), ("payload", "/tmp/weights.pt"), ("config", None)])
+def test_manifest_rejects_invalid_metadata(make_model_package, field, value):
+    path, metadata = make_model_package()
+    metadata[field] = value
+    save_manifest(path, metadata)
     with pytest.raises(InvalidModelPackageError, match="Invalid model metadata"):
-        read_model_manifest(package_path)
+        read_model_manifest(path)
 
-def test_read_model_manifest_rejects_non_zip_file(tmp_path) -> None:
-    package_path = tmp_path / "broken.swmodel"
-    package_path.write_bytes(b"not a ZIP file")
 
+@pytest.mark.parametrize(("field", "value"), [("sequence_len", 0), ("sequence_len", True), ("sequence_len", 1.5), ("classes", "wake"), ("classes", ["wake", "wake"]), ("target_resolution", "NaT"), ("target_resolution", "0s"), ("target_resolution", "-30s"), ("target_resolution", 30), ("type", "unknown")])
+def test_manifest_rejects_invalid_classification(make_model_package, field, value):
+    path, metadata = make_model_package()
+    metadata["classification"][field] = value
+    save_manifest(path, metadata)
     with pytest.raises(InvalidModelPackageError):
-        read_model_manifest(package_path)
+        read_model_manifest(path)
 
 
-def test_read_model_manifest_rejects_missing_metadata(tmp_path) -> None:
-    package_path = tmp_path / "missing-meta.swmodel"
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("model.pt", b"weights")
-
+@pytest.mark.parametrize("contents", ["{broken", "[]", "null"])
+def test_manifest_rejects_invalid_json_document(make_model_package, contents):
+    path, _ = make_model_package()
+    (path / "manifest.json").write_text(contents, encoding="utf-8")
     with pytest.raises(InvalidModelPackageError):
-        read_model_manifest(package_path)
+        read_model_manifest(path)
 
 
-def test_read_model_manifest_rejects_invalid_json(tmp_path) -> None:
-    package_path = tmp_path / "invalid-json.swmodel"
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", "{not valid JSON")
-
+def test_manifest_rejects_missing_payload(make_model_package):
+    path, _ = make_model_package()
+    (path / "model.pt").unlink()
     with pytest.raises(InvalidModelPackageError):
-        read_model_manifest(package_path)
-
-def test_read_model_manifest_rejects_unsupported_format(tmp_path) -> None:
-    package_path = tmp_path / "unsupported.swmodel"
-
-    metadata = {
-        "format": "some-other-format",
-    }
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr(
-            "meta.json",
-            json.dumps(metadata),
-        )
-
-    with pytest.raises(
-        InvalidModelPackageError,
-        match="Unsupported model package format",
-    ):
-        read_model_manifest(package_path)
-
-def test_read_model_manifest_rejects_missing_model_block(tmp_path) -> None:
-    package_path = tmp_path / "missing-model.swmodel"
-
-    metadata = {
-        "format": "sleepwalker-swmodel-v1",
-    }
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr(
-            "meta.json",
-            json.dumps(metadata),
-        )
-
-    with pytest.raises(
-        InvalidModelPackageError,
-        match="Invalid model metadata",
-    ):
-        read_model_manifest(package_path)
-
-def test_read_model_manifest_rejects_non_list_classes(tmp_path) -> None:
-    package_path = tmp_path / "invalid-classes.swmodel"
-
-    metadata = {
-        "format": "sleepwalker-swmodel-v1",
-        "model": {
-            "id": "sleep-model",
-            "name": "Sleep Stage Model",
-            "task": "sleep_stage",
-            "classes": "wake",
-            "input_channels": ["eeg"],
-            "capabilities": ["classification"],
-            "output_resolution": 30.0,
-        },
-    }
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr(
-            "meta.json",
-            json.dumps(metadata),
-        )
-
-    with pytest.raises(
-        InvalidModelPackageError,
-        match="Invalid model metadata",
-    ):
-        read_model_manifest(package_path)
-
-def make_manifest_metadata() -> dict:
-    return {
-        "format": "sleepwalker-swmodel-v1",
-        "model": {
-            "id": "sleep-model",
-            "name": "Sleep Stage Model",
-            "task": "sleep_stage",
-            "classes": ["wake", "n1", "n2", "n3", "rem"],
-            "input_channels": ["eeg"],
-            "capabilities": ["classification"],
-            "output_resolution": 30.0,
-        },
-    }
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("id", ""),
-        ("name", 123),
-        ("task", None),
-    ],
-)
-def test_read_model_manifest_rejects_invalid_string_field(
-    tmp_path,
-    field,
-    value,
-) -> None:
-    package_path = tmp_path / f"invalid-{field}.swmodel"
-    metadata = make_manifest_metadata()
-    metadata["model"][field] = value
-
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", json.dumps(metadata))
-
-    with pytest.raises(
-        InvalidModelPackageError,
-        match="Invalid model metadata",
-    ):
-        read_model_manifest(package_path)
+        read_model_manifest(path)
 
 
-@pytest.mark.parametrize(
-    "resolution",
-    [0, -1, "30.0", True],
-)
-def test_read_model_manifest_rejects_invalid_output_resolution(
-    tmp_path,
-    resolution,
-) -> None:
-    package_path = tmp_path / "invalid-resolution.swmodel"
-    metadata = make_manifest_metadata()
-    metadata["model"]["output_resolution"] = resolution
+def test_manifest_rejects_inconsistent_aliases(make_model_package):
+    path, metadata = make_model_package()
+    metadata["config"]["data"]["channels"][0]["logical_name"] = "wrong"
+    save_manifest(path, metadata)
+    with pytest.raises(InvalidModelPackageError):
+        read_model_manifest(path)
 
-    with ZipFile(package_path, "w") as package:
-        package.writestr("meta.json", json.dumps(metadata))
 
-    with pytest.raises(
-        InvalidModelPackageError,
-        match="Invalid model metadata",
-    ):
-        read_model_manifest(package_path)
+def test_manifest_rejects_payload_symlink_outside_package(make_model_package, tmp_path):
+    path, metadata = make_model_package()
+    external = tmp_path / "outside.pt"
+    external.write_bytes(b"outside")
+    (path / "link.pt").symlink_to(external)
+    metadata["payload"] = "link.pt"
+    save_manifest(path, metadata)
+    with pytest.raises(InvalidModelPackageError):
+        read_model_manifest(path)
 
-def test_load_model_registry_from_directory(tmp_path) -> None:
-    for model_id in ("model-z", "model-a"):
-        package_path = tmp_path / f"{model_id}.swmodel"
-        metadata = make_manifest_metadata()
-        metadata["model"]["id"] = model_id
-        metadata["model"]["name"] = f"Model {model_id}"
 
-        with ZipFile(package_path, "w") as package:
-            package.writestr(
-                "meta.json",
-                json.dumps(metadata),
-            )
-
-    # Dateien ohne .swmodel-Endung sollen ignoriert werden.
-    (tmp_path / "notes.txt").write_text(
-        "not a model",
-        encoding="utf-8",
-    )
-
+def test_registry_reads_model_subdirectories_and_skips_joint(make_model_package, tmp_path, caplog):
+    make_model_package("z")
+    make_model_package("a")
+    joint, metadata = make_model_package("joint")
+    metadata["classification"] = {"type": "multitask", "tasks": {}}
+    save_manifest(joint, metadata)
+    (tmp_path / "old.swmodel").write_bytes(b"retired format")
+    (tmp_path / "notes.txt").write_text("not a model")
     registry = load_model_registry(tmp_path)
-
-    assert [model.id for model in registry.list()] == [
-        "model-a",
-        "model-z",
-    ]
-    assert [model.package_path.name for model in registry.list()] == [
-        "model-a.swmodel",
-        "model-z.swmodel",
-    ]
-
-def test_load_model_registry_from_empty_directory(tmp_path) -> None:
-    registry = load_model_registry(tmp_path)
-
-    assert registry.list() == []
+    assert [model.id for model in registry.list()] == ["a", "z"]
+    assert "Multi-task package is not enabled yet: joint" in caplog.text
+    with pytest.raises(UnsupportedModelPackageError):
+        read_model_manifest(joint)
 
 
-def test_load_model_registry_rejects_missing_directory(tmp_path) -> None:
-    missing_directory = tmp_path / "missing"
+def test_registry_does_not_silently_skip_broken_packages(make_model_package, tmp_path):
+    path, _ = make_model_package()
+    (path / "manifest.json").write_text("{}")
+    with pytest.raises(InvalidModelPackageError):
+        load_model_registry(tmp_path)
 
-    with pytest.raises(
-        ValueError,
-        match="Model directory does not exist",
-    ):
-        load_model_registry(missing_directory)
+
+def test_load_model_registry_from_empty_directory(tmp_path):
+    assert load_model_registry(tmp_path).list() == []
+
+
+def test_load_model_registry_rejects_missing_directory(tmp_path):
+    with pytest.raises(ValueError, match="Model directory does not exist"):
+        load_model_registry(tmp_path / "missing")

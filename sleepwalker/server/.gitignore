@@ -1,0 +1,2 @@
+# Administrator-provided model weights must not accidentally enter commits.
+/models/*/model.pt

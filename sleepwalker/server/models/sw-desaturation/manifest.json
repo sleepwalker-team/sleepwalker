@@ -1,0 +1,208 @@
+{
+  "capabilities": [
+    "embeddings",
+    "classification"
+  ],
+  "classification": {
+    "classes": [
+      "desaturation",
+      "no desaturation"
+    ],
+    "sequence_len": 8,
+    "target_offset": "0 days 00:00:35",
+    "target_resolution": "0 days 00:01:20",
+    "type": "single-head-multiclass"
+  },
+  "config": {
+    "data": {
+      "channels": [
+        {
+          "logical_name": "SpO2",
+          "physical_names": [
+            "SaO2",
+            "SpO2",
+            "SPO2"
+          ],
+          "preprocessors": [
+            "sleepwalker.datasets.HSP.correct_hsp_saturation",
+            {
+              "name": "sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit",
+              "target": "%"
+            },
+            {
+              "clip_range": [
+                50,
+                100
+              ],
+              "fs": 100,
+              "mean": 93.496,
+              "name": "sleepwalker.datasets.normalizer.SaturationFilterNormalizer.SaturationFilterNormalizer",
+              "std": 7.33
+            }
+          ],
+          "read_mode": "physical"
+        }
+      ],
+      "event_mapping": {
+        "desaturation": "desaturation",
+        "n1": "sleep",
+        "n2": "sleep",
+        "n3": "sleep",
+        "rem": "sleep"
+      },
+      "files": "data/hsp-split.yml",
+      "label": "HSP",
+      "name": "sleepwalker.datasets.HSP.HSP",
+      "num_workers": 32,
+      "output_classes": [
+        "desaturation",
+        "no desaturation"
+      ],
+      "prepare_patient": {
+        "keep_events": [
+          "sleep"
+        ],
+        "labels": [
+          "sleep"
+        ],
+        "min_seconds": 15,
+        "name": "sleepwalker.training.callbacks.prepare_patient_events"
+      },
+      "prepare_sample": {
+        "max_nan_fraction": 0.05,
+        "max_out_of_range_fraction": 0.05,
+        "name": "sleepwalker.training.callbacks.prepare_tensor_sample",
+        "valid_ranges": {
+          "SaO2": [
+            50,
+            100
+          ],
+          "SpO2": [
+            -5,
+            5
+          ]
+        }
+      },
+      "prepare_target": {
+        "name": "sleepwalker.trainer.utils.targets.prepare_multiclass_target",
+        "sequence_len": 8,
+        "soft_boundaries": true,
+        "step_mask": {
+          "columns": [
+            "sleep"
+          ],
+          "percentage": 0.5
+        },
+        "target_classes": [
+          "desaturation",
+          "no desaturation"
+        ],
+        "target_offset": "35s",
+        "target_resolution": "80s"
+      },
+      "sample_frequency": 100,
+      "strict": false,
+      "stride": "80s",
+      "total_input": "150s"
+    },
+    "model": {
+      "activation": "elu",
+      "channel": [
+        64,
+        128,
+        128,
+        256
+      ],
+      "dropout_p": 0,
+      "epoch_len": "10s",
+      "kernel": [
+        5,
+        5,
+        3,
+        3
+      ],
+      "maxpool": [
+        5,
+        5,
+        3,
+        3
+      ],
+      "mlp_size": 512,
+      "name": "sleepwalker.models.UTime.UTime",
+      "norm": "batch",
+      "preprocessors": [
+        {
+          "lower_quantile": 0.1,
+          "name": "sleepwalker.models.preprocessors.RobustScaler.RobustScaler",
+          "upper_quantile": 0.9
+        }
+      ]
+    },
+    "model_statistics": {
+      "total_parameters": 1435341,
+      "trainable_parameters": 1435341
+    },
+    "run": {
+      "batch_size": 128,
+      "experiment_name": "desaturation-hsp-development",
+      "expert_task": "desaturation",
+      "log_path": "/raid/sleepwalker/results/recording-normalized/train",
+      "model_name": "sleepwalker",
+      "n_samples": 250000,
+      "num_workers_dataloader": 16,
+      "package_path": "models/sw-desaturation",
+      "patients_per_epoch": 512,
+      "tags": {
+        "dataset": "HSP",
+        "phase": "development",
+        "task": "desaturation"
+      },
+      "telemetry": {
+        "interval": 1.0
+      },
+      "test_repeats": [
+        1
+      ],
+      "use_mlflow": false
+    },
+    "run_id": "train-desaturation",
+    "seed": 17,
+    "trainer": {
+      "class_counts": {
+        "desaturation": 104047,
+        "no desaturation": 1794418
+      },
+      "epochs": 100,
+      "loss_function": "torch.nn.functional.cross_entropy",
+      "loss_mode": "inverse-log",
+      "lr_scheduler": {
+        "final_div_factor": 100.0,
+        "max_lr": 0.0005,
+        "name": "torch.optim.lr_scheduler.OneCycleLR",
+        "pct_start": 0.1
+      },
+      "name": "sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer",
+      "optimizer": {
+        "lr": 1e-05,
+        "name": "torch.optim.AdamW",
+        "weight_decay": 0.0001
+      },
+      "return_best": false,
+      "save_every": 10,
+      "sequence_len": 8,
+      "target_offset": "35s",
+      "target_resolution": "80s"
+    }
+  },
+  "dataset_class": "sleepwalker.datasets.UnlabelledDataset.UnlabelledDataset",
+  "format_version": "sleepwalker-packaged-model-v1",
+  "git_commit": "8db9e8dd19f60ef40abce45103a26b803ea69179",
+  "input_channels": [
+    "SpO2"
+  ],
+  "model_class": "sleepwalker.models.UTime.UTime",
+  "name": "desaturation-hsp-development",
+  "payload": "model.pt",
+  "sha256": "13789eaa5e0459f00ffb75a9029430b56312308796ce8d5159ad420e2772e47e",
+  "task": "desaturation"
+}

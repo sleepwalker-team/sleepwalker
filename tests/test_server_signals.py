@@ -10,7 +10,9 @@ from sleepwalker.server.validation.study import SignalInfo
 
 
 class FakeSignalReader:
-    def read(self, _source_path: Path, _signal_id: str, start: float, end: float) -> SignalSamples:
+    def read(
+        self, _source_path: Path, _signal_id: str, start: float, end: float, *, max_points: int = 2000,
+    ) -> SignalSamples:
         points = [(float(index), float(index - 5)) for index in range(10) if start <= index < end]
         return SignalSamples(
             times=[time for time, _ in points],
@@ -83,3 +85,19 @@ def test_get_signal_data_rejects_unknown_signal() -> None:
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "SIGNAL_NOT_FOUND"
+
+
+def test_real_edf_signal_query_returns_bounded_points_and_downsampled_flag() -> None:
+    path = Path(__file__).parent / "data" / "signals_01.edf"
+    sessions = SessionService(SessionStore())
+    session = sessions.create([path])
+    session.state = SessionState.READY
+    session.duration = 3600.0
+    session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
+    with TestClient(create_app(session_service=sessions)) as client:
+        response = client.get(f"/api/v1/sessions/{session.id}/signals/EEG?start=0&end=3600&max_points=23")
+    assert response.status_code == 200
+    assert len(response.json()["points"]) == 23
+    assert response.json()["downsampled"] is True
+    assert response.json()["points"][0][0] == 0.0
+    assert response.json()["points"][-1][0] == 3599.995

@@ -1,0 +1,190 @@
+{
+  "capabilities": [
+    "embeddings",
+    "classification"
+  ],
+  "classification": {
+    "classes": [
+      "wake",
+      "n1",
+      "n2",
+      "n3",
+      "rem"
+    ],
+    "sequence_len": 1,
+    "target_offset": "0 days 00:05:00",
+    "target_resolution": "0 days 00:00:30",
+    "type": "single-head-multiclass"
+  },
+  "config": {
+    "data": {
+      "channels": [
+        {
+          "logical_name": "eeg",
+          "physical_names": [
+            "C3-M2",
+            "C4-M1",
+            "F3-M2",
+            "F4-M1",
+            "O1-M2",
+            "O2-M1",
+            "CZ-M2",
+            "CZ-M1",
+            "C3-M1",
+            "C4-M2",
+            "F3-M1",
+            "F4-M2",
+            "O1-M1",
+            "O2-M2"
+          ],
+          "preprocessors": [
+            {
+              "name": "sleepwalker.datasets.normalizer.ConvertUnit.ConvertUnit",
+              "target": "uV"
+            },
+            {
+              "fs": 100,
+              "highcut": 40,
+              "name": "sleepwalker.datasets.normalizer.EEGFilterNormalizer.EEGFilterNormalizer",
+              "normalize": false,
+              "notch_freq": null
+            }
+          ],
+          "read_mode": "physical"
+        }
+      ],
+      "event_mapping": {
+        "n1": "n1",
+        "n2": "n2",
+        "n3": "n3",
+        "rem": "rem",
+        "wake": "wake"
+      },
+      "files": "data/hsp-split.yml",
+      "label": "HSP",
+      "name": "sleepwalker.datasets.HSP.HSP",
+      "num_workers": 32,
+      "output_classes": [
+        "wake",
+        "n1",
+        "n2",
+        "n3",
+        "rem"
+      ],
+      "prepare_patient": {
+        "labels": [
+          "wake",
+          "n1",
+          "n2",
+          "n3",
+          "rem"
+        ],
+        "min_seconds": 15,
+        "name": "sleepwalker.training.callbacks.prepare_patient_events"
+      },
+      "prepare_target": {
+        "name": "sleepwalker.trainer.utils.targets.prepare_multiclass_target",
+        "target_classes": [
+          "wake",
+          "n1",
+          "n2",
+          "n3",
+          "rem"
+        ],
+        "target_offset": "300s",
+        "target_resolution": "30s"
+      },
+      "sample_frequency": 100,
+      "strict": false,
+      "stride": "30s",
+      "total_input": "630s"
+    },
+    "model": {
+      "fc_dropout": 0.1,
+      "frm_attention_dropout": 0.1,
+      "name": "sleepwalker.models.SleepTransformer.SleepTransformer",
+      "seq_attention_dropout": 0.1
+    },
+    "model_statistics": {
+      "total_parameters": 3834053,
+      "trainable_parameters": 3834053
+    },
+    "run": {
+      "batch_size": 128,
+      "experiment_name": "sleep-hsp-development",
+      "expert_task": "sleep",
+      "log_path": "/raid/sleepwalker/results/recording-normalized/train",
+      "model_name": "sleepwalker",
+      "n_samples": 250000,
+      "num_workers_dataloader": 16,
+      "package_path": "models/sw-sleep",
+      "patients_per_epoch": 512,
+      "tags": {
+        "dataset": "HSP",
+        "phase": "development",
+        "task": "sleep"
+      },
+      "telemetry": {
+        "interval": 1.0
+      },
+      "test_repeats": [
+        1
+      ],
+      "use_mlflow": false
+    },
+    "run_id": "train-sleep",
+    "seed": 17,
+    "trainer": {
+      "class_counts": {
+        "n1": 31027,
+        "n2": 113132,
+        "n3": 30822,
+        "rem": 30763,
+        "wake": 44256
+      },
+      "epochs": 100,
+      "loss_function": "torch.nn.functional.cross_entropy",
+      "loss_mode": "inverse-log",
+      "lr_scheduler": {
+        "final_div_factor": 100.0,
+        "max_lr": 0.0005,
+        "name": "torch.optim.lr_scheduler.OneCycleLR",
+        "pct_start": 0.1
+      },
+      "name": "sleepwalker.trainer.MulticlassTrainer.MulticlassTrainer",
+      "optimizer": {
+        "lr": 1e-05,
+        "name": "torch.optim.AdamW",
+        "weight_decay": 0.0001
+      },
+      "return_best": false,
+      "save_every": 10,
+      "sequence_len": 1,
+      "target_offset": "300s",
+      "target_resolution": "30s",
+      "train_transform": [
+        {
+          "max": 1.2,
+          "min": 0.8,
+          "name": "sleepwalker.datasets.augmentation.AmplitudeScale.AmplitudeScale"
+        },
+        {
+          "mu": 0,
+          "name": "sleepwalker.datasets.augmentation.GaussianNoise.GaussianNoise",
+          "sigma": 0.001
+        }
+      ]
+    }
+  },
+  "dataset_class": "sleepwalker.datasets.UnlabelledDataset.UnlabelledDataset",
+  "format_version": "sleepwalker-packaged-model-v1",
+  "git_commit": "8db9e8dd19f60ef40abce45103a26b803ea69179",
+  "input_channels": [
+    "eeg"
+  ],
+  "model_class": "sleepwalker.models.SleepTransformer.SleepTransformer",
+  "name": "sleep-hsp-development",
+  "payload": "model.pt",
+  "sha256": "1d7e75cd1c183e3232f9a03d0f8ed4d2a2523975f5c9e4f54425c1d2657dff8a",
+  "task": "sleep"
+}

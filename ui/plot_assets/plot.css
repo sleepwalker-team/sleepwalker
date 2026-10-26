@@ -1,0 +1,7 @@
+html, body { margin: 0; padding: 0; background: #fcfcfb; overflow: hidden; font-family: Arial, sans-serif; }
+/* Keep a definite height through every Dash wrapper during responsive updates. */
+#signals { height: 100vh !important; }
+body > div, #react-entry-point, #_dash-app-content, #_dash-app-content > div { margin: 0; padding: 0; }
+._dash-loading { padding: 30px 24px; color: #6e7476; font-size: 12px; }
+.signal-cursor { position: absolute; width: 0; border-left: 1px dotted #687074; pointer-events: none; z-index: 10; }
+.signal-interval { position:absolute; border:1px solid #365d68; background:#567b8418; pointer-events:none; z-index:9; }

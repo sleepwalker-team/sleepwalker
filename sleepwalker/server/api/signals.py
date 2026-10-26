@@ -128,7 +128,9 @@ def get_signal_data(
         )
 
     try:
-        samples = signal_reader.read(session.source_files[0], signal.id, range_start, range_end)
+        samples = signal_reader.read(
+            session.source_files[0], signal.id, range_start, range_end, max_points=max_points,
+        )
     except SignalNotFoundError as exc:
         raise APIError(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -152,6 +154,6 @@ def get_signal_data(
         sample_rate=signal.sample_rate,
         start=range_start,
         end=range_end,
-        downsampled=len(reduced.times) < len(samples.times),
+        downsampled=(reduced.sample_count or len(samples.times)) > len(reduced.times),
         points=list(zip(reduced.times, reduced.values)),
     )

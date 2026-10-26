@@ -14,14 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class APIError(HTTPException):
-    def __init__(
-        self,
-        *,
-        status_code: int,
-        code: str,
-        message: str,
-        details: dict[str, Any] | None = None,
-    ) -> None:
+    def __init__(self, *, status_code: int, code: str, message: str, details: dict[str, Any] | None = None,) -> None:
         super().__init__(
             status_code=status_code,
             detail={
@@ -33,21 +26,12 @@ class APIError(HTTPException):
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    app.add_exception_handler(
-        RequestValidationError,
-        request_validation_exception_handler,
-    )
-    app.add_exception_handler(
-        StarletteHTTPException,
-        http_exception_handler,
-    )
+    app.add_exception_handler( RequestValidationError, request_validation_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, internal_exception_handler)
 
 
-async def request_validation_exception_handler(
-    _request: Request,
-    exc: RequestValidationError,
-) -> JSONResponse:
+async def request_validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     return _error_response(
         status_code=status.HTTP_400_BAD_REQUEST,
         code="INVALID_REQUEST",
@@ -56,10 +40,7 @@ async def request_validation_exception_handler(
     )
 
 
-async def http_exception_handler(
-    _request: Request,
-    exc: StarletteHTTPException,
-) -> JSONResponse:
+async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict):
         code = str(exc.detail.get("code", "HTTP_ERROR"))
         message = str(exc.detail.get("message", "Request failed."))
@@ -79,10 +60,7 @@ async def http_exception_handler(
     )
 
 
-async def internal_exception_handler(
-    _request: Request,
-    exc: Exception,
-) -> JSONResponse:
+async def internal_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     logger.error(
         "Unhandled server exception",
         exc_info=(type(exc), exc, exc.__traceback__),

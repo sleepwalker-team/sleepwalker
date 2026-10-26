@@ -313,7 +313,7 @@ def start_inference(
         missing_channels = [
             channel
             for channel in model.input_channels
-            if channel.strip().casefold() not in available_signals
+            if not any(alias.strip().casefold() in available_signals for alias in model.channel_aliases.get(channel, (channel,)))
         ]
 
         if missing_channels:

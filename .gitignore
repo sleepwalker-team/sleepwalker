@@ -42,3 +42,4 @@ wandb
 #server
 /results.json
 /study.sleepwalker.zip
+*.swmodel

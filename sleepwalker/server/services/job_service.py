@@ -1,4 +1,5 @@
 from copy import deepcopy
+from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
@@ -15,28 +16,19 @@ class ActiveJobExistsError(Exception):
 
 
 class JobService:
-    def __init__(self, store: JobStore) -> None:
+    def __init__(self, store: JobStore, on_completion: Callable[[str], None] | None = None) -> None:
         self.store = store
+        self.on_completion = on_completion
         self._lock = RLock()
         self._subscriptions: dict[str, set[JobSubscription]] = {}
 
-    def create(
-        self,
-        session_id: str,
-        job_type: str,
-        parameters: dict[str, Any] | None = None,
-    ) -> Job:
+    def create(self, session_id: str, job_type: str, parameters: dict[str, Any] | None = None) -> Job:
         job = self._new_job(session_id, job_type, parameters)
         with self._lock:
             self.store.add(job)
         return job
 
-    def create_if_session_idle(
-        self,
-        session_id: str,
-        job_type: str,
-        parameters: dict[str, Any] | None = None,
-    ) -> Job:
+    def create_if_session_idle(self, session_id: str, job_type: str, parameters: dict[str, Any] | None = None) -> Job:
         job = self._new_job(session_id, job_type, parameters)
         with self._lock:
             active_job = self.store.add_if_session_idle(job)
@@ -47,11 +39,7 @@ class JobService:
         return job
 
     @staticmethod
-    def _new_job(
-        session_id: str,
-        job_type: str,
-        parameters: dict[str, Any] | None,
-    ) -> Job:
+    def _new_job(session_id: str, job_type: str, parameters: dict[str, Any] | None) -> Job:
         now = datetime.now(timezone.utc)
 
         return Job(
@@ -94,6 +82,10 @@ class JobService:
         for subscription in self._subscriptions.get(job.id, ()):
             subscription.publish(deepcopy(job))
 
+    def _prepare_completion(self, job: Job) -> None:
+        if self.on_completion is not None:
+            self.on_completion(job.session_id)
+
     def mark_running(self, job_id: str, phase: JobPhase, message: str) -> Job:
         with self._lock:
             job = self._get_required(job_id)
@@ -109,14 +101,7 @@ class JobService:
 
             return job
 
-    def update_progress(
-        self,
-        job_id: str,
-        *,
-        phase: JobPhase,
-        progress: float | None,
-        message: str,
-    ) -> Job:
+    def update_progress(self, job_id: str, *, phase: JobPhase, progress: float | None, message: str,) -> Job:
         with self._lock:
             job = self._get_required(job_id)
             if job.state != JobState.RUNNING:
@@ -144,6 +129,7 @@ class JobService:
             if job.state != JobState.RUNNING:
                 self._raise_invalid_transition(job, JobState.SUCCEEDED)
 
+            self._prepare_completion(job)
             job.state = JobState.SUCCEEDED
             job.phase = None
             job.progress = 1.0
@@ -160,6 +146,7 @@ class JobService:
             if job.state != JobState.RUNNING:
                 self._raise_invalid_transition(job, JobState.FAILED)
 
+            self._prepare_completion(job)
             job.state = JobState.FAILED
             job.message = error.message
             job.error = deepcopy(error)
@@ -192,6 +179,7 @@ class JobService:
             if job.state != JobState.CANCELLING:
                 self._raise_invalid_transition(job, JobState.CANCELLED)
 
+            self._prepare_completion(job)
             job.state = JobState.CANCELLED
             job.phase = None
             job.progress = None

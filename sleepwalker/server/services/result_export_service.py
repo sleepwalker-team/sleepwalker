@@ -22,21 +22,12 @@ class ResultExportOptions:
 
 
 class ResultExportService:
-    def __init__(
-        self,
-        prediction_store: PredictionStore,
-        annotation_service: AnnotationService,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__(self, prediction_store: PredictionStore, annotation_service: AnnotationService, clock: Callable[[], datetime] | None = None) -> None:
         self.prediction_store = prediction_store
         self.annotation_service = annotation_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def build_payload(
-        self,
-        session: Session,
-        options: ResultExportOptions | None = None,
-    ) -> dict:
+    def build_payload(self, session: Session, options: ResultExportOptions | None = None) -> dict:
         options = options or ResultExportOptions()
         payload = {
             "format": "sleepwalker-results",
@@ -86,11 +77,7 @@ def _session_metadata(session: Session) -> dict:
     }
 
 
-def _prediction_task(
-    result: PredictionResult,
-    session: Session,
-    include_probabilities: bool,
-) -> dict:
+def _prediction_task(result: PredictionResult, session: Session, include_probabilities: bool) -> dict:
     if session.recording_start is None:
         raise ValueError("Cannot export predictions without a recording start time.")
 

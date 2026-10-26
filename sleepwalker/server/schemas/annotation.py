@@ -25,3 +25,9 @@ class AnnotationEditResponse(BaseModel):
     label: str | None = None
     event_id: str | None = None
     reverted_edit_id: str | None = None
+
+
+class AnnotationListResponse(BaseModel):
+    edits: list[AnnotationEditResponse]
+    labels: list[AnnotationEditResponse]
+    events: list[AnnotationEditResponse]

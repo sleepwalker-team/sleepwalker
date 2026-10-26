@@ -3,7 +3,7 @@ import math
 from fastapi import APIRouter, Depends, Request, status
 
 from ..errors import APIError
-from ..schemas.annotation import AnnotationEditResponse, AnnotationRequest
+from ..schemas.annotation import AnnotationEditResponse, AnnotationListResponse, AnnotationRequest
 from ..services.annotation_service import (
     AnnotationEditNotFoundError,
     AnnotationEventNotFoundError,
@@ -41,6 +41,35 @@ def to_annotation_response(edit: AnnotationEdit) -> AnnotationEditResponse:
         label=edit.label,
         event_id=edit.event_id,
         reverted_edit_id=edit.reverted_edit_id,
+    )
+
+
+@router.get("/{session_id}/annotations", response_model=AnnotationListResponse)
+def get_annotations(
+    session_id: str,
+    session_service: SessionService = Depends(get_session_service),
+    annotation_service: AnnotationService = Depends(get_annotation_service),
+) -> AnnotationListResponse:
+    session = session_service.get(session_id)
+    if session is None:
+        raise APIError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="SESSION_NOT_FOUND",
+            message="Session not found.",
+        )
+    if session.state != SessionState.READY:
+        raise APIError(
+            status_code=status.HTTP_409_CONFLICT,
+            code="INVALID_SESSION_STATE",
+            message="Session is not ready for annotation access.",
+            details={"state": session.state.value},
+        )
+
+    snapshot = annotation_service.snapshot(session.id)
+    return AnnotationListResponse(
+        edits=[to_annotation_response(edit) for edit in snapshot.edits],
+        labels=[to_annotation_response(edit) for edit in snapshot.labels],
+        events=[to_annotation_response(edit) for edit in snapshot.events],
     )
 
 

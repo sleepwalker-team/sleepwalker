@@ -19,6 +19,7 @@ class SessionService:
         *,
         ttl: timedelta = DEFAULT_SESSION_TTL,
         clock: Callable[[], datetime] = utc_now,
+        active_job_check: Callable[[str], bool] | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("Session TTL must be positive.")
@@ -26,6 +27,7 @@ class SessionService:
         self.store = store
         self.ttl = ttl
         self.clock = clock
+        self.active_job_check = active_job_check or (lambda _session_id: False)
 
     def create(self, source_files):
         now = self.clock()
@@ -51,15 +53,23 @@ class SessionService:
         now = self.clock()
 
         if session.expires_at <= now:
-            return None
+            active = self.active_job_check(session_id)
+            # A completing job may renew the deadline while checking activity.
+            if not active and session.expires_at <= now:
+                return None
 
         session.last_accessed_at = now
-        session.expires_at = now + self.ttl
+        session.expires_at = max(session.expires_at, now + self.ttl)
 
         return session
 
-    def list_expired(self) -> list[Session]:
-        now = self.clock()
+    def renew_after_job(self, session_id: str) -> None:
+        session = self.store.get(session_id)
+        if session is not None:
+            session.expires_at = max(session.expires_at, self.clock() + self.ttl)
+
+    def list_expired(self, at: datetime | None = None) -> list[Session]:
+        now = at if at is not None else self.clock()
 
         return [session for session in self.store.list() if session.expires_at <= now]
 

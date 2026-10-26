@@ -8,11 +8,7 @@ from .result_export_service import ResultExportService
 
 
 class WorkspaceExportService:
-    def __init__(
-        self,
-        result_export_service: ResultExportService,
-        model_registry: ModelRegistry,
-    ) -> None:
+    def __init__(self, result_export_service: ResultExportService, model_registry: ModelRegistry) -> None:
         self.result_export_service = result_export_service
         self.model_registry = model_registry
 

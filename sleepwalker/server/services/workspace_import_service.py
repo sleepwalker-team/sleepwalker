@@ -28,14 +28,7 @@ from .session_service import SessionService
 
 
 class WorkspaceImportService:
-    def __init__(
-        self,
-        session_service: SessionService,
-        storage: TemporaryStorage,
-        prediction_store: PredictionStore,
-        annotation_service: AnnotationService,
-        limits: WorkspaceLimits | None = None,
-    ) -> None:
+    def __init__(self, session_service: SessionService, storage: TemporaryStorage, prediction_store: PredictionStore, annotation_service: AnnotationService, limits: WorkspaceLimits | None = None ) -> None:
         self.session_service = session_service
         self.storage = storage
         self.prediction_store = prediction_store

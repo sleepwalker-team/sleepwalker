@@ -24,7 +24,7 @@ Optional fields:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `n_samples_test` | `None` | Candidate budget for test loaders. |
-| `patients_per_epoch` | `None` | If set, training sampling becomes `patient_balanced` instead of `random` (see [Performance](performance.md#patientsampler-fewer-files-per-epoch)). |
+| `patients_per_epoch` | `None` | If set, training sampling becomes `patient_balanced` instead of `random` (see [Performance](performance.md#patientsampler-an-exposure-policy)). |
 | `patient_group_size` | `None` | Locality group size passed through to the patient sampler. |
 | `test_repeats` | `[1]` | Each repeat `r` evaluates with `n_views=r` repeated overlapping views per window via a `RepeatedViewModel`. |
 | `use_mlflow` | `False` | Additionally log to MLflow at `sqlite:///<log_path>/mlflow.sqlite`. |

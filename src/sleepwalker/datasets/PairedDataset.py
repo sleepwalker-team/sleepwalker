@@ -96,12 +96,6 @@ class PairedDataset(Dataset):
         if self.n_views < 1:
             raise ValueError("n_views must be positive.")
 
-    def set_edf_cache(self, cache):
-        """Share one loading-session cache across the base and all experts."""
-        self.base.set_edf_cache(cache)
-        for dataset in self.datasets.values():
-            dataset.set_edf_cache(cache)
-
     def clone(self):
         datasets = {name: dataset.clone() if isinstance(dataset, UnlabelledDataset) else copy.deepcopy(dataset) for name, dataset in self.datasets.items()}
         base = self.base.clone() if isinstance(self.base, UnlabelledDataset) else copy.deepcopy(self.base)

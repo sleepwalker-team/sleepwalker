@@ -15,7 +15,6 @@ import pandas as pd
 import torch
 
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
@@ -152,7 +151,7 @@ class PackagedModel:
             return
         assert_single_dataset_compatible(self.dataset, dataset)
 
-    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False, edf_cache_patients: int = 3, pin_memory: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
+    def predict_dataset(self, dataset: Any, *, batch_size: int = 64, num_workers: int = 0, n_repeat: int = 1, device: str | torch.device = "cpu", seed: int = 0, rejection_strategy: str = "none", progress: bool = True, progress_label: str | None = None, return_received_windows: bool = False, pin_memory: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
         """Run this classifier on an initialized compatible dataset.
 
         The dataset must already contain its patient cohort. Predictions are
@@ -166,12 +165,7 @@ class PackagedModel:
         self.assert_compatible(dataset)
         if not hasattr(dataset, "set_rejection_strategy"):
             raise TypeError(f"{dataset.__class__.__name__} does not support rejection strategies.")
-        if edf_cache_patients < 0:
-            raise ValueError("edf_cache_patients must not be negative.")
         dataset.set_rejection_strategy(rejection_strategy)
-        cache = EDFCache(edf_cache_patients) if edf_cache_patients > 0 and hasattr(dataset, "set_edf_cache") else None
-        if cache is not None:
-            dataset.set_edf_cache(cache)
         loader = build_loader(dataset, batch_size=batch_size, num_workers=num_workers, n_samples=None, collate_fn=batch_collate, sampling="sequential", seed=seed, rejection_strategy=None, n_views=n_repeat, pin_memory=pin_memory, persistent_workers=False)
         execution_model = (RepeatedViewModel(self.model) if n_repeat > 1 else self.model).to(device)
         execution_model.eval()
@@ -204,9 +198,6 @@ class PackagedModel:
         finally:
             if progress:
                 logger.progress_close()
-            if cache is not None:
-                dataset.set_edf_cache(None)
-                cache.close()
         predictions = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if return_received_windows:
             return predictions, dict(received_windows)

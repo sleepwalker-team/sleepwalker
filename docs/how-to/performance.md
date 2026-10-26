@@ -1,276 +1,198 @@
 # Performance
 
-A sleep model spends most of its life moving windows of signal from disk to GPU. One night recording is a few hundred megabytes, and one training epoch requests hundreds of thousands of windows, so the bottleneck is usually disk I/O and CPU-side decoding rather than the model itself. This page explains where the cost comes from and which knobs Sleepwalker provides: worker processes and thread limits, the `PatientSampler`, and the fully in-memory `NumpyDataset`.
+Start with random window loading and measure the complete training or prediction
+path. A slow isolated loader does not necessarily slow the model: workers can
+prepare the next batch while the current batch executes. Conversely, fast model
+execution can expose input preparation. Disk I/O, CPU preparation, startup and
+model computation can each dominate; none is the universal bottleneck.
 
-The design target is terabytes of recordings: cohorts of thousands of patients, each with several nights and many channels, far larger than fit in memory. The techniques below are what make a full training run over that much data finish in hours rather than days.
+## What loading actually does
 
-## Every window is read from disk
+Initialization creates recording descriptors, event indices, candidate offsets
+and per-channel processor state. Processors with a recording-level `fit` also
+read signals during initialization. That work can be substantial.
 
-As explained in [loading data](data.md), `initialize()` stores only metadata: patient descriptors, label indices, and window start positions. Signal values stay on disk. Each call to `dataset[idx]` resolves the index to a patient and a window start, and `EDFFile.get_x` reads that window through `edf_to_df`, which opens a fresh `pyedflib.EdfReader`, seeks to the sample offset of the window, reads the raw samples, and closes the handle again. For ordinary training access, complete recordings are not retained between calls. Packaged-model inference can use the shared EDF cache described below.
+For an accepted window, the ordinary path reads the requested native channel
+intervals, aligns/resamples them, applies window-level preprocessing, and builds
+a tensor sample. Targets are prepared before signal reads so target rejection
+can avoid signal work. Signal-quality rejection can occur later. See
+[loading data](data.md) for the processing contract.
 
-The EDF format shapes what "reading a window" costs. EDF stores samples as 16-bit integers grouped into fixed-duration data records, and every record contains all channels back to back. Reading one channel over a window therefore means many small strided reads — one slice per record — rather than one contiguous block. For a window of duration \(L\) and a channel sampled at \(f_c\), the channel contributes
+The direct reader opens and closes a pyedflib reader for each native request.
+Multiple read modes or fallback aliases can require additional requests.
+An open edflib handle retains parsed header/calibration state; closing it discards
+that state. File reads can still hit C stdio buffers or the OS page cache, so
+reopening a recording does **not** imply a physical disk read for every window.
+EDF sample payload bytes are not a measurement of storage traffic.
 
-$$
-B_c = 2 \cdot L \cdot f_c
-$$
+Whole-recording filtering is not interchangeable with window filtering: boundary
+conditions and window statistics can differ. Keep preparation semantics fixed
+when comparing execution choices.
 
-bytes, because each stored sample is two bytes. A 30-second window with one 100 Hz EEG channel and one 1 Hz EMG channel touches roughly
+## Measure exposed waiting, not just loader speed
 
-$$
-2 \cdot 30 \cdot (100 + 1) \approx 6\,\text{kB}.
-$$
+Record initialization and model warm-up separately from epochs. Within an epoch,
+measure wall time, accepted windows/optimizer updates, first-batch waiting and
+waiting for later batches. Compare complete prediction calls including worker
+startup and result formatting. GPU activity alone does not identify a bottleneck.
 
-That is small per window, but the access pattern is random: with `n_samples=250{,}000` windows per epoch, the loader issues roughly 1.5 GB of small random reads scattered across every file in the cohort, plus one file open and close per window. Small random reads and per-file open latency — especially on a networked file system — are what limit throughput, not raw bandwidth.
+In a short A30 investigation on 2026-10-25, native training used eight loader
+workers, batch 128, 16 recordings, and two epochs of 4,096 candidate windows:
 
-```mermaid
-flowchart LR
-    subgraph E["EDF-backed dataset: every window is re-read from disk"]
-        direction LR
-        A1["dataset[idx]"] --> A2["open EDF reader<br/>(header + seek)<br/>re-opened for every window"]
-        A2 --> A3["read raw window bytes<br/>readSignal(start, n)<br/>16-bit samples, all channels<br/>interleaved in the records"]:::disk
-        A3 --> A4["unit convert, resample,<br/>normalize<br/>CPU work inside the worker"]
-        A4 --> A5["sample dict"]
-    end
-    subgraph N["NumpyDataset: decoded once, served from memory"]
-        direction LR
-        B1["dataset[idx]"] --> B2["shard lookup<br/>(searchsorted)"]
-        B2 --> B3["float32 slice<br/>RAM or page cache"]:::mem
-        B3 --> B4["sample dict<br/>no EDF open, no decode,<br/>no resampling"]
-    end
-    classDef disk fill:#f0b429,stroke:#f0b429,color:#0c172f
-    classDef mem fill:#4cc38a,stroke:#4cc38a,color:#0c172f
-```
+| Second epoch | Total time | First-batch wait | Wait for remaining 31 batches |
+| --- | ---: | ---: | ---: |
+| Sleep workload | 14.58 s | 1.53 s | 8.2 ms total |
+| Arousal workload | 5.23 s | 1.05 s | 4.7 ms total |
 
-*The lazy EDF path re-opens and re-decodes for every window. `NumpyDataset` skips the decode entirely.*
+These are diagnostic timings, not universal performance figures. The cohort was
+small, OS caches were not flushed, and initialization/model warm-up are excluded.
+They show that most input work was overlapped after the first batch in those
+runs. Larger cohorts, fewer workers, different storage or a faster model may
+expose preparation costs.
 
-!!! warning "Data loading pressures I/O bandwidth"
-    Keep recordings on local NVMe/SSD storage rather than on a network share. The same pipeline that saturates a local SSD can stall for orders of magnitude longer on NFS with millisecond-level latency per open and read. See also the warning in [loading data](data.md).
+Separate warm-file CPU profiles found the following costs per accepted sequential
+window. These retained the existing models' input preparation:
 
-Initialization has its own cost profile. `initialize()` reads only EDF headers and annotation files, which is cheap and parallelized across `num_workers` processes. Processors implementing `fit`, such as `RecordingZScore`, additionally read complete recordings during initialization to learn their parameters after preceding transforms. For large cohorts, that single full pass can dominate startup; filter patients with [`get_patient_stats()`](../reference/api.md#base-dataset) first if you only need a subset.
+| Operation | Sleep | Arousal |
+| --- | ---: | ---: |
+| Complete window preparation | 10.95 ms | 7.69 ms |
+| Resampling and selection | 5.00 ms | 2.18 ms |
+| Channel preprocessing | 1.25 ms | 1.99 ms |
+| Explicit timestamp-index construction | 0.25 ms | 0.15 ms |
+| Final sample/tensor callback | 0.13 ms | 0.04 ms |
+| EDF reader construction | 0.056 ms | 0.040 ms |
 
-<!-- TODO: `EDFFile` carries a `handle` field, but `get_x` passes the file *path* to `edf_to_df`, so every window access opens and closes a new `pyedflib.EdfReader`. Reusing one open handle per worker would remove the per-window open/close overhead. See the [roadmap](../roadmap.md#reuse-open-edf-reader-handles). -->
+The stage timers came from a separate instrumented pass; these rows are not a
+complete additive breakdown. Resampling includes necessary computation and
+internal index handling, not only removable overhead. DataFrame `to_numpy()` and
+`torch.from_numpy()` shared memory in the measured cases; particular selections,
+explicit copies and dtype changes allocated. Replacing DataFrames wholesale has
+no demonstrated end-to-end benefit. Profile concrete operations before refactoring.
 
-## Simple knobs: workers and threads
+## Workers and threads
 
-There are two unrelated `num_workers` settings, and both matter.
-
-**Initialization workers.** `dataset.initialize(patients, num_workers=8)` runs header parsing, unit validation, and annotation mapping in a `multiprocessing.Pool` over the patient list. This shortens startup only; it does not affect per-window loading.
-
-**DataLoader workers.** The loader's `num_workers` controls how many processes materialize windows in parallel while the GPU consumes already-prepared batches. [`build_loader()`](../reference/api.md#build-loader) sets this up for you: with `num_workers > 0`, it defaults to `persistent_workers=True` (workers survive across epochs and keep their dataset copy), `prefetch_factor=2` (each worker keeps two batches in flight), and `pin_memory=True` (batches land in page-locked memory for fast host-to-device transfer). Both `persistent_workers` and `pin_memory` can be set explicitly.
-
-The goal is to hide sample preparation behind GPU compute. If one window takes \(t_\text{cpu}\) seconds to read and normalize, and one training step takes \(t_\text{gpu}\) seconds, the GPU stays busy only if the worker pool produces faster than the GPU consumes:
-
-$$
-\frac{W}{t_\text{cpu}} \ge \frac{1}{t_\text{gpu}}
-\quad\Longleftrightarrow\quad
-W \ge \frac{t_\text{cpu}}{t_\text{gpu}}.
-$$
-
-Measure both by timing the loader loop with and without a training step, then pick \(W\) with some headroom. A typical starting point on a workstation is 8–16 workers:
-
-```python
-loader = build_loader(
-    dataset,
-    batch_size=32,
-    num_workers=8,
-    n_samples=100_000,
-    collate_fn=batch_collate,
-    sampling="random",
-    seed=0,
-    rejection_strategy="none",
-)
-```
-
-**Thread oversubscription.** Every DataLoader worker is a full Python process, and NumPy, SciPy, and MKL default to one compute thread per core. With 16 workers on a 16-core machine you get 256 threads fighting for 16 cores, and the resampling and filtering inside each window suffer. Cap the numeric libraries to a small thread count *before importing NumPy or PyTorch*:
-
-```python
-import os
-
-os.environ["OMP_NUM_THREADS"] = "2"
-os.environ["MKL_NUM_THREADS"] = "2"
-os.environ["OPENBLAS_NUM_THREADS"] = "2"
-```
-
-These are the values the research training scripts use. The environment variables must be set before the numeric libraries are imported, because they are read once at import time; `torch.set_num_threads(2)` covers PyTorch operations afterwards but not NumPy. The right value is a trade-off: with many workers, 1–2 threads per worker is usually best; with few workers, more threads per worker speed up the polyphase resampling and Butterworth filtering.
-
-<!-- TODO: the thread caps above are set ad hoc in the legacy research scripts; the library itself provides no supported helper. A small documented utility (e.g. `sleepwalker.utils.set_thread_limits(threads_per_worker=2)`) that must be called before import would remove a common footgun. See the [roadmap](../roadmap.md#provide-a-supported-thread-limit-helper). -->
-
-## PatientSampler: fewer files per epoch
-
-With uniform random sampling, every batch can touch a different patient, so a large cohort is re-opened and re-read cold every epoch. The [`PatientSampler`](../reference/api.md#build-loader) restricts each epoch to a small subset of patients and rotates the subset across epochs. Fewer distinct files per epoch means the operating system's page cache stays warm and reads become memory hits.
-
-The sampler needs a dataset that exposes `get_patient_ranges()`, i.e. a partition of the window indices into contiguous per-patient blocks. For an epoch counter \(e\), a cohort of \(N\) patients, and `patients_per_epoch = P`, the sampler shuffles the patient order once and selects
-
-$$
-S_e = \left\{\, \pi\!\left((e \cdot P + i) \bmod N\right) \;:\; i = 0, \ldots, P-1 \,\right\},
-$$
-
-a rotating window over the shuffled order. The epoch's `num_samples` windows are split as evenly as possible over the \(P\) selected patients, and within a patient, windows are drawn without replacement until that patient's windows are exhausted. If \(P\) divides \(N\), every patient is seen exactly once every \(N/P\) epochs.
-
-Selected patients are further split into locality groups of `patient_group_size` \(g\). Within a group, the per-patient index lists are interleaved round-robin, so consecutive batches draw from at most \(g\) files while the group stays active:
-
-```python
-loader = build_loader(
-    dataset,
-    batch_size=32,
-    num_workers=8,
-    n_samples=100_000,
-    collate_fn=batch_collate,
-    sampling="patient_balanced",
-    seed=0,
-    patients_per_epoch=32,
-    patient_group_size=8,
-)
-```
-
-If you omit `patient_group_size`, `build_loader` derives one as
-
-$$
-g = \min\!\left(P,\; \max\!\left(\min(16, B, P),\; \left\lceil \frac{2 \cdot W \cdot B \cdot P}{N_s} \right\rceil\right)\right),
-$$
-
-where \(B\) is the batch size, \(W\) the worker count, and \(N_s\) the number of samples per epoch. The ceiling term keeps enough files open to cover the prefetched batches (\(2W\) batches in flight), and the floor of 16 keeps batches diverse when the cohort is small.
-
-```mermaid
-block-beta
-    columns 11
-    l1["epoch 1"]
-    e1c1["P7"] e1c2["P2"] e1c3["P9"] e1c4["P4"] e1c5["P0"] e1c6["P6"] e1c7["P1"] e1c8["P8"] e1c9["P3"] e1c10["P5"]
-    l2["epoch 2"]
-    e2c1["P0"] e2c2["P6"] e2c3["P1"] e2c4["P8"] e2c5["P3"] e2c6["P5"] e2c7["P7"] e2c8["P2"] e2c9["P9"] e2c10["P4"]
-    l3["epoch 3"]
-    e3c1["P3"] e3c2["P5"] e3c3["P7"] e3c4["P2"] e3c5["P9"] e3c6["P4"] e3c7["P0"] e3c8["P6"] e3c9["P1"] e3c10["P8"]
-    l4["epoch 4"]
-    e4c1["P9"] e4c2["P4"] e4c3["P0"] e4c4["P6"] e4c5["P1"] e4c6["P8"] e4c7["P3"] e4c8["P5"] e4c9["P7"] e4c10["P2"]
-
-    classDef g1 fill:#5b9bf8,stroke:#5b9bf8,color:#0c172f
-    classDef g2 fill:#2ec4c6,stroke:#2ec4c6,color:#0c172f
-    classDef ghost fill:#16233f,stroke:#2a3a55,color:#5a6b85
-    classDef lbl fill:none,stroke:none,color:#f0f4ff
-
-    cssClass l1,l2,l3,l4 lbl
-    cssClass e1c1,e1c2,e2c1,e2c2,e3c1,e3c2,e4c1,e4c2 g1
-    cssClass e1c3,e1c4,e2c3,e2c4,e3c3,e3c4,e4c3,e4c4 g2
-    cssClass e1c5,e1c6,e1c7,e1c8,e1c9,e1c10,e2c5,e2c6,e2c7,e2c8,e2c9,e2c10,e3c5,e3c6,e3c7,e3c8,e3c9,e3c10,e4c5,e4c6,e4c7,e4c8,e4c9,e4c10 ghost
-```
-
-*With `patients_per_epoch=4` and `patient_group_size=2`, each epoch reads only four of the ten files. Group 1 (blue) is read first, group 2 (teal) next; the six dimmed files are not touched that epoch, and the touched set rotates every epoch.*
-
-!!! note "Rotate the sampler each epoch"
-    The rotation depends on the epoch counter. `BaseTrainer.set_loader_epoch()` calls `sampler.set_epoch(epoch)` for you inside the training loop. If you drive a `patient_balanced` loader yourself, call `loader.sampler.set_epoch(epoch)` at the top of every epoch, otherwise every epoch replays the same patients.
-
-!!! warning "Fewer patients means more correlated batches"
-    Windows inside one locality group come from at most \(g\) patients. Batch statistics such as BatchNorm running means therefore see strongly correlated data. Keep \(g\) at or above the diversity floor and prefer larger groups when the GPU is not I/O limited.
-
-## EDFCache: reuse decoded recordings
-
-[`EDFCache`](../reference/loading.md#edf-cache) decodes and resamples a complete recording once, then serves later windows from a memory-mapped NumPy array. The cache is shared by DataLoader worker processes, so a recording loaded by one worker can be reused by the others without sending signal samples through the manager process. It is useful during training as well as packaged inference.
-
-With `PatientSampler`, set the cache bound to cover the locality group that is active at one time. The sampler interleaves windows from the patients in one group before moving to the next group, so a cache with `max_patients` at least as large as `patient_group_size` can keep that group's complete recordings available while its windows are consumed. A larger bound also covers prefetched batches and reduces reloads when groups overlap across workers.
-
-Attach one cache to the dataset before building the training loader and close it after the loader has stopped using it:
+Initialization workers and loader workers do different jobs. The former prepare
+recordings; the latter materialize samples during execution. Tune them separately.
+`build_loader` defaults to persistent training workers and prefetch factor two
+when workers are enabled. Pinning and persistence are explicit options.
 
 ```python
 from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.training.loader import build_loader
 
-with EDFCache(max_patients=8) as cache:
-    dataset.set_edf_cache(cache)
-    loader = build_loader(
-        dataset,
-        batch_size=32,
-        num_workers=8,
-        n_samples=100_000,
-        collate_fn=batch_collate,
-        sampling="patient_balanced",
-        seed=0,
-        patients_per_epoch=32,
-        patient_group_size=8,
-        pin_memory=True,
-    )
-    train(model, loader)
-    dataset.set_edf_cache(None)
-```
-
-Here the cache can retain the eight patients in the active group, while `PatientSampler` rotates through the selected patients across epochs. This is especially useful when the same patient contributes many windows: the first window pays the full read, and later windows reuse the decoded recording. Keep `patient_group_size` and the cache bound small enough to fit complete recordings in memory, and increase the bound when prefetching causes patients to be revisited after eviction.
-
-`PackagedModel.predict_dataset()` enables this cache with `edf_cache_patients=3` by default when the dataset supports `set_edf_cache()`. The number is a patient bound, not a recording bound: all cached recordings for one patient are evicted together, and the least recently used patients are removed when the bound is exceeded. Set `edf_cache_patients=0` to disable it. Cache files use shared memory when `/dev/shm` is writable and otherwise use the system temporary directory.
-
-```python
-predictions = package.predict_dataset(
+loader = build_loader(
     dataset,
-    batch_size=64,
-    num_workers=8,
-    edf_cache_patients=3,
-    pin_memory=True,
-)
-```
-
-The cache stores the complete resampled recording after the dataset's channel selection, unit conversion, resampling, normalization, and configured filters. Each request still returns only the requested time window and channels, with the same timestamps and sample frequency as the uncached path. Cache size changes the I/O and memory cost; it does not change the model input contract.
-
-Use a bound large enough to cover the patients that the loader revisits, while leaving room for model weights and batches. A complete recording is often much larger than one window, so three cached patients can consume several gigabytes even when individual batches are small. The cache copies each requested window before releasing its entry, and `predict_dataset()` closes it in a `finally` block, including when prediction raises an exception.
-
-The cache is most useful when training or inference reads many windows from a small patient set, or when repeated views revisit the same recordings. For a large one-pass cohort, the lazy path with multiple workers usually avoids allocating memory for recordings that will not be read again. The lower-level [cache reference](../reference/loading.md#edf-cache) documents how to use `EDFCache` directly with an EDF loader.
-
-## NumpyDataset: full in-memory data
-
-The strongest optimization is to stop decoding altogether. [`export_dataloader_to_numpy_dir()`](../reference/datasets/NumpyDataset.md) runs the lazy EDF pipeline exactly once and writes the realized tensors to a directory of `.npy` files plus a `meta.json`:
-
-```python
-from sleepwalker.datasets.utils import export_dataloader_to_numpy_dir
-
-cache_dir = export_dataloader_to_numpy_dir(
-    loader,
-    "cache/train_sleep_edfx",
-    n_samples_per_file=50_000,
-)
-```
-
-`n_samples_per_file` splits each array into shards (`data.000000.npy`, `data.000001.npy`, …) so no single file grows beyond a manageable size. The export captures exactly one realized loader pass, including any dataset-side randomization that happened during that pass.
-
-[`NumpyDataset`](../reference/datasets/NumpyDataset.md) reads that directory back and serves items through the same dictionary interface, without ever touching an EDF file:
-
-```python
-from torch.utils.data import DataLoader
-
-from sleepwalker.datasets.Basedataset import batch_collate
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
-
-dataset = NumpyDataset(cache_dir, in_memory=True)
-loader = DataLoader(
-    dataset,
-    batch_size=32,
-    shuffle=True,
-    num_workers=0,
+    batch_size=128,
+    num_workers=4,  # starting point to measure, not an optimum
+    n_samples=50_000,
     collate_fn=batch_collate,
+    sampling="random",
+    seed=17,
 )
 ```
 
-The memory requirement is set by the cached arrays. With float32 data, \(N\) samples, \(T\) timesteps, and \(C\) channels,
+Try a small range of worker counts and inspect throughput and memory. Increasing
+workers can improve overlap or create CPU/memory contention. If a window costs
+`t_window` and a batch has `B` windows, the idealized supply time is approximately
+`B * t_window / W` for `W` workers. Compare that with the consumer's batch time;
+this ignores coordination, variable sample costs and shared-resource contention.
 
-$$
-M \approx 4 \cdot N \cdot T \cdot C
-$$
+Numeric libraries may use additional threads. Where oversubscription occurs,
+set `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `OPENBLAS_NUM_THREADS` before imports
+and measure a small thread limit. Not every NumPy/SciPy operation uses a threaded
+backend, and multiplying worker count by core count is not a reliable estimate
+of the actual number of running threads.
 
-bytes for `data` alone. A common configuration — 250,000 windows of 30 s at 100 Hz with one channel — needs \(4 \cdot 250{,}000 \cdot 3000 \cdot 1 \approx 2.8\) GiB, plus targets and metadata. Check this against available RAM before caching.
+## PatientSampler: an exposure policy
 
-`NumpyDataset` has two memory modes. `in_memory=True` loads the arrays fully into RAM and serving is a pure memory copy. `in_memory=False` uses `numpy.load(..., mmap_mode="r")`: the arrays stay on disk and the OS page cache decides what is resident. Memmap mode is a good middle ground when the cache is larger than RAM but the working set fits, but the first pass still reads from disk and you lose control over eviction.
+`sampling="patient_balanced"` remains available. It selects a rotating set of
+recording ranges, divides the epoch's requested windows approximately equally
+among them, and interleaves requests within `patient_group_size` groups. Despite
+the API's patient terminology, these ranges are recordings: several nights from
+one subject can remain separate ranges. Uniform random windows instead weight
+recordings in proportion to their candidate-window counts.
 
-!!! note "The cache freezes the data"
-    Because the export realizes one loader pass, everything downstream of the dataset is frozen: targets, rejection decisions, and any randomness that produced the cached items. Online augmentation or a different `prepare_target` requires re-exporting. Extra fields must have a stable, numpy-serializable shape across all items; ragged payloads fail the export loudly.
+Use this mode when those exposure semantics are intended, not as an automatic
+speed optimization. Earlier eight-worker pilots found little difference for
+arousal on A30/4090 and an approximately 11% sleep improvement on 4090, while
+A30 sleep was slightly slower. This does not establish a general throughput gain
+or a predictive-quality effect.
 
-!!! warning "Patient-balanced sampling is not available for caches"
-    `NumpyDataset` does not implement `get_patient_ranges()`, so `build_loader(..., sampling="patient_balanced")` raises a `ValueError` on a cached dataset, and trainer-side batch balancing is rejected for numpy caches as well. With an in-memory cache this costs little I/O, but the sampling semantics differ from the EDF path. <!-- TODO: add `get_patient_ranges()` to `NumpyDataset` (the `patient.npy` array already identifies the blocks) so `PatientSampler` works with caches. See the [roadmap](../roadmap.md#support-patient-balanced-sampling-for-numpy-caches). -->
+Set `patients_per_epoch` and optionally `patient_group_size` when selecting this
+mode. If omitted, group size is derived from the candidate budget, batch size,
+workers and active recording count; it is a heuristic, not a measured optimum.
+`BaseTrainer` advances the sampler epoch. Custom loops must call
+`loader.sampler.set_epoch(epoch)` to advance the rotation.
 
-## Choosing a configuration
+Grouping does not assign dedicated files to individual workers, guarantee that
+pages remain resident, or bound all prefetched work to one group. Rejection with
+global fallback can leave the selected set. These semantics are unchanged.
 
-| Configuration | RAM | Disk reads per epoch | Use when |
-| --- | --- | --- | --- |
-| EDF lazy, `num_workers=0` | minimal | full | debugging, tiny cohorts |
-| EDF shared cache for packaged inference | bounded by cached patients | one full read per cached patient | repeated windows or expert inputs |
-| EDF lazy + workers + thread caps | low | full, but overlapped with compute | default training |
-| EDF lazy + `PatientSampler` | low | reduced (warm page cache) | large cohorts, I/O-bound |
-| `NumpyDataset` in memory | high | ~none | repeated experiments, cache fits in RAM |
+## EDFCache was removed
 
-Measure before tuning: time one epoch with the training step removed to see the pure data cost, then add knobs one at a time. The remaining gaps on this page are tracked in the [roadmap](../roadmap.md).
+The former `EDFCache` stored decoded **native-rate** channel arrays, not resampled
+or filtered windows. It incurred whole-channel population, shared-registry and
+mapping costs while leaving per-window preparation in place. It is no longer a
+supported dataset or prediction feature.
+
+In the completed A30 decision screen, four epochs of 50K candidates used group
+size 8, capacity 32 in `/dev/shm`, and all combinations of 128/512 active
+recordings and 2/8 workers for two workloads. The eight matched comparisons
+showed one 2.8% total-time improvement, effectively tied sleep cases, and
+slowdowns up to 219%. These single-seed measurements did not establish a reliable
+benefit. The earlier capacity-4/group-8 configuration was substantially worse.
+
+Single-recording packaged prediction diagnostics also did not justify keeping
+it: sleep took 2.82 s without caching versus 4.69 s with capacity 3; arousal took
+1.60 s versus 4.92 s. Each condition ran once, no-cache first, with eight workers;
+cache creation/cleanup and prediction formatting were included, dataset
+initialization excluded. This is limited evidence about the former implementation,
+not proof that every form of caching is ineffective.
+
+Migration: remove `EDFCache` imports, `dataset.set_edf_cache(...)`, the `cache=`
+argument to `EDFFile.get_x/get_native`, and `edf_cache_patients` from
+`PackagedModel.predict_dataset`. Prediction now uses direct window loading.
+No replacement cache or prepared-window cache is installed automatically.
+
+## NumpyDataset: an explicit fixed window pool
+
+Materializing a loader pass remains available through
+[`export_dataloader_to_numpy_dir`](../reference/datasets/NumpyDataset.md) and
+`NumpyDataset`. This avoids repeated EDF decoding and dataset-side preprocessing
+for the exported windows, but fixes their identities and dataset-side random
+choices. Trainer-side augmentation can remain online.
+
+Include export time when comparing total runtime. The native exporter assembles
+arrays before writing shards: shard size does not bound peak export RAM. Check
+available memory and disk, not just installed capacity. Signal payload alone is
+`4 * windows * samples_per_window * channels` bytes for float32, before targets,
+metadata, temporary arrays, loaders and model memory.
+
+`in_memory=True` loads arrays into RAM; `in_memory=False` uses memory-mapped
+arrays and lets the OS determine residency. Neither guarantees a speedup for
+short runs. A fixed pool is an explicit training-data choice, not a transparent
+replacement for fresh window sampling.
+
+## Rejection and accepted work
+
+Target rejection avoids decoding, but later quality checks and fallback aliases
+can cost signal reads and processing. With the default BaseDataset retry budget,
+`patient_then_global` can attempt up to 32 candidates per requested item. Report
+accepted work rather than assuming the requested sample budget was delivered.
+
+The loader's `drop_last=True` also rejects a batch if any item remains invalid;
+it does more than omit the final short batch. This policy can discard otherwise
+valid samples and must be considered for rejection-heavy datasets. Prediction
+normally uses sequential access with rejection replacement disabled, so missing
+windows remain visible in coverage rather than being replaced by other times.
+
+## Measurement provenance
+
+The 2026-10-25 profiling used Sleepwalker revision `c36cbcb`, Python 3.12.3,
+NumPy 2.5.3, pandas 2.3.3, pyedflib 0.1.42/edflib 1.17 and Torch 2.14.1+cu130.
+The accompanying system-paper workspace retains scripts and raw JSON/CSV in
+`investigations/loading-performance/`, including `dataflow-inventory.md`, and
+the A30 cache screen in `code/results-a30-shm/`. Historical cache runs require
+the earlier implementation; they are not reproducible with a removed API simply
+by rerunning old commands. These observations motivate the current defaults,
+not hardware-independent guarantees.

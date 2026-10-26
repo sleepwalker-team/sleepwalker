@@ -1,7 +1,6 @@
 """EDF decoding, independent fitted state and recording/window processing."""
 
 from datetime import datetime
-from contextlib import nullcontext
 from unittest.mock import Mock
 
 import cloudpickle
@@ -18,7 +17,6 @@ from sleepwalker.core.signal import edf_calibration, read_edf_meta, read_edf_nat
 from sleepwalker.datasets.Apples import Apples, get_preprocessors as apples_preprocessors, correct_apples_eeg, correct_apples_waveform, correct_apples_saturation
 from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, EDFFile
 from sleepwalker.core.signal import unit_conversion_factor
-from sleepwalker.datasets.EDFCache import EDFCache
 from sleepwalker.datasets.PairedDataset import PairedDataset
 from sleepwalker.datasets.Ruhrlandklinik import get_preprocessors as ruhrland_preprocessors
 from sleepwalker.datasets.SHHS import correct_shhs_waveform, correct_shhs_saturation
@@ -131,25 +129,6 @@ def test_recording_scaler_is_reused_for_overlapping_windows(recording, resample_
         raw = file.get_x(start, start + data.total_input, data.sample_frequency, resample_type)
         raw = data.ensure_timeseries_length(raw, start)
         np.testing.assert_allclose(transformed[:, 0], scaler(raw[["A"]].to_numpy(), unit="uV", is_recording=False)[0][:, 0], atol=1e-6)
-
-
-
-@pytest.mark.parametrize("resample_type", ["nearest", "polyphase"])
-def test_cache_preserves_boundaries_and_distinguishes_modes(recording, tmp_path, resample_type):
-    data = dataset([ChannelConfig('signal', ['A'], preprocessors=[ConvertUnit('uV'), *filtered_z()])], resample_type=resample_type)
-    file = data.prepare_patient(recording, raise_errors=True)
-    start = file.start_date + pd.Timedelta("4s")
-    expected = data.get_item(file, start)["data"]
-    with EDFCache(max_patients=2, directory=tmp_path / "cache") as cache:
-        data.set_edf_cache(cache)
-        np.testing.assert_allclose(data.get_item(file, start)["data"], expected, atol=1e-6)
-        digital = dataset([ChannelConfig('signal', ['A'], read_mode='digital', preprocessors=[ConvertUnit('counts'), *filtered_z()])], resample_type=resample_type)
-        digital_file = digital.prepare_patient(recording, raise_errors=True)
-        digital_expected = digital.get_item(digital_file, start)["data"]
-        digital.set_edf_cache(cache)
-        np.testing.assert_allclose(digital.get_item(digital_file, start)["data"], digital_expected, atol=1e-6)
-        data.set_edf_cache(None)
-
 
 class WindowCenter:
 
@@ -575,10 +554,9 @@ def test_final_channel_callback_combines_physical_and_digital_sources(recording)
     assert calls == [{"physical": "dimensionless", "digital": "dimensionless"}]
 
 
-@pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("mapped", [False, True])
 @pytest.mark.parametrize("resample_type", ["nearest", "polyphase"])
-def test_mixed_read_modes_align_before_fitting_processing_and_mapping(tmp_path, cached, mapped, resample_type):
+def test_mixed_read_modes_align_before_fitting_processing_and_mapping(tmp_path, mapped, resample_type):
     path = write_edf(tmp_path / "mixed.edf", [
         {"label": "A", "sample_frequency": 32, "physical_min": 100, "physical_max": -100, "digital_min": -32767},
         {"label": "SpO2", "sample_frequency": 16, "dimension": "%", "physical_min": 0, "physical_max": 100},
@@ -609,33 +587,31 @@ def test_mixed_read_modes_align_before_fitting_processing_and_mapping(tmp_path, 
         ChannelConfig("saturation", ["SpO2"], preprocessors=[FiniteSignal()]),
     ], sample_frequency=100, total_input="5s", resample_type=resample_type,
         prepare_channels=reference if mapped else None, input_channels=["reference", "saturation"] if mapped else None)
-    with EDFCache(max_patients=2, directory=tmp_path / "cache") if cached else nullcontext() as cache:
-        data.set_edf_cache(cache)
-        file = data.prepare_patient(path, raise_errors=True)
-        assert calls == []
-        assert file.preprocessors[("digital", "A")][0].length == file.preprocessors[("saturation", "SpO2")][0].length
-        for offset in (0, 3):
-            start = file.start_date + pd.Timedelta(seconds=offset)
-            raw = data.read_channels(file, start, start + data.total_input, data.select_channels(file.channels))
-            physical, physical_units = raw["physical"]
-            digital, digital_units = raw["digital"]
-            pd.testing.assert_index_equal(physical.index, digital.index)
-            assert np.isfinite(physical.to_numpy()).all() and np.isfinite(digital.to_numpy()).all()
-            assert physical_units == {"SpO2": "%"} and digital_units == {"A": "counts"}
-            # Negative EDF gain changes the digital polarity, not its calibration.
-            calibrated = file.get_x(start, start + data.total_input, 100, resample_type, channels=["A"], cache=cache)
-            np.testing.assert_allclose(calibrated.A, digital.A * (100 / 32767), atol=1e-5)
-            saturation = file.get_x(start, start + data.total_input, 100, resample_type, channels=["SpO2"], cache=cache)
-            np.testing.assert_allclose(physical.SpO2.iloc[:len(saturation)], saturation.SpO2, atol=1e-5)
-            if resample_type == "nearest":
-                assert len(saturation) == 494 and len(physical) == 497
-                np.testing.assert_allclose(physical.SpO2.iloc[494:], saturation.SpO2.iloc[-1])
-            values = data.get_item(file, start)["data"].numpy()
-            assert values.shape == (500, 2) and np.isfinite(values).all()
-            np.testing.assert_allclose(values[len(physical):], np.repeat(values[len(physical) - 1:len(physical)], 500 - len(physical), axis=0))
-            if mapped:
-                assert calls[-1] == len(physical)
-            np.testing.assert_allclose(values[:len(physical), 1], physical.SpO2, atol=1e-5)
+    file = data.prepare_patient(path, raise_errors=True)
+    assert calls == []
+    assert file.preprocessors[("digital", "A")][0].length == file.preprocessors[("saturation", "SpO2")][0].length
+    for offset in (0, 3):
+        start = file.start_date + pd.Timedelta(seconds=offset)
+        raw = data.read_channels(file, start, start + data.total_input, data.select_channels(file.channels))
+        physical, physical_units = raw["physical"]
+        digital, digital_units = raw["digital"]
+        pd.testing.assert_index_equal(physical.index, digital.index)
+        assert np.isfinite(physical.to_numpy()).all() and np.isfinite(digital.to_numpy()).all()
+        assert physical_units == {"SpO2": "%"} and digital_units == {"A": "counts"}
+        # Negative EDF gain changes the digital polarity, not its calibration.
+        calibrated = file.get_x(start, start + data.total_input, 100, resample_type, channels=["A"])
+        np.testing.assert_allclose(calibrated.A, digital.A * (100 / 32767), atol=1e-5)
+        saturation = file.get_x(start, start + data.total_input, 100, resample_type, channels=["SpO2"])
+        np.testing.assert_allclose(physical.SpO2.iloc[:len(saturation)], saturation.SpO2, atol=1e-5)
+        if resample_type == "nearest":
+            assert len(saturation) == 494 and len(physical) == 497
+            np.testing.assert_allclose(physical.SpO2.iloc[494:], saturation.SpO2.iloc[-1])
+        values = data.get_item(file, start)["data"].numpy()
+        assert values.shape == (500, 2) and np.isfinite(values).all()
+        np.testing.assert_allclose(values[len(physical):], np.repeat(values[len(physical) - 1:len(physical)], 500 - len(physical), axis=0))
+        if mapped:
+            assert calls[-1] == len(physical)
+        np.testing.assert_allclose(values[:len(physical), 1], physical.SpO2, atol=1e-5)
 
 
 def test_final_channel_callback_receives_counts_but_not_quality_signals(recording):

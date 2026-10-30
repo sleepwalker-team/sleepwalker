@@ -74,6 +74,7 @@ The available preprocessors (`Spectrogram`, `WindowedSpectrogram`, `Normalize`, 
 | Self-supervised pretraining | `MaskedAutoencoder`, `CLSMaskedAutoencoder` | Reconstruction objectives; modality-keyed inputs (not `BaseModel`). |
 | Reuse a pretrained package as a backbone | `PackagedClassifierModel`, `PackagedSequenceClassifierModel` | Frozen encoder + trainable head; see below. |
 | Released foundation embeddings | `SleepFM`, `OSF` | Native model classes with verified weights; see [Use foundation models](foundation-models.md). |
+| Fixed features with a trained head | `EncoderClassifier` with `MiniRocket`, `Rocket`, `MultiRocket`, `Hydra` or `YasaFeatures` | Only the head is trained; see `configs/examples/encoder_classifier_sleep_edfx.yml`. |
 | One encoder, several task heads | `MultiTaskClassifierModel` | Shared features with a separate output contract per task; pairs with `MultiLabelTrainer`. |
 | Several packaged experts | `StackedClassifierModel` | Aligns native expert predictions and learns task corrections; pairs with `PairedDataset`. |
 

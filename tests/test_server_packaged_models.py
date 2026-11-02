@@ -9,11 +9,11 @@ from fastapi.testclient import TestClient
 from pyedflib import highlevel
 import pytest
 
+from sleepwalker.server.inference.catalog import ModelCatalog
 from sleepwalker.server.app import create_local_app
-from sleepwalker.server.services import subprocess_inference
-from sleepwalker.server.services.job_executor import JobCancelledError
-from sleepwalker.server.services.model_registry import load_model_registry
-from sleepwalker.server.services.subprocess_inference import SubprocessInferenceClient
+from sleepwalker.server.inference import runner as subprocess_inference
+from sleepwalker.server.core.jobs import JobCancelledError
+from sleepwalker.server.inference.runner import SubprocessInferenceClient
 
 
 @pytest.fixture
@@ -113,7 +113,7 @@ def test_real_worker_rejects_modified_model_without_partial_results(real_model_c
         metadata["classification"]["classes"].reverse()
         (modified / "manifest.json").write_text(json.dumps(metadata))
     app = create_local_app(modified.parent, inference_python=python, batch_size=1)
-    model = app.state.model_registry.list()[0]
+    model = app.state.model_catalog.list()[0]
     with TestClient(app) as client:
         with synthetic_model_edf.open("rb") as file:
             created = client.post("/api/v1/sessions", files={"files": ("synthetic.edf", file)})
@@ -134,7 +134,7 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
     headers = [highlevel.make_signal_header("C3-M2", dimension="uV", sample_frequency=100, physical_min=-500, physical_max=500)]
     assert highlevel.write_edf(str(path), [np.sin(np.arange(3000))], headers, header=highlevel.make_header(startdate=datetime(2025, 1, 1)))
     app = create_local_app(models, inference_python=python, batch_size=1)
-    model = next(model for model in app.state.model_registry.list() if model.task == "sleep")
+    model = next(model for model in app.state.model_catalog.list() if model.task == "sleep")
     with TestClient(app) as client:
         with path.open("rb") as file:
             created = client.post("/api/v1/sessions", files={"files": (path.name, file)})
@@ -149,7 +149,7 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
 
 def test_real_worker_cancellation_removes_owned_edf_cache(real_model_configuration, synthetic_model_edf, tmp_path, monkeypatch):
     python, models = real_model_configuration
-    model = next(model for model in load_model_registry(models).list() if model.task == "sleep")
+    model = next(model for model in ModelCatalog(models).list() if model.task == "sleep")
     original_directory = subprocess_inference.TemporaryDirectory
     paths = []
     def create_directory(**kwargs):

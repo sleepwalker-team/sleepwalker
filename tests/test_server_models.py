@@ -3,11 +3,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry
+from sleepwalker.server.inference.catalog import ModelInfo, ModelCatalog
 
 
 def test_list_models_returns_registered_models_sorted_by_id() -> None:
-    registry = ModelRegistry(
+    registry = ModelCatalog(models=
         [
             ModelInfo(
                 id="model-z",
@@ -32,7 +32,7 @@ def test_list_models_returns_registered_models_sorted_by_id() -> None:
         ]
     )
 
-    with TestClient(create_app(model_registry=registry)) as client:
+    with TestClient(create_app(model_catalog=registry)) as client:
         response = client.get("/api/v1/models")
 
     assert response.status_code == 200
@@ -75,7 +75,7 @@ def test_get_model_returns_registered_model() -> None:
     )
 
     with TestClient(
-        create_app(model_registry=ModelRegistry([model]))
+        create_app(model_catalog=ModelCatalog(models=[model]))
     ) as client:
         response = client.get("/api/v1/models/sleep-model")
 
@@ -93,7 +93,7 @@ def test_get_model_returns_registered_model() -> None:
 
 def test_get_unknown_model_returns_not_found() -> None:
     with TestClient(
-        create_app(model_registry=ModelRegistry())
+        create_app(model_catalog=ModelCatalog())
     ) as client:
         response = client.get("/api/v1/models/unknown")
 

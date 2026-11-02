@@ -1,38 +1,20 @@
 import asyncio
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, status
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from ..errors import APIError
-from ..schemas.common import ErrorDetail, ErrorResponse
-from ..schemas.job import JobResponse
-from ..services.job_events import JobSubscription
-from ..services.job_service import JobService
-from ..stores.job_store import Job, JobState
+from ..core.jobs import TERMINAL_STATES, Job, JobService, JobSubscription
+from .deps import Jobs
+from .errors import conflict, not_found
+from .schemas import ErrorDetail, ErrorResponse, JobResponse
 
-
-router = APIRouter(
-    prefix="/api/v1/jobs",
-    tags=["jobs"],
-)
-
-
-def get_job_service(request: Request) -> JobService:
-    return request.app.state.job_service
+router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
 def to_job_response(job: Job) -> JobResponse:
-    error = None
-
-    if job.error is not None:
-        error = ErrorDetail(
-            code=job.error.code,
-            message=job.error.message,
-            details=job.error.details,
-        )
-
+    error = ErrorDetail(code=job.error.code, message=job.error.message, details=job.error.details) if job.error is not None else None
     return JobResponse(
         id=job.id,
         type=job.type,
@@ -45,32 +27,19 @@ def to_job_response(job: Job) -> JobResponse:
     )
 
 
-@router.get(
-    "/{job_id}",
-    response_model=JobResponse,
-)
-def get_job(
-    job_id: str,
-    service: JobService = Depends(get_job_service),
-) -> JobResponse:
-    job = service.snapshot(job_id)
+def _job_not_found():
+    return not_found("JOB_NOT_FOUND", "Job not found.")
 
+
+@router.get("/{job_id}", response_model=JobResponse)
+def get_job(job_id: str, jobs: Jobs) -> JobResponse:
+    job = jobs.snapshot(job_id)
     if job is None:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="JOB_NOT_FOUND",
-            message="Job not found.",
-        )
-
+        raise _job_not_found()
     return to_job_response(job)
 
 
-async def stream_job_events(
-    job_id: str,
-    service: JobService,
-    subscription: JobSubscription,
-    heartbeat_seconds: float = 15.0,
-) -> AsyncIterator[str]:
+async def stream_job_events(job_id: str, jobs: JobService, subscription: JobSubscription, heartbeat_seconds: float = 15.0) -> AsyncIterator[str]:
     try:
         while True:
             try:
@@ -80,18 +49,15 @@ async def stream_job_events(
                 continue
 
             if job is None:
-                error = ErrorResponse(
-                    error=ErrorDetail(code="JOB_NOT_FOUND", message="Job was deleted.", details={"job_id": job_id}),
-                )
+                error = ErrorResponse(error=ErrorDetail(code="JOB_NOT_FOUND", message="Job was deleted.", details={"job_id": job_id}))
                 yield f"event: job_deleted\ndata: {error.model_dump_json()}\n\n"
                 return
 
-            data = to_job_response(job).model_dump_json()
-            yield f"event: job_update\ndata: {data}\n\n"
-            if job.state in {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}:
+            yield f"event: job_update\ndata: {to_job_response(job).model_dump_json()}\n\n"
+            if job.state in TERMINAL_STATES:
                 return
     finally:
-        service.unsubscribe(job_id, subscription)
+        jobs.unsubscribe(job_id, subscription)
 
 
 @router.get(
@@ -102,52 +68,28 @@ async def stream_job_events(
         404: {"model": ErrorResponse},
     },
 )
-async def get_job_events(
-    job_id: str,
-    service: JobService = Depends(get_job_service),
-) -> StreamingResponse:
+async def get_job_events(job_id: str, jobs: Jobs) -> StreamingResponse:
     try:
-        subscription = service.subscribe(job_id)
+        subscription = jobs.subscribe(job_id)
     except KeyError as exc:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="JOB_NOT_FOUND",
-            message="Job not found.",
-        ) from exc
+        raise _job_not_found() from exc
 
     return StreamingResponse(
-        stream_job_events(job_id, service, subscription),
+        stream_job_events(job_id, jobs, subscription),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        background=BackgroundTask(service.unsubscribe, job_id, subscription),
+        # A client that disconnects before streaming starts never runs the generator's cleanup.
+        background=BackgroundTask(jobs.unsubscribe, job_id, subscription),
     )
 
 
-@router.post(
-    "/{job_id}/cancel",
-    response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def cancel_job(
-    job_id: str,
-    service: JobService = Depends(get_job_service),
-) -> JobResponse:
+@router.post("/{job_id}/cancel", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+def cancel_job(job_id: str, jobs: Jobs) -> JobResponse:
     try:
-        job = service.request_cancel(job_id)
+        return to_job_response(jobs.request_cancel(job_id))
     except KeyError as exc:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="JOB_NOT_FOUND",
-            message="Job not found.",
-        ) from exc
+        raise _job_not_found() from exc
     except ValueError as exc:
-        job = service.get(job_id)
+        job = jobs.get(job_id)
         details = {"state": job.state.value} if job is not None else None
-        raise APIError(
-            status_code=status.HTTP_409_CONFLICT,
-            code="INVALID_JOB_STATE",
-            message="Job cannot be cancelled in its current state.",
-            details=details,
-        ) from exc
-
-    return to_job_response(job)
+        raise conflict("INVALID_JOB_STATE", "Job cannot be cancelled in its current state.", details) from exc

@@ -3,10 +3,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.services.signal_reader import SignalSamples
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
-from sleepwalker.server.validation.study import SignalInfo
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.recording.signals import SignalSamples
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import SignalInfo
 
 
 class FakeSignalReader:
@@ -14,14 +14,17 @@ class FakeSignalReader:
         self, _source_path: Path, _signal_id: str, start: float, end: float, *, max_points: int = 2000,
     ) -> SignalSamples:
         points = [(float(index), float(index - 5)) for index in range(10) if start <= index < end]
+        count = len(points)
+        points = [*points[:max_points - 1], points[-1]] if count > max_points else points
         return SignalSamples(
             times=[time for time, _ in points],
             values=[value for _, value in points],
+            sample_count=count,
         )
 
 
 def create_signal_app():
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[Path("/recordings/test.edf")])
     session.state = SessionState.READY
     session.duration = 10.0
@@ -89,7 +92,7 @@ def test_get_signal_data_rejects_unknown_signal() -> None:
 
 def test_real_edf_signal_query_returns_bounded_points_and_downsampled_flag() -> None:
     path = Path(__file__).parent / "data" / "signals_01.edf"
-    sessions = SessionService(SessionStore())
+    sessions = SessionService()
     session = sessions.create([path])
     session.state = SessionState.READY
     session.duration = 3600.0

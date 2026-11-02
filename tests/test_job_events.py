@@ -4,13 +4,13 @@ from threading import Thread
 import pytest
 
 from sleepwalker.server.api.jobs import stream_job_events
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.stores.job_store import JobError, JobPhase, JobState, JobStore
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
 def test_subscription_preserves_initial_state_and_update_snapshots() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
         subscription = service.subscribe(job.id)
         service.mark_running(job.id, JobPhase.LOADING, "Loading model")
@@ -32,7 +32,7 @@ def test_subscription_preserves_initial_state_and_update_snapshots() -> None:
 
 def test_worker_thread_wakes_waiting_subscription() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "export")
         subscription = service.subscribe(job.id)
         await subscription.get()
@@ -53,7 +53,7 @@ def test_worker_thread_wakes_waiting_subscription() -> None:
 
 def test_multiple_clients_and_jobs_have_independent_subscriptions() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-a", "inference")
         other_job = service.create("sess-b", "import")
         first = service.subscribe(job.id)
@@ -82,7 +82,7 @@ def test_multiple_clients_and_jobs_have_independent_subscriptions() -> None:
 
 def test_slow_client_buffer_is_bounded_and_preserves_terminal_state() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
         subscription = service.subscribe(job.id)
         service.mark_running(job.id, JobPhase.INFERENCE, "Running")
@@ -107,7 +107,7 @@ def test_slow_client_buffer_is_bounded_and_preserves_terminal_state() -> None:
 
 def test_cancellation_is_published_once_and_failure_details_are_copied() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         cancelled = service.create("sess-a", "inference")
         subscription = service.subscribe(cancelled.id)
         await subscription.get()
@@ -137,7 +137,7 @@ def test_cancellation_is_published_once_and_failure_details_are_copied() -> None
 
 def test_deleted_job_wakes_subscribers_and_removes_registrations() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
         subscription = service.subscribe(job.id)
         await subscription.get()
@@ -153,7 +153,7 @@ def test_deleted_job_wakes_subscribers_and_removes_registrations() -> None:
 
 def test_stream_heartbeats_and_client_close_release_subscription() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "export")
         subscription = service.subscribe(job.id)
         stream = stream_job_events(job.id, service, subscription, heartbeat_seconds=0.005)
@@ -169,7 +169,7 @@ def test_stream_heartbeats_and_client_close_release_subscription() -> None:
 
 def test_stream_sends_deletion_event_and_closes() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
         subscription = service.subscribe(job.id)
         stream = stream_job_events(job.id, service, subscription)

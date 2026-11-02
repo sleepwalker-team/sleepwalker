@@ -36,7 +36,7 @@ def isolate_default_server_storage(request, monkeypatch):
     }:
         return
 
-    from sleepwalker.server.storage.temporary_storage import TemporaryStorage
+    from sleepwalker.server.core.storage import TemporaryStorage
 
     isolated_root = request.getfixturevalue("tmp_path") / "default-server-storage"
     original_init = TemporaryStorage.__init__

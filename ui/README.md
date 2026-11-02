@@ -2,7 +2,7 @@
 
 Schlichte Browseroberfläche für EDF-Aufnahmen: Server verbinden, Session öffnen,
 Modelle ausführen, Signale und Vorhersagen sichten, korrigieren und exportieren.
-Der gesamte neue Code liegt in `ui/`. `sleepwalker/server/` bleibt unverändert.
+Der gesamte UI-Code liegt in `ui/`; die API ist in [`sleepwalker/server/`](../sleepwalker/server/README.md) beschrieben.
 
 [Vorschau des Viewers](screenshots/viewer.png) · [Einstieg](screenshots/entry.png)
 [Intervallauswahl und Rechtsklick](screenshots/correction-menu.png) ·
@@ -260,7 +260,7 @@ deterministische Testmodelle. Diese dienen zur Prüfung der GUI-Abläufe und sin
 keine medizinischen Modelle. Der normale UI-Start enthält keine Testmodelle.
 
 Verwendete Integrationsschnittstellen: [Dash clientside callbacks](https://dash.plotly.com/clientside-callbacks)
-und die vorhandene [Plotly-Integrationsbeschreibung](../sleepwalker/server/PLOTLY.md).
+und die vorhandene [Plotly-Beschreibung](../sleepwalker/server/README.md#signals).
 
 Geprüfter Stand vom 16. Oktober 2026: 114 GUI-/API-Integrationstests bestanden,
 vollständiger Chromium-Durchlauf einschließlich Kanalwechsel, Zoom, Korrekturen,

@@ -6,14 +6,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sleepwalker.server.services.plotly_service import (
-    EdfPlotSignalReader, HighFrequencySignal, PlotFigureNotFoundError,
-    PlotlyService, PlotlyUnavailableError, PlotSessionNotFoundError,
-)
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.services.signal_reader import SignalNotFoundError
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
-from sleepwalker.server.validation.study import SignalInfo, StudyFormat
+from sleepwalker.server.recording.plots import EdfPlotSignalReader, HighFrequencySignal, PlotFigureNotFoundError, PlotlyService, PlotlyUnavailableError, PlotSessionNotFoundError
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.recording.signals import SignalNotFoundError
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 
 def make_session(service, source_path=Path("recording.edf")):
@@ -53,7 +50,7 @@ class FakeFigure:
 
 
 def make_service():
-    sessions = SessionService(SessionStore())
+    sessions = SessionService()
     reader = FakeReader()
     return PlotlyService(sessions, signal_reader=reader, figure_factory=FakeFigure), sessions, reader
 
@@ -101,7 +98,7 @@ def test_deleting_session_releases_only_its_figures():
 
 def test_zoom_renews_session_and_expired_session_rejects_updates():
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    sessions = SessionService(SessionStore(), clock=lambda: now)
+    sessions = SessionService(clock=lambda: now)
     plots = PlotlyService(sessions, signal_reader=FakeReader(), figure_factory=FakeFigure)
     session = make_session(sessions)
     plots.create_figure(session.id, ["eeg"])
@@ -214,7 +211,7 @@ def test_plot_dependencies_are_optional_and_missing_dependencies_fail_before_edf
 
     monkeypatch.setattr(builtins, "__import__", without_plotly)
     from sleepwalker.server.app import create_app
-    from sleepwalker.server.storage.temporary_storage import TemporaryStorage
+    from sleepwalker.server.core.storage import TemporaryStorage
     app = create_app(temporary_storage=TemporaryStorage(tmp_path / "storage"))
     assert isinstance(app.state.plotly_service, PlotlyService)
     session = make_session(app.state.session_service)
@@ -247,7 +244,7 @@ def test_full_resolution_reader_keeps_all_samples_and_closes_file(monkeypatch):
             self.closed = True
 
     reader = Reader()
-    monkeypatch.setattr("sleepwalker.server.services.plotly_service.pyedflib.EdfReader", lambda _: reader)
+    monkeypatch.setattr("sleepwalker.server.recording.plots.pyedflib.EdfReader", lambda _: reader)
     signals = [SignalInfo("eeg", "EEG", "uV", 100), SignalInfo("eog", "EOG", "uV", 100)]
     data = EdfPlotSignalReader().read(Path("test.edf"), signals)
     assert reader.closed
@@ -273,7 +270,7 @@ def test_full_resolution_reader_closes_file_on_missing_signal(monkeypatch):
             self.closed = True
 
     reader = Reader()
-    monkeypatch.setattr("sleepwalker.server.services.plotly_service.pyedflib.EdfReader", lambda _: reader)
+    monkeypatch.setattr("sleepwalker.server.recording.plots.pyedflib.EdfReader", lambda _: reader)
     with pytest.raises(SignalNotFoundError):
         EdfPlotSignalReader().read(Path("test.edf"), [SignalInfo("eeg", "EEG", "uV", 100)])
     assert reader.closed

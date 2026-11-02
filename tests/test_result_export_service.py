@@ -1,21 +1,14 @@
+from sleepwalker.server.results.exports import ExportService
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from sleepwalker.server.services.annotation_service import AnnotationService
-from sleepwalker.server.services.result_export_service import (
-    ResultExportOptions,
-    ResultExportService,
-)
-from sleepwalker.server.stores.annotation_store import AnnotationStore
-from sleepwalker.server.stores.prediction_store import (
-    PredictionKind,
-    PredictionResult,
-    PredictionStore,
-)
-from sleepwalker.server.stores.session_store import Session, SessionState
-from sleepwalker.server.validation.study import SignalInfo, StudyFormat
+from sleepwalker.server.results.annotations import AnnotationService
+from sleepwalker.server.results.exports import ResultExportOptions
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult, PredictionStore
+from sleepwalker.server.core.sessions import Session, SessionState
+from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 
 def _session() -> Session:
@@ -52,9 +45,10 @@ def test_builds_portable_result_payload_with_predictions_and_annotations() -> No
             ),
         )
     )
-    annotation_service = AnnotationService(AnnotationStore())
+    annotation_service = AnnotationService()
     edit = annotation_service.set_label("sess-test", "sleep_stage", 0.0, "n1")
-    service = ResultExportService(
+    service = ExportService(
+        None,
         prediction_store,
         annotation_service,
         clock=lambda: datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc),
@@ -125,7 +119,7 @@ def test_can_omit_probabilities_and_exports_continuous_hard_labels() -> None:
             kind=PredictionKind.CONTINUOUS,
         )
     )
-    service = ResultExportService(prediction_store, AnnotationService(AnnotationStore()))
+    service = ExportService(None, prediction_store, AnnotationService())
 
     payload = service.build_payload(
         _session(),
@@ -136,7 +130,7 @@ def test_can_omit_probabilities_and_exports_continuous_hard_labels() -> None:
 
 
 def test_can_exclude_optional_result_sections() -> None:
-    service = ResultExportService(PredictionStore(), AnnotationService(AnnotationStore()))
+    service = ExportService(None, PredictionStore(), AnnotationService())
 
     payload = service.build_payload(
         _session(),

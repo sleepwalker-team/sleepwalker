@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from sleepwalker.server.stores.prediction_store import PredictionResult, PredictionStore
+from sleepwalker.server.results.predictions import PredictionResult, PredictionStore
 
 
 def create_result(
@@ -26,7 +26,7 @@ def test_prediction_store_adds_lists_and_deletes_results() -> None:
 
     store.add_many([result_b, result_a])
 
-    assert store.get("sess-a", "model-a") is not None
+    assert store.get_by_task("sess-a", "sleep_stage") is not None
     assert [result.model_id for result in store.list_for_session("sess-a")] == ["model-a", "model-b"]
     assert store.delete_session("sess-a") == 2
     assert store.list_for_session("sess-a") == []
@@ -39,7 +39,7 @@ def test_prediction_store_copies_frame_when_adding() -> None:
     store.add(result)
     result.frame.loc[0, "prediction"] = "n1"
 
-    stored = store.get(result.session_id, result.model_id)
+    stored = store.get_by_task(result.session_id, result.task)
     assert stored is not None
     assert stored.frame.loc[0, "prediction"] == "wake"
 
@@ -56,7 +56,7 @@ def test_prediction_store_add_many_is_atomic_on_conflict() -> None:
             ]
         )
 
-    assert store.get("sess-b", "model-b") is None
+    assert store.list_for_session("sess-b") == []
 
 
 def test_prediction_store_rejects_duplicate_task_for_session() -> None:

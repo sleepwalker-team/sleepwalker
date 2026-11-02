@@ -8,12 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.export_store import Export, ExportState, ExportStore
-from sleepwalker.server.stores.job_store import JobStore
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.results.exports import Export, ExportState
+from sleepwalker.server.core.sessions import SessionState
 
 
 def _ready_session(service: SessionService):
@@ -25,12 +24,10 @@ def _ready_session(service: SessionService):
 
 
 def test_result_export_lifecycle_and_download(tmp_path) -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = _ready_session(session_service)
-    export_store = ExportStore()
     app = create_app(
         session_service=session_service,
-        export_store=export_store,
         temporary_storage=TemporaryStorage(tmp_path / "uploads"),
     )
 
@@ -79,9 +76,9 @@ def test_export_rejects_unknown_session() -> None:
 
 
 def test_export_rejects_second_active_session_job() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = _ready_session(session_service)
-    job_service = JobService(JobStore())
+    job_service = JobService()
     active_job = job_service.create(session.id, "inference")
     app = create_app(session_service=session_service, job_service=job_service)
 
@@ -108,9 +105,9 @@ def test_export_status_rejects_unknown_export() -> None:
 
 
 def test_download_rejects_export_that_is_not_ready() -> None:
-    export_store = ExportStore()
     now = datetime.now(timezone.utc)
-    export_store.add(
+    app = create_app()
+    app.state.export_service.add(
         Export(
             id="export-test",
             session_id="sess-test",
@@ -123,7 +120,7 @@ def test_download_rejects_export_that_is_not_ready() -> None:
         )
     )
 
-    with TestClient(create_app(export_store=export_store)) as client:
+    with TestClient(app) as client:
         response = client.get("/api/v1/exports/export-test/download")
 
     assert response.status_code == 409
@@ -135,7 +132,7 @@ def test_download_rejects_export_that_is_not_ready() -> None:
 
 
 def test_workspace_download_and_session_delete(tmp_path) -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = _ready_session(session_service)
     source = tmp_path / "record.edf"
     source.write_bytes(b"test recording")
@@ -176,7 +173,7 @@ def test_workspace_download_and_session_delete(tmp_path) -> None:
     {"format": "sleepwalker", "mode": "workspace", "include": {"metadata": False}},
 ])
 def test_export_rejects_invalid_format_mode_combinations(payload) -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = _ready_session(session_service)
     with TestClient(create_app(session_service=session_service)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/exports", json=payload)

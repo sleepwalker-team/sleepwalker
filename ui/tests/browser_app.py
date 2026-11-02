@@ -9,10 +9,10 @@ import pandas as pd
 import uvicorn
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.job_store import JobPhase
-from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionResult, PredictionStore
+from sleepwalker.server.inference.catalog import ModelInfo, ModelCatalog
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.core.jobs import JobPhase
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult, PredictionStore
 
 from ui.app import create_ui_app
 
@@ -58,7 +58,7 @@ def test_api(root):
                             classes=("artifact",), input_channels=("C3-M2", "E1-M2", "Chin EMG", "ECG"),
                             capabilities=("classification",), output_resolution=1, package_path=Path("test-only")))
     store = PredictionStore()
-    return create_app(model_registry=ModelRegistry(models), prediction_store=store,
+    return create_app(model_catalog=ModelCatalog(models=models), prediction_store=store,
                       inference_runner=TestRunner(store), temporary_storage=TemporaryStorage(root))
 
 

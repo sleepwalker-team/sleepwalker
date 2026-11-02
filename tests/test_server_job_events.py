@@ -5,9 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.job_store import JobError, JobPhase, JobState, JobStore
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
 def _events(text):
@@ -21,7 +21,7 @@ def _events(text):
 
 @pytest.mark.parametrize("state", [JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED])
 def test_terminal_job_sends_one_event_with_public_job_schema_and_closes(state) -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create("sess-test", "inference", {"secret": "private parameters"})
     if state == JobState.CANCELLED:
         service.request_cancel(job.id)
@@ -47,7 +47,7 @@ def test_terminal_job_sends_one_event_with_public_job_schema_and_closes(state) -
 
 
 def test_events_for_unknown_job_return_normal_json_error() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     with TestClient(create_app(job_service=service)) as client:
         response = client.get("/api/v1/jobs/job-missing/events")
     assert response.status_code == 404
@@ -80,7 +80,7 @@ async def _request_stream(app, job_id, on_event):
 
 def test_open_stream_delivers_running_progress_and_completion() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
 
         def update(event, received):
@@ -101,7 +101,7 @@ def test_open_stream_delivers_running_progress_and_completion() -> None:
 
 def test_disconnected_client_releases_subscription_without_cancelling_job() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
 
         def disconnect(event, received):
@@ -117,7 +117,7 @@ def test_disconnected_client_releases_subscription_without_cancelling_job() -> N
 
 def test_deleted_job_sends_deletion_event_and_closes_stream() -> None:
     async def scenario():
-        service = JobService(JobStore())
+        service = JobService()
         job = service.create("sess-test", "inference")
 
         def delete(event, received):
@@ -149,7 +149,7 @@ def test_session_deletion_cancels_job_and_closes_stream(tmp_path) -> None:
         events = await _request_stream(app, job.id, delete_and_cancel)
         assert [data["state"] for _, data in events] == ["queued", "cancelling", "cancelled"]
         assert app.state.job_service.get(job.id) is None
-        assert app.state.session_service.store.get(session.id) is None
+        assert app.state.session_service.peek(session.id) is None
         assert app.state.job_service._subscriptions == {}
 
     asyncio.run(scenario())

@@ -7,10 +7,10 @@ from dash import no_update
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.services.plotly_service import HighFrequencySignal
-from sleepwalker.server.stores.session_store import SessionState
-from sleepwalker.server.validation.study import SignalInfo, StudyFormat
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.recording.plots import HighFrequencySignal
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 from ui.app import create_ui_app
 from ui.plots import PlotController, apply_assignments, time_range

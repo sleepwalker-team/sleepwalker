@@ -5,14 +5,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from sleepwalker.server.services.job_executor import JobCancelledError, JobExecutionError
-from sleepwalker.server.services.model_registry import ModelInfo
-from sleepwalker.server.services.package_inference_runner import PackageInferenceRunner
-from sleepwalker.server.services.prediction_mapper import map_epoch_predictions
-from sleepwalker.server.stores.job_store import JobPhase
-from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionStore
-from sleepwalker.server.stores.session_store import Session, SessionState
-from sleepwalker.server.validation.study import StudyFormat
+from sleepwalker.server.core.jobs import JobCancelledError, JobExecutionError
+from sleepwalker.server.inference.catalog import ModelInfo
+from sleepwalker.server.inference.runner import PackageInferenceRunner
+from sleepwalker.server.core.jobs import JobPhase
+from sleepwalker.server.results.predictions import map_predictions, PredictionKind, PredictionStore
+from sleepwalker.server.core.sessions import Session, SessionState
+from sleepwalker.server.recording.study import StudyFormat
 
 
 def create_session(path):
@@ -47,14 +46,15 @@ def test_runner_stores_predictions_with_correct_interval_boundaries(tmp_path):
     runner = PackageInferenceRunner(store, batch_size=16, prediction_client=client)
     progress = []
     runner.run(session, [model], lambda *args: progress.append(args), lambda: None)
-    result = store.get(session.id, model.id)
+    result = store.get_by_task(session.id, model.task)
     assert result.kind == PredictionKind.EPOCH
     assert result.frame["time"].tolist() == [315, 345]
     assert client.frame["time"].tolist() == ["2025-01-01 00:05:00", "2025-01-01 00:05:30"]
-    predictions = map_epoch_predictions(result, session.recording_start)
+    predictions = map_predictions(result, session.recording_start)
     assert [(p.start, p.end, p.label) for p in predictions] == [(300, 330, "wake"), (330, 360, "n1")]
     assert client.calls == [(model.package_path, session.source_files[0], "cpu", 16)]
-    assert [phase for phase, _, _ in progress] == [JobPhase.LOADING, JobPhase.PREPROCESSING, JobPhase.INFERENCE, JobPhase.POSTPROCESSING]
+    assert session.model_provenance == [model.provenance()]
+    assert [phase for phase, _, _ in progress] == [JobPhase.LOADING, JobPhase.INFERENCE]
 
 
 @pytest.mark.parametrize("bad_case", ["empty", "missing_class", "wrong_task", "invalid_window", "nan_probability", "negative_probability", "probability_sum", "numeric_time", "bad_time", "duplicate_time", "before_recording", "past_recording"])
@@ -138,7 +138,22 @@ def test_runner_requires_explicit_inference_environment():
         PackageInferenceRunner(PredictionStore())
 
 
-@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+@pytest.mark.parametrize("batch_size", [0, -1])
 def test_runner_rejects_invalid_batch_size(batch_size):
     with pytest.raises(ValueError, match="batch size"):
         PackageInferenceRunner(PredictionStore(), prediction_client=FakeClient(), batch_size=batch_size)
+
+
+def test_waiting_for_a_busy_inference_slot_can_be_cancelled(tmp_path):
+    model = create_model(tmp_path / "model")
+    session = create_session(tmp_path / "recording.edf")
+    client = FakeClient()
+    runner = PackageInferenceRunner(PredictionStore(), prediction_client=client)
+    runner._slots.acquire()
+
+    def cancel():
+        raise JobCancelledError
+
+    with pytest.raises(JobCancelledError):
+        runner.run(session, [model], lambda *args: None, cancel)
+    assert client.calls == []

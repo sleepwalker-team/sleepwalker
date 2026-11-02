@@ -5,10 +5,10 @@ import time
 
 import pytest
 
-from sleepwalker.server.services import subprocess_inference
-from sleepwalker.server.services.job_executor import JobCancelledError, JobExecutionError
-from sleepwalker.server.services.model_registry import read_model_manifest
-from sleepwalker.server.services.subprocess_inference import SubprocessInferenceClient
+from sleepwalker.server.inference import runner as subprocess_inference
+from sleepwalker.server.core.jobs import JobCancelledError, JobExecutionError
+from sleepwalker.server.inference.catalog import read_model_manifest
+from sleepwalker.server.inference.runner import SubprocessInferenceClient
 
 
 @pytest.fixture
@@ -88,10 +88,9 @@ def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp
     from fastapi.testclient import TestClient
 
     from sleepwalker.server.app import create_app
-    from sleepwalker.server.services.job_executor import LocalJobExecutor
-    from sleepwalker.server.services.job_service import JobService
-    from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-    from sleepwalker.server.stores.job_store import JobStore
+    from sleepwalker.server.core.jobs import JobExecutor
+    from sleepwalker.server.core.jobs import JobService
+    from sleepwalker.server.core.storage import TemporaryStorage
 
     path, _ = make_model_package()
     model = read_model_manifest(path)
@@ -100,13 +99,13 @@ def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp
         "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': False, 'code': 'RESOURCE_EXHAUSTED', 'message': 'private details'}))\n"
         "sys.exit(1)\n"
     )
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
 
     def operation(_report_progress, check_cancelled):
         SubprocessInferenceClient(Path(sys.executable)).predict(model, tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
 
-    LocalJobExecutor(service).execute(job.id, operation)
+    JobExecutor(service).execute(job.id, operation)
     with TestClient(create_app(job_service=service, temporary_storage=TemporaryStorage(tmp_path / "server-storage"))) as client:
         response = client.get(f"/api/v1/jobs/{job.id}")
         events = client.get(f"/api/v1/jobs/{job.id}/events")

@@ -1,42 +1,17 @@
 import math
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, status
 
-from ..errors import APIError
-from ..schemas.signal import (
-    SignalDataResponse,
-    SignalListResponse,
-    SignalSummaryResponse,
-)
-from ..services.session_service import SessionService
-from ..services.signal_reader import SignalNotFoundError, SignalReader, downsample_extrema
-
+from ..recording.signals import MAX_POINTS_LIMIT, MIN_POINTS, SignalNotFoundError
+from .deps import SessionDep, SignalReader
+from .errors import APIError, bad_request, conflict, not_found
+from .schemas import SignalDataResponse, SignalListResponse, SignalSummaryResponse
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["signals"])
 
 
-def get_session_service(request: Request) -> SessionService:
-    return request.app.state.session_service
-
-
-def get_signal_reader(request: Request) -> SignalReader:
-    return request.app.state.signal_reader
-
-
 @router.get("/{session_id}/signals", response_model=SignalListResponse)
-def list_signals(
-    session_id: str,
-    session_service: SessionService = Depends(get_session_service),
-) -> SignalListResponse:
-    session = session_service.get(session_id)
-
-    if session is None:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="SESSION_NOT_FOUND",
-            message="Session not found.",
-        )
-
+def list_signals(session: SessionDep) -> SignalListResponse:
     return SignalListResponse(
         signals=[
             SignalSummaryResponse(
@@ -53,100 +28,37 @@ def list_signals(
 
 
 @router.get("/{session_id}/signals/{signal_id}", response_model=SignalDataResponse)
-def get_signal_data(
-    session_id: str,
-    signal_id: str,
-    start: float = 0.0,
-    end: float | None = None,
-    max_points: int = 2000,
-    session_service: SessionService = Depends(get_session_service),
-    signal_reader: SignalReader = Depends(get_signal_reader),
-) -> SignalDataResponse:
-    session = session_service.get(session_id)
-
-    if session is None:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="SESSION_NOT_FOUND",
-            message="Session not found.",
-        )
-
-    signal = next(
-        (
-            candidate
-            for candidate in session.signals or []
-            if candidate.id == signal_id
-        ),
-        None,
-    )
-
+def get_signal_data(session: SessionDep, signal_id: str, reader: SignalReader, start: float = 0.0, end: float | None = None, max_points: int = 2000) -> SignalDataResponse:
+    signal_not_found = not_found("SIGNAL_NOT_FOUND", "Signal not found.", {"signal_id": signal_id})
+    signal = next((candidate for candidate in session.signals or [] if candidate.id == signal_id), None)
     if signal is None:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="SIGNAL_NOT_FOUND",
-            message="Signal not found.",
-            details={"signal_id": signal_id},
-        )
+        raise signal_not_found
 
-    if max_points < 2 or max_points > 100_000:
-        raise APIError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="INVALID_MAX_POINTS",
-            message="max_points must be between 2 and 100000.",
-        )
+    if not MIN_POINTS <= max_points <= MAX_POINTS_LIMIT:
+        raise bad_request(f"max_points must be between {MIN_POINTS} and {MAX_POINTS_LIMIT}.", code="INVALID_MAX_POINTS")
 
     if session.duration is None or not session.source_files:
-        raise APIError(
-            status_code=status.HTTP_409_CONFLICT,
-            code="INVALID_SESSION_STATE",
-            message="Session is not ready for signal access.",
-        )
+        raise conflict("INVALID_SESSION_STATE", "Session is not ready for signal access.")
 
     requested_end = session.duration if end is None else end
-
-    if (
-        not math.isfinite(start)
-        or not math.isfinite(requested_end)
-        or requested_end <= start
-    ):
-        raise APIError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="INVALID_TIME_RANGE",
-            message="Signal time range is invalid.",
-            details={"start": start, "end": requested_end},
-        )
+    if not math.isfinite(start) or not math.isfinite(requested_end) or requested_end <= start:
+        raise bad_request("Signal time range is invalid.", {"start": start, "end": requested_end}, code="INVALID_TIME_RANGE")
 
     range_start = max(0.0, start)
     range_end = min(session.duration, requested_end)
-
     if range_start >= range_end:
         raise APIError(
-            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-            code="RANGE_NOT_SATISFIABLE",
-            message="Signal time range does not overlap the recording.",
-            details={"start": start, "end": requested_end},
+            status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE",
+            "Signal time range does not overlap the recording.", {"start": start, "end": requested_end},
         )
 
     try:
-        samples = signal_reader.read(
-            session.source_files[0], signal.id, range_start, range_end, max_points=max_points,
-        )
+        samples = reader.read(session.source_files[0], signal.id, range_start, range_end, max_points=max_points)
     except SignalNotFoundError as exc:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="SIGNAL_NOT_FOUND",
-            message="Signal not found.",
-            details={"signal_id": signal_id},
-        ) from exc
+        raise signal_not_found from exc
 
     if not samples.times:
-        raise APIError(
-            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-            code="RANGE_NOT_SATISFIABLE",
-            message="No signal samples exist in the requested range.",
-        )
-
-    reduced = downsample_extrema(samples, max_points)
+        raise APIError(status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE", "No signal samples exist in the requested range.")
 
     return SignalDataResponse(
         signal=signal.id,
@@ -154,6 +66,6 @@ def get_signal_data(
         sample_rate=signal.sample_rate,
         start=range_start,
         end=range_end,
-        downsampled=(reduced.sample_count or len(samples.times)) > len(reduced.times),
-        points=list(zip(reduced.times, reduced.values)),
+        downsampled=samples.sample_count > len(samples.times),
+        points=list(zip(samples.times, samples.values)),
     )

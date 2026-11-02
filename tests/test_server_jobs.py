@@ -2,12 +2,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.stores.job_store import JobError, JobPhase, JobState, JobStore
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
 def test_get_job_returns_queued_job() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(
         session_id="sess-test",
         job_type="inference",
@@ -35,7 +35,7 @@ def test_get_job_returns_queued_job() -> None:
 
 
 def test_get_unknown_job_returns_not_found() -> None:
-    service = JobService(JobStore())
+    service = JobService()
 
     with TestClient(
         create_app(job_service=service)
@@ -53,7 +53,7 @@ def test_get_unknown_job_returns_not_found() -> None:
 
 
 def test_get_job_returns_structured_failure() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.mark_running(job.id, phase=JobPhase.INFERENCE, message="Running inference")
     service.mark_failed(
@@ -78,7 +78,7 @@ def test_get_job_returns_structured_failure() -> None:
 
 
 def test_cancel_job_requests_cancellation_and_is_idempotent() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create("sess-test", "inference", {"model_ids": ["demo-model"]})
     app = create_app(job_service=service)
 
@@ -95,7 +95,7 @@ def test_cancel_job_requests_cancellation_and_is_idempotent() -> None:
 
 
 def test_cancel_unknown_job_returns_not_found() -> None:
-    app = create_app(job_service=JobService(JobStore()))
+    app = create_app(job_service=JobService())
 
     with TestClient(app) as client:
         response = client.post("/api/v1/jobs/job-missing/cancel")
@@ -115,7 +115,7 @@ def test_cancel_unknown_job_returns_not_found() -> None:
     [JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED],
 )
 def test_cancel_terminal_job_returns_conflict(terminal_state: JobState) -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create("sess-test", "inference", {"model_ids": ["demo-model"]})
 
     if terminal_state == JobState.CANCELLED:

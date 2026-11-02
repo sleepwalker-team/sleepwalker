@@ -1,3 +1,4 @@
+from sleepwalker.server.app import run_in_thread
 import asyncio
 from threading import Event
 from uuid import uuid4
@@ -5,8 +6,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from sleepwalker.server.app import create_app, run_cleanup_in_thread
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
+from sleepwalker.server.app import create_app
+from sleepwalker.server.core.storage import TemporaryStorage
 
 
 def test_startup_removes_orphan_sessions_but_keeps_known_and_unrelated_files(tmp_path) -> None:
@@ -43,7 +44,7 @@ def test_restart_reclaims_previous_server_temporary_session(tmp_path) -> None:
 
     second = create_app(temporary_storage=TemporaryStorage(root))
     with TestClient(second):
-        assert second.state.session_service.store.list() == []
+        assert second.state.session_service.list() == []
         assert not path.exists()
 
 
@@ -82,7 +83,7 @@ def test_shutdown_waits_for_running_cleanup_before_releasing_ownership() -> None
             assert release.wait(timeout=3.0)
             completed.set()
 
-        task = asyncio.create_task(run_cleanup_in_thread(cleanup))
+        task = asyncio.create_task(run_in_thread(cleanup))
         assert await asyncio.to_thread(started.wait, 1.0)
         task.cancel()
         await asyncio.sleep(0)

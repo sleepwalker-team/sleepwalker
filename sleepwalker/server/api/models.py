@@ -1,17 +1,11 @@
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter
 
-from ..errors import APIError
-from ..schemas.model import ModelListResponse, ModelResponse
-from ..services.model_registry import ModelInfo, ModelRegistry
+from ..inference.catalog import ModelInfo
+from .deps import Catalog
+from .errors import not_found
+from .schemas import ModelListResponse, ModelResponse
 
-router = APIRouter(
-    prefix="/api/v1/models",
-    tags=["models"],
-)
-
-
-def get_model_registry(request: Request) -> ModelRegistry:
-    return request.app.state.model_registry
+router = APIRouter(prefix="/api/v1/models", tags=["models"])
 
 
 def to_model_response(model: ModelInfo) -> ModelResponse:
@@ -27,31 +21,14 @@ def to_model_response(model: ModelInfo) -> ModelResponse:
     )
 
 
-@router.get(
-    "",
-    response_model=ModelListResponse,
-)
-def list_models(
-    registry: ModelRegistry = Depends(get_model_registry),
-) -> ModelListResponse:
-    return ModelListResponse(models=[to_model_response(model) for model in registry.list()])
+@router.get("", response_model=ModelListResponse)
+def list_models(catalog: Catalog) -> ModelListResponse:
+    return ModelListResponse(models=[to_model_response(model) for model in catalog.list()])
 
 
-@router.get(
-    "/{model_id}",
-    response_model=ModelResponse,
-)
-def get_model(
-    model_id: str,
-    registry: ModelRegistry = Depends(get_model_registry),
-) -> ModelResponse:
-    model = registry.get(model_id)
-
+@router.get("/{model_id}", response_model=ModelResponse)
+def get_model(model_id: str, catalog: Catalog) -> ModelResponse:
+    model = catalog.get(model_id)
     if model is None:
-        raise APIError(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="MODEL_NOT_FOUND",
-            message="Model not found.",
-        )
-
+        raise not_found("MODEL_NOT_FOUND", "Model not found.")
     return to_model_response(model)

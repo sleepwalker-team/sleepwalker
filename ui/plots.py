@@ -11,7 +11,7 @@ from threading import RLock
 
 from dash import Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 
-from sleepwalker.server.services.plotly_service import (
+from sleepwalker.server.recording.plots import (
     PlotFigureNotFoundError, PlotlyUnavailableError, PlotSessionNotFoundError,
 )
 

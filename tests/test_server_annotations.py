@@ -6,15 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.annotation_service import AnnotationService
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.stores.annotation_store import AnnotationStore
-from sleepwalker.server.stores.prediction_store import (
-    PredictionKind,
-    PredictionResult,
-    PredictionStore,
-)
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
+from sleepwalker.server.results.annotations import AnnotationService
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult, PredictionStore
+from sleepwalker.server.core.sessions import SessionState
 
 
 def create_annotation_app(
@@ -25,7 +20,7 @@ def create_annotation_app(
     resolution: float = 30.0,
     starts: tuple[float, ...] = (0.0, 30.0, 60.0, 90.0),
 ):
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.duration = 120.0
@@ -45,7 +40,7 @@ def create_annotation_app(
             kind=kind,
         )
     )
-    annotation_service = AnnotationService(AnnotationStore())
+    annotation_service = AnnotationService()
     app = create_app(
         session_service=session_service,
         prediction_store=prediction_store,
@@ -66,7 +61,7 @@ def test_set_label_creates_separate_annotation_edit() -> None:
     assert response.status_code == 201
     assert response.json()["operation"] == "set_label"
     assert response.json()["edit_id"].startswith("edit_")
-    assert annotation_service.current_labels(session.id)[0].label == "n3"
+    assert annotation_service.snapshot(session.id).labels[0].label == "n3"
 
 
 @pytest.mark.parametrize("start", [35.0, 35.0000001, 34.9999999, 55.0])
@@ -78,7 +73,7 @@ def test_set_label_accepts_actual_shifted_epochs_and_stores_canonical_start(star
     assert response.status_code == 201, response.text
     expected = 35.0 if start < 40 else 55.0
     assert response.json()["start"] == expected
-    assert annotations.current_labels(session.id)[0].start == expected
+    assert annotations.snapshot(session.id).labels[0].start == expected
     pd.testing.assert_frame_equal(app.state.prediction_store.get_by_task(session.id, "desaturation").frame, original)
 
 
@@ -89,7 +84,7 @@ def test_set_label_rejects_nonexistent_epochs_including_context_and_prediction_g
         response = client.post(f"/api/v1/sessions/{session.id}/annotations", json={"operation": "set_label", "task": "desaturation", "start": start, "label": "desaturation"})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
-    assert annotations.current_labels(session.id) == []
+    assert annotations.snapshot(session.id).labels == []
 
 
 def test_set_label_cannot_create_overrides_for_an_empty_prediction_task():
@@ -97,7 +92,7 @@ def test_set_label_cannot_create_overrides_for_an_empty_prediction_task():
     with TestClient(app) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/annotations", json={"operation": "set_label", "task": "sleep_stage", "start": 0.0, "label": "n3"})
     assert response.status_code == 400
-    assert annotations.current_labels(session.id) == []
+    assert annotations.snapshot(session.id).labels == []
 
 
 def test_roundoff_does_not_create_separate_annotation_positions_and_revert_still_works():
@@ -106,11 +101,11 @@ def test_roundoff_does_not_create_separate_annotation_positions_and_revert_still
         for start, label in [(35.0, "n3"), (35.0000001, "wake")]:
             response = client.post(f"/api/v1/sessions/{session.id}/annotations", json={"operation": "set_label", "task": "sleep_stage", "start": start, "label": label})
             assert response.status_code == 201
-        assert len(annotations.current_labels(session.id)) == 1
-        assert annotations.current_labels(session.id)[0].label == "wake"
+        assert len(annotations.snapshot(session.id).labels) == 1
+        assert annotations.snapshot(session.id).labels[0].label == "wake"
         reverted = client.post(f"/api/v1/sessions/{session.id}/annotations", json={"operation": "revert", "edit_id": response.json()["edit_id"]})
     assert reverted.status_code == 201
-    assert annotations.current_labels(session.id)[0].label == "n3"
+    assert annotations.snapshot(session.id).labels[0].label == "n3"
 
 
 @pytest.mark.parametrize(
@@ -152,7 +147,7 @@ def test_event_can_be_added_deleted_and_delete_reverted(
 
     assert reverted.status_code == 201
     assert reverted.json()["reverted_edit_id"] == deleted["edit_id"]
-    assert annotation_service.current_events(session.id)[0].event_id == added["event_id"]
+    assert annotation_service.snapshot(session.id).events[0].event_id == added["event_id"]
 
 
 def test_annotation_rejects_invalid_label() -> None:

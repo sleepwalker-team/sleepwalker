@@ -18,7 +18,7 @@ def worker_module(monkeypatch):
     cache.EDFCache = object
     monkeypatch.setitem(sys.modules, deployment.__name__, deployment)
     monkeypatch.setitem(sys.modules, cache.__name__, cache)
-    path = Path(__file__).parents[1] / "sleepwalker/server/inference_worker.py"
+    path = Path(__file__).parents[1] / "sleepwalker/server/inference/worker.py"
     spec = importlib.util.spec_from_file_location("inference_worker_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

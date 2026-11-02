@@ -1,2 +1,4 @@
-# Administrator-provided model weights must not accidentally enter commits.
-/models/*/model.pt
+# Model packages and their metadata stay out of the repository.
+/models/
+# No JSON files from the server folder either.
+*.json

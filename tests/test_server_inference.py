@@ -4,14 +4,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.schemas.session import SessionState
-from sleepwalker.server.services.job_executor import JobExecutionError
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.stores.job_store import JobPhase, JobState, JobStore
-from sleepwalker.server.stores.session_store import SessionStore
-from sleepwalker.server.validation.study import SignalInfo
+from sleepwalker.server.api.schemas import SessionState
+from sleepwalker.server.core.jobs import JobExecutionError
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.inference.catalog import ModelInfo, ModelCatalog
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.jobs import JobPhase, JobState
+from sleepwalker.server.recording.study import SignalInfo
 
 
 class SuccessfulInferenceRunner:
@@ -50,17 +49,17 @@ def create_model() -> ModelInfo:
 
 
 def test_start_inference_creates_queued_job() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
     model = create_model()
-    job_store = JobStore()
+    job_store = JobService()
     runner = SuccessfulInferenceRunner()
 
     app = create_app(
-        model_registry=ModelRegistry([model]),
-        job_service=JobService(job_store),
+        model_catalog=ModelCatalog(models=[model]),
+        job_service=job_store,
         session_service=session_service,
         inference_runner=runner,
     )
@@ -82,25 +81,25 @@ def test_start_inference_creates_queued_job() -> None:
 
 
 def test_start_inference_accepts_physical_signal_aliases() -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="C3-M2", label="C3-M2", unit="uV", sample_rate=100)]
     model = replace(create_model(), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
     runner = SuccessfulInferenceRunner()
-    with TestClient(create_app(session_service=service, model_registry=ModelRegistry([model]), inference_runner=runner)) as client:
+    with TestClient(create_app(session_service=service, model_catalog=ModelCatalog(models=[model]), inference_runner=runner)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
     assert response.status_code == 202
     assert runner.model_ids == [model.id]
 
 
 def test_start_inference_does_not_accept_logical_name_instead_of_declared_aliases() -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=100)]
     model = replace(create_model(), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
-    with TestClient(create_app(session_service=service, model_registry=ModelRegistry([model]), inference_runner=SuccessfulInferenceRunner())) as client:
+    with TestClient(create_app(session_service=service, model_catalog=ModelCatalog(models=[model]), inference_runner=SuccessfulInferenceRunner())) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "MISSING_REQUIRED_CHANNEL"
@@ -109,7 +108,7 @@ def test_start_inference_does_not_accept_logical_name_instead_of_declared_aliase
 def test_start_inference_rejects_unknown_session() -> None:
     model = create_model()
 
-    with TestClient(create_app(model_registry=ModelRegistry([model]))) as client:
+    with TestClient(create_app(model_catalog=ModelCatalog(models=[model]))) as client:
         response = client.post("/api/v1/sessions/unknown/inference", json={"models": [model.id]})
 
     assert response.status_code == 404
@@ -117,11 +116,11 @@ def test_start_inference_rejects_unknown_session() -> None:
 
 
 def test_start_inference_rejects_unknown_model() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
 
-    with TestClient(create_app(model_registry=ModelRegistry(), session_service=session_service)) as client:
+    with TestClient(create_app(model_catalog=ModelCatalog(), session_service=session_service)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": ["unknown"]})
 
     assert response.status_code == 404
@@ -133,7 +132,7 @@ def test_start_inference_rejects_unknown_model() -> None:
 
 
 def test_start_inference_rejects_empty_model_list() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
 
@@ -145,7 +144,7 @@ def test_start_inference_rejects_empty_model_list() -> None:
 
 
 def test_start_inference_rejects_duplicate_models() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
 
@@ -157,21 +156,21 @@ def test_start_inference_rejects_duplicate_models() -> None:
 
 
 def test_start_inference_rejects_second_active_job() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [
         SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)
     ]
     model = create_model()
-    job_service = JobService(JobStore())
+    job_service = JobService()
     active_job = job_service.create(
         session_id=session.id,
         job_type="inference",
     )
 
     app = create_app(
-        model_registry=ModelRegistry([model]),
+        model_catalog=ModelCatalog(models=[model]),
         job_service=job_service,
         session_service=session_service,
         inference_runner=SuccessfulInferenceRunner(),
@@ -195,13 +194,13 @@ def test_start_inference_rejects_second_active_job() -> None:
 
 
 def test_start_inference_rejects_missing_required_channel() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EOG", label="EOG", unit="uV", sample_rate=100.0)]
     model = create_model()
 
-    with TestClient(create_app(model_registry=ModelRegistry([model]), session_service=session_service)) as client:
+    with TestClient(create_app(model_catalog=ModelCatalog(models=[model]), session_service=session_service)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
 
     assert response.status_code == 422
@@ -213,13 +212,13 @@ def test_start_inference_rejects_missing_required_channel() -> None:
 
 
 def test_start_inference_rejects_session_that_is_not_ready() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.CREATED
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
     model = create_model()
 
-    with TestClient(create_app(model_registry=ModelRegistry([model]), session_service=session_service)) as client:
+    with TestClient(create_app(model_catalog=ModelCatalog(models=[model]), session_service=session_service)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
 
     assert response.status_code == 409
@@ -231,13 +230,13 @@ def test_start_inference_rejects_session_that_is_not_ready() -> None:
 
 
 def test_start_inference_rejects_unavailable_compute() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
     model = create_model()
 
-    with TestClient(create_app(model_registry=ModelRegistry([model]), session_service=session_service)) as client:
+    with TestClient(create_app(model_catalog=ModelCatalog(models=[model]), session_service=session_service)) as client:
         response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id]})
 
     assert response.status_code == 503
@@ -245,16 +244,16 @@ def test_start_inference_rejects_unavailable_compute() -> None:
 
 
 def test_start_inference_records_background_failure() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
     model = create_model()
-    job_store = JobStore()
+    job_store = JobService()
 
     app = create_app(
-        model_registry=ModelRegistry([model]),
-        job_service=JobService(job_store),
+        model_catalog=ModelCatalog(models=[model]),
+        job_service=job_store,
         session_service=session_service,
         inference_runner=FailingInferenceRunner(),
     )
@@ -273,7 +272,7 @@ def test_start_inference_records_background_failure() -> None:
 
 
 def test_start_inference_rejects_models_with_duplicate_task() -> None:
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=200.0)]
@@ -281,7 +280,7 @@ def test_start_inference_rejects_models_with_duplicate_task() -> None:
     second_model = replace(first_model, id="second-sleep-model")
 
     app = create_app(
-        model_registry=ModelRegistry([first_model, second_model]),
+        model_catalog=ModelCatalog(models=[first_model, second_model]),
         session_service=session_service,
     )
 

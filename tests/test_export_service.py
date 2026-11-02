@@ -9,24 +9,19 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from sleepwalker.server.schemas.export import ExportRequest
+from sleepwalker.server.api.schemas import ExportRequest
 
-from sleepwalker.server.services.annotation_service import AnnotationService
-from sleepwalker.server.services.export_service import ExportService
-from sleepwalker.server.services.job_executor import LocalJobExecutor
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.services.model_registry import ModelInfo, ModelRegistry
-from sleepwalker.server.services.result_export_service import (
-    ResultExportOptions,
-    ResultExportService,
-)
-from sleepwalker.server.services.workspace_export_service import WorkspaceExportService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.annotation_store import AnnotationStore
-from sleepwalker.server.stores.export_store import ExportState, ExportStore
-from sleepwalker.server.stores.job_store import JobState, JobStore
-from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionResult, PredictionStore
-from sleepwalker.server.stores.session_store import Session, SessionState
+from sleepwalker.server.results.annotations import AnnotationService
+from sleepwalker.server.results.exports import ExportService
+from sleepwalker.server.core.jobs import JobExecutor
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.inference.catalog import ModelInfo, ModelCatalog
+from sleepwalker.server.results.exports import ResultExportOptions
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.results.exports import ExportState
+from sleepwalker.server.core.jobs import JobState
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult, PredictionStore
+from sleepwalker.server.core.sessions import Session, SessionState
 
 
 def _session() -> Session:
@@ -44,21 +39,12 @@ def _session() -> Session:
 
 
 def _service(tmp_path) -> ExportService:
-    result_service = ResultExportService(
-        PredictionStore(),
-        AnnotationService(AnnotationStore()),
-    )
-    return ExportService(
-        ExportStore(),
-        result_service,
-        TemporaryStorage(tmp_path / "uploads"),
-        WorkspaceExportService(result_service, ModelRegistry()),
-    )
+    return ExportService(TemporaryStorage(tmp_path / "uploads"), PredictionStore(), AnnotationService())
 
 
 def test_export_job_writes_json_and_becomes_ready(tmp_path) -> None:
     export_service = _service(tmp_path)
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create("sess-test", "export")
     export = export_service.create(_session(), job.id)
     operation = partial(
@@ -68,7 +54,7 @@ def test_export_job_writes_json_and_becomes_ready(tmp_path) -> None:
         ResultExportOptions(),
     )
 
-    completed_job = LocalJobExecutor(job_service).execute(
+    completed_job = JobExecutor(job_service).execute(
         job.id,
         operation,
         success_message="Export completed",
@@ -87,7 +73,7 @@ def test_export_job_writes_json_and_becomes_ready(tmp_path) -> None:
 
 def test_cancelled_export_does_not_leave_a_download(tmp_path) -> None:
     export_service = _service(tmp_path)
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create("sess-test", "export")
     export = export_service.create(_session(), job.id)
     job_service.request_cancel(job.id)
@@ -97,7 +83,7 @@ def test_cancelled_export_does_not_leave_a_download(tmp_path) -> None:
         nonlocal operation_was_called
         operation_was_called = True
 
-    cancelled_job = LocalJobExecutor(job_service).execute(job.id, operation)
+    cancelled_job = JobExecutor(job_service).execute(job.id, operation)
     export_service.finalize(export.id, cancelled_job)
 
     assert operation_was_called is False
@@ -114,7 +100,7 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
     source = tmp_path / "record.edf"
     source.write_bytes(b"original study bytes")
     session.source_files = [source]
-    service.workspace_export_service.model_registry.add(
+    session.model_provenance.append(
         ModelInfo(
             id="sleep-model",
             name="Sleep Stage Model",
@@ -125,10 +111,10 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
             output_resolution=30.0,
             output_kind=kind,
             package_path=tmp_path / "sleep-model.swmodel",
-        )
+        ).provenance()
     )
     times = {"start": [0.0], "end": [30.0]} if kind == PredictionKind.EVENT else {"time": [15.0]}
-    service.result_export_service.prediction_store.add(
+    service.prediction_store.add(
         PredictionResult(
             session_id=session.id,
             model_id="sleep-model",
@@ -139,16 +125,16 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
             kind=kind,
         )
     )
-    annotations = service.result_export_service.annotation_service
+    annotations = service.annotation_service
     edit = annotations.set_label(session.id, "sleep_stage", 0.0, "n1")
     reverted = annotations.revert(session.id, edit.id)
     annotations.set_label("sess-other", "sleep_stage", 0.0, "wake")
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create(session.id, "export")
     export = service.create(session, job.id, format="sleepwalker", mode="workspace")
     operation = partial(service.run, export, session, ResultExportOptions())
 
-    completed = LocalJobExecutor(job_service).execute(job.id, operation)
+    completed = JobExecutor(job_service).execute(job.id, operation)
     service.finalize(export.id, completed)
 
     assert export.state == ExportState.READY
@@ -190,13 +176,13 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
 
 
 def test_workspace_cancel_during_copy_removes_partial_archive(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("sleepwalker.server.storage.temporary_storage.UPLOAD_CHUNK_SIZE", 4)
+    monkeypatch.setattr("sleepwalker.server.core.storage.UPLOAD_CHUNK_SIZE", 4)
     service = _service(tmp_path)
     session = _session()
     source = tmp_path / "record.edf"
     source.write_bytes(b"original study bytes")
     session.source_files = [source]
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create(session.id, "export")
     export = service.create(session, job.id, format="sleepwalker", mode="workspace")
     checks = 0
@@ -211,7 +197,7 @@ def test_workspace_cancel_during_copy_removes_partial_archive(tmp_path, monkeypa
 
         service.run(export, session, ResultExportOptions(), report_progress, cancel_during_copy)
 
-    cancelled = LocalJobExecutor(job_service).execute(job.id, operation)
+    cancelled = JobExecutor(job_service).execute(job.id, operation)
     service.finalize(export.id, cancelled)
 
     assert cancelled.state == JobState.CANCELLED
@@ -224,12 +210,12 @@ def test_workspace_failure_with_missing_source_has_safe_job_error(tmp_path) -> N
     service = _service(tmp_path)
     session = _session()
     session.source_files = [tmp_path / "missing.edf"]
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create(session.id, "export")
     export = service.create(session, job.id, format="sleepwalker", mode="workspace")
     operation = partial(service.run, export, session, ResultExportOptions())
 
-    failed = LocalJobExecutor(job_service).execute(job.id, operation)
+    failed = JobExecutor(job_service).execute(job.id, operation)
     service.finalize(export.id, failed)
 
     assert failed.state == JobState.FAILED
@@ -243,14 +229,14 @@ def test_workspace_failure_with_missing_source_has_safe_job_error(tmp_path) -> N
 def test_export_finalization_tolerates_completed_session_cleanup(tmp_path) -> None:
     service = _service(tmp_path)
     session = _session()
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create(session.id, "export")
     export = service.create(session, job.id)
-    completed = LocalJobExecutor(job_service).execute(
+    completed = JobExecutor(job_service).execute(
         job.id, partial(service.run, export, session, ResultExportOptions()),
     )
     service.storage.delete_session(session.id)
-    service.store.delete_session(session.id)
+    service.delete_session(session.id)
 
     assert service.finalize(export.id, completed) is None
     assert not (service.storage.root / session.id).exists()

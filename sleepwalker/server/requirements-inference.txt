@@ -1,7 +1,7 @@
 # Install only into the separate inference venv (Python 3.10).
-# CPU runtime; CUDA deployments need a separately tested Torch build.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.13.0+cpu
+# GPU runtime (CUDA 13.0); it also runs on CPU with --device cpu.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0+cu130
 sleepwalker @ git+https://github.com/sleepwalker-team/sleepwalker.git@2c77bf61671a2d3690d6a29d73fd5eece7e1c544
 
 # Versions used for the delivered packages' CPU integration tests.

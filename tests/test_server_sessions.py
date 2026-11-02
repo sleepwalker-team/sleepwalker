@@ -4,12 +4,11 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.stores.job_store import JobState, JobStore
-from sleepwalker.server.stores.prediction_store import PredictionResult, PredictionStore
-from sleepwalker.server.stores.session_store import SessionStore
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.jobs import JobState
+from sleepwalker.server.results.predictions import PredictionResult, PredictionStore
 
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -17,8 +16,7 @@ DATA_DIR = Path(__file__).parent / "data"
 
 @pytest.fixture
 def session_api(tmp_path):
-    store = SessionStore()
-    service = SessionService(store)
+    store = service = SessionService()
     storage = TemporaryStorage(tmp_path / "uploads")
 
     with TestClient(create_app(session_service=service, temporary_storage=storage)) as client:
@@ -89,7 +87,7 @@ def test_session_lifecycle_for_valid_edf(session_api):
     delete_response = client.delete(f"/api/v1/sessions/{session_id}")
 
     assert delete_response.status_code == 204
-    assert store.get(session_id) is None
+    assert store.peek(session_id) is None
     assert not (storage.root / session_id).exists()
 
     missing_response = client.get(f"/api/v1/sessions/{session_id}")
@@ -105,7 +103,7 @@ def test_session_lifecycle_for_valid_edf(session_api):
 
 
 def test_get_session_returns_current_state(tmp_path) -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     storage = TemporaryStorage(tmp_path / "uploads")
 
@@ -117,7 +115,7 @@ def test_get_session_returns_current_state(tmp_path) -> None:
 
 
 def test_delete_session_removes_predictions(tmp_path) -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     storage = TemporaryStorage(tmp_path / "uploads")
     prediction_store = PredictionStore()
@@ -146,12 +144,12 @@ def test_delete_session_removes_predictions(tmp_path) -> None:
 
 
 def test_delete_session_requests_active_job_cancellation(tmp_path) -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     storage = TemporaryStorage(tmp_path / "uploads")
     session_directory = storage.root / session.id
     session_directory.mkdir()
-    job_service = JobService(JobStore())
+    job_service = JobService()
     job = job_service.create(session.id, "inference")
     app = create_app(
         session_service=service,
@@ -163,7 +161,7 @@ def test_delete_session_requests_active_job_cancellation(tmp_path) -> None:
         response = client.delete(f"/api/v1/sessions/{session.id}")
 
     assert response.status_code == 204
-    assert service.store.get(session.id) is None
+    assert service.peek(session.id) is None
     assert job.state == JobState.CANCELLING
     assert session_directory.exists()
 
@@ -194,8 +192,7 @@ def test_invalid_edf_removes_session_and_temporary_files(session_api):
 
 
 def test_file_too_large_removes_session_and_temporary_files(tmp_path) -> None:
-    store = SessionStore()
-    service = SessionService(store)
+    store = service = SessionService()
     storage = TemporaryStorage(tmp_path / "uploads", max_file_size_bytes=4)
     app = create_app(session_service=service, temporary_storage=storage)
 
@@ -265,8 +262,7 @@ def test_internal_error_is_hidden_and_session_is_cleaned_up(
     tmp_path,
     monkeypatch,
 ):
-    store = SessionStore()
-    service = SessionService(store)
+    store = service = SessionService()
     storage = TemporaryStorage(tmp_path / "uploads")
 
     async def fail_to_save_files(*_args, **_kwargs):
@@ -301,7 +297,7 @@ def test_internal_error_is_hidden_and_session_is_cleaned_up(
 
 
 def test_get_session_includes_prediction_tasks(tmp_path) -> None:
-    service = SessionService(SessionStore())
+    service = SessionService()
     session = service.create(source_files=[])
     prediction_store = PredictionStore()
     prediction_store.add(

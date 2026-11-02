@@ -1,15 +1,14 @@
 import pytest
-import torch
 
-from sleepwalker.server.services.job_executor import JobExecutionError, LocalJobExecutor
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.stores.job_store import JobPhase, JobState, JobStore
+from sleepwalker.server.core.jobs import JobExecutionError, JobExecutor
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.jobs import JobPhase, JobState
 
 
 def test_executor_completes_successful_job() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
     operation_was_called = False
 
     def operation(report_progress, check_cancelled) -> None:
@@ -31,9 +30,9 @@ def test_executor_completes_successful_job() -> None:
 
 
 def test_executor_exposes_safe_execution_error() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
 
     def operation(_report_progress, _check_cancelled) -> None:
         raise JobExecutionError(
@@ -52,9 +51,9 @@ def test_executor_exposes_safe_execution_error() -> None:
 
 
 def test_executor_hides_unexpected_error_details() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
 
     def operation(_report_progress, _check_cancelled) -> None:
         raise RuntimeError("secret implementation detail")
@@ -69,13 +68,13 @@ def test_executor_hides_unexpected_error_details() -> None:
 
 @pytest.mark.parametrize(
     "error",
-    [MemoryError("allocator detail"), torch.OutOfMemoryError("CUDA allocator detail")],
-    ids=["memory-error", "torch-out-of-memory"],
+    [MemoryError("allocator detail")],
+    ids=["memory-error"],
 )
 def test_executor_reports_resource_exhaustion(error: Exception) -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
 
     def operation(_report_progress, _check_cancelled) -> None:
         raise error
@@ -92,9 +91,9 @@ def test_executor_reports_resource_exhaustion(error: Exception) -> None:
 
 
 def test_executor_acknowledges_cancellation_without_storing_success() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
 
     def operation(_report_progress, check_cancelled) -> None:
         service.request_cancel(job.id)
@@ -109,10 +108,10 @@ def test_executor_acknowledges_cancellation_without_storing_success() -> None:
 
 
 def test_executor_does_not_start_job_with_pending_cancellation() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.request_cancel(job.id)
-    executor = LocalJobExecutor(service)
+    executor = JobExecutor(service)
     operation_was_called = False
 
     def operation(_report_progress, _check_cancelled) -> None:

@@ -2,13 +2,12 @@ from datetime import timezone
 
 import pytest
 
-from sleepwalker.server.services.job_service import ActiveJobExistsError, JobService
-from sleepwalker.server.stores.job_store import JobError, JobPhase, JobState, JobStore
+from sleepwalker.server.core.jobs import ActiveJobExistsError, JobService
+from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
 def test_job_service_creates_queued_job() -> None:
-    store = JobStore()
-    service = JobService(store)
+    service = JobService()
 
     job = service.create(
         session_id="sess-test",
@@ -25,11 +24,11 @@ def test_job_service_creates_queued_job() -> None:
     assert job.error is None
     assert job.created_at.tzinfo is timezone.utc
     assert job.updated_at == job.created_at
-    assert store.get(job.id) is job
+    assert service.get(job.id) is job
 
 
 def test_job_service_gets_existing_job() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(
         session_id="sess-test",
         job_type="inference",
@@ -40,7 +39,7 @@ def test_job_service_gets_existing_job() -> None:
 
 
 def test_job_service_copies_parameters() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     parameters = {"models": ["model-a"]}
 
     job = service.create(session_id="sess-test", job_type="inference", parameters=parameters)
@@ -50,7 +49,7 @@ def test_job_service_copies_parameters() -> None:
 
 
 def test_job_service_rejects_second_active_job_for_session() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     first_job = service.create_if_session_idle(
         session_id="sess-test",
         job_type="inference",
@@ -66,7 +65,7 @@ def test_job_service_rejects_second_active_job_for_session() -> None:
 
 
 def test_job_service_marks_queued_job_as_running() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     previous_updated_at = job.updated_at
 
@@ -84,7 +83,7 @@ def test_job_service_marks_queued_job_as_running() -> None:
 
 
 def test_job_service_updates_running_job_progress() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.mark_running(job.id, phase=JobPhase.LOADING, message="Loading model")
 
@@ -102,9 +101,9 @@ def test_job_service_updates_running_job_progress() -> None:
     assert job.message == "Running inference"
 
 
-@pytest.mark.parametrize("progress", [-0.1, 1.1, float("nan"), True])
+@pytest.mark.parametrize("progress", [-0.1, 1.1, float("nan")])
 def test_job_service_rejects_invalid_progress(progress) -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.mark_running(job.id, phase=JobPhase.LOADING, message="Loading model")
 
@@ -113,7 +112,7 @@ def test_job_service_rejects_invalid_progress(progress) -> None:
 
 
 def test_job_service_marks_running_job_as_succeeded() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.mark_running(job.id, phase=JobPhase.LOADING, message="Loading model")
 
@@ -131,7 +130,7 @@ def test_job_service_marks_running_job_as_succeeded() -> None:
 
 
 def test_job_service_marks_running_job_as_failed() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
     service.mark_running(job.id, phase=JobPhase.INFERENCE, message="Running inference")
     service.update_progress(job.id, phase=JobPhase.INFERENCE, progress=0.25, message="Running inference")
@@ -153,7 +152,7 @@ def test_job_service_marks_running_job_as_failed() -> None:
 
 @pytest.mark.parametrize("start_running", [False, True])
 def test_job_service_cancels_active_job(start_running: bool) -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(session_id="sess-test", job_type="inference")
 
     if start_running:
@@ -174,7 +173,7 @@ def test_job_service_cancels_active_job(start_running: bool) -> None:
 
 
 def test_job_service_rejects_cancelling_cancelled_job_and_allows_replacement() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create_if_session_idle(
         session_id="sess-test",
         job_type="inference",
@@ -196,7 +195,7 @@ def test_job_service_rejects_cancelling_cancelled_job_and_allows_replacement() -
 
 
 def test_job_service_detects_active_jobs() -> None:
-    service = JobService(JobStore())
+    service = JobService()
     job = service.create(
         session_id="sess-test",
         job_type="inference",

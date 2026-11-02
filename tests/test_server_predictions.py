@@ -4,13 +4,9 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.stores.prediction_store import (
-    PredictionKind,
-    PredictionResult,
-    PredictionStore,
-)
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult, PredictionStore
+from sleepwalker.server.core.sessions import SessionState
 
 
 def create_prediction_app(
@@ -21,7 +17,7 @@ def create_prediction_app(
     frame: pd.DataFrame | None = None,
     kind: PredictionKind = PredictionKind.EPOCH,
 ):
-    session_service = SessionService(SessionStore())
+    session_service = SessionService()
     session = session_service.create(source_files=[])
     session.state = SessionState.READY
     session.duration = 60.0

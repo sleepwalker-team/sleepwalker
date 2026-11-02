@@ -2,10 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.stores.job_store import JobError, JobPhase, JobState, JobStore
-from sleepwalker.server.stores.session_store import SessionStore
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
 def test_get_renews_session_expiration() -> None:
@@ -13,9 +12,7 @@ def test_get_renews_session_expiration() -> None:
     accessed_at = created_at + timedelta(minutes=30)
     times = iter([created_at, accessed_at])
 
-    service = SessionService(
-        SessionStore(),
-        ttl=timedelta(hours=2),
+    service = SessionService(ttl=timedelta(hours=2),
         clock=lambda: next(times),
     )
 
@@ -31,9 +28,7 @@ def test_get_does_not_renew_expired_session() -> None:
     checked_at = created_at + timedelta(hours=2, seconds=1)
     times = iter([created_at, checked_at])
 
-    service = SessionService(
-        SessionStore(),
-        ttl=timedelta(hours=2),
+    service = SessionService(ttl=timedelta(hours=2),
         clock=lambda: next(times),
     )
 
@@ -50,9 +45,7 @@ def test_list_expired_returns_only_expired_sessions() -> None:
     cleanup_at = datetime(2026, 10, 12, 15, 0, tzinfo=timezone.utc)
     times = iter([first_created_at, second_created_at, cleanup_at])
 
-    service = SessionService(
-        SessionStore(),
-        ttl=timedelta(hours=2),
+    service = SessionService(ttl=timedelta(hours=2),
         clock=lambda: next(times),
     )
 
@@ -72,8 +65,8 @@ def test_list_expired_returns_only_expired_sessions() -> None:
 
 def test_expired_session_remains_accessible_while_job_is_active() -> None:
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    jobs = JobService(JobStore())
-    service = SessionService(SessionStore(), clock=lambda: now, active_job_check=jobs.has_active_job)
+    jobs = JobService()
+    service = SessionService(clock=lambda: now, active_job_check=jobs.has_active_job)
     session = service.create([])
     jobs.create(session.id, "inference")
     now += timedelta(hours=3)
@@ -85,8 +78,8 @@ def test_expired_session_remains_accessible_while_job_is_active() -> None:
 @pytest.mark.parametrize("state", [JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED])
 def test_job_completion_starts_a_fresh_session_deadline(state) -> None:
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    service = SessionService(SessionStore(), clock=lambda: now)
-    jobs = JobService(JobStore(), on_completion=service.renew_after_job)
+    service = SessionService(clock=lambda: now)
+    jobs = JobService(on_completion=service.renew_after_job)
     service.active_job_check = jobs.has_active_job
     session = service.create([])
     created_at = session.created_at
@@ -108,8 +101,8 @@ def test_job_completion_starts_a_fresh_session_deadline(state) -> None:
 
 
 def test_completed_job_does_not_resurrect_explicitly_deleted_session() -> None:
-    service = SessionService(SessionStore())
-    jobs = JobService(JobStore(), on_completion=service.renew_after_job)
+    service = SessionService()
+    jobs = JobService(on_completion=service.renew_after_job)
     session = service.create([])
     job = jobs.create(session.id, "inference")
     service.delete(session.id)
@@ -120,8 +113,8 @@ def test_completed_job_does_not_resurrect_explicitly_deleted_session() -> None:
 
 def test_get_rechecks_deadline_if_job_finishes_during_activity_check() -> None:
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    service = SessionService(SessionStore(), clock=lambda: now)
-    jobs = JobService(JobStore(), on_completion=service.renew_after_job)
+    service = SessionService(clock=lambda: now)
+    jobs = JobService(on_completion=service.renew_after_job)
     session = service.create([])
     job = jobs.create(session.id, "inference")
     jobs.mark_running(job.id, JobPhase.INFERENCE, "Running")

@@ -1,19 +1,19 @@
+from sleepwalker.server.results.exports import ExportService
+from sleepwalker.server.core.lifecycle import run_session_job
+from sleepwalker.server.recording.plots import PlotlyService
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from sleepwalker.server.api.sessions import execute_inference_job
-from sleepwalker.server.services.annotation_service import AnnotationService
-from sleepwalker.server.services.job_executor import LocalJobExecutor
-from sleepwalker.server.services.job_service import JobService
-from sleepwalker.server.services.session_cleanup_service import SessionCleanupService
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.annotation_store import AnnotationStore
-from sleepwalker.server.stores.export_store import Export, ExportState, ExportStore
-from sleepwalker.server.stores.job_store import JobPhase, JobState, JobStore
-from sleepwalker.server.stores.prediction_store import PredictionResult, PredictionStore
-from sleepwalker.server.stores.session_store import SessionStore
+from sleepwalker.server.results.annotations import AnnotationService
+from sleepwalker.server.core.jobs import JobExecutor
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.lifecycle import SessionCleanupService
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.results.exports import Export, ExportState
+from sleepwalker.server.core.jobs import JobPhase, JobState
+from sleepwalker.server.results.predictions import PredictionResult, PredictionStore
 
 
 def test_cleanup_removes_expired_session_but_keeps_session_with_active_job(
@@ -23,14 +23,12 @@ def test_cleanup_removes_expired_session_but_keeps_session_with_active_job(
     cleanup_at = created_at + timedelta(hours=3)
     times = iter([created_at, created_at, cleanup_at])
 
-    session_service = SessionService(
-        SessionStore(),
-        ttl=timedelta(hours=2),
+    session_service = SessionService(ttl=timedelta(hours=2),
         clock=lambda: next(times),
     )
-    job_service = JobService(JobStore())
+    job_service = JobService()
     prediction_store = PredictionStore()
-    annotation_service = AnnotationService(AnnotationStore())
+    annotation_service = AnnotationService()
     storage = TemporaryStorage(tmp_path / "uploads")
 
     removable_session = session_service.create(source_files=[])
@@ -82,28 +80,28 @@ def test_cleanup_removes_expired_session_but_keeps_session_with_active_job(
         storage=storage,
         prediction_store=prediction_store,
         annotation_service=annotation_service,
-        export_store=ExportStore(),
+        export_service=ExportService(None, None, None), plotly_service=PlotlyService(None),
     )
 
     assert cleanup_service.cleanup_expired() == [removable_session.id]
 
-    assert session_service.store.get(removable_session.id) is None
+    assert session_service.peek(removable_session.id) is None
     assert job_service.get(completed_job.id) is None
     assert prediction_store.list_for_session(removable_session.id) == []
-    assert annotation_service.store.list_for_session(removable_session.id) == []
+    assert annotation_service.list_edits(removable_session.id) == []
     assert not removable_directory.exists()
 
-    assert session_service.store.get(protected_session.id) is protected_session
+    assert session_service.peek(protected_session.id) is protected_session
     assert protected_directory.exists()
 
 
 def test_requested_delete_waits_for_active_job_before_removing_resources(
     tmp_path,
 ) -> None:
-    session_service = SessionService(SessionStore())
-    job_service = JobService(JobStore())
+    session_service = SessionService()
+    job_service = JobService()
     prediction_store = PredictionStore()
-    annotation_service = AnnotationService(AnnotationStore())
+    annotation_service = AnnotationService()
     storage = TemporaryStorage(tmp_path / "uploads")
     session = session_service.create(source_files=[])
     session_directory = storage.root / session.id
@@ -116,11 +114,11 @@ def test_requested_delete_waits_for_active_job_before_removing_resources(
         storage=storage,
         prediction_store=prediction_store,
         annotation_service=annotation_service,
-        export_store=ExportStore(),
+        export_service=ExportService(None, None, None), plotly_service=PlotlyService(None),
     )
 
     assert cleanup_service.request_delete(session.id) is True
-    assert session_service.store.get(session.id) is None
+    assert session_service.peek(session.id) is None
     assert job.state == JobState.CANCELLING
     assert session_directory.exists()
 
@@ -132,8 +130,8 @@ def test_requested_delete_waits_for_active_job_before_removing_resources(
 
 
 def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
-    session_service = SessionService(SessionStore())
-    job_service = JobService(JobStore())
+    session_service = SessionService()
+    job_service = JobService()
     storage = TemporaryStorage(tmp_path / "uploads")
     session = session_service.create(source_files=[])
     session_directory = storage.root / session.id
@@ -144,8 +142,8 @@ def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
         job_service=job_service,
         storage=storage,
         prediction_store=PredictionStore(),
-        annotation_service=AnnotationService(AnnotationStore()),
-        export_store=ExportStore(),
+        annotation_service=AnnotationService(),
+        export_service=ExportService(None, None, None), plotly_service=PlotlyService(None),
     )
     operation_was_called = False
 
@@ -154,11 +152,11 @@ def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
         operation_was_called = True
 
     cleanup_service.request_delete(session.id)
-    execute_inference_job(
+    run_session_job(
         job.id,
         session.id,
         operation,
-        LocalJobExecutor(job_service),
+        JobExecutor(job_service),
         cleanup_service,
     )
 
@@ -168,10 +166,10 @@ def test_cancelled_job_finalizes_requested_session_delete(tmp_path) -> None:
 
 
 def test_cleanup_removes_export_metadata_and_file(tmp_path) -> None:
-    session_service = SessionService(SessionStore())
-    job_service = JobService(JobStore())
+    session_service = SessionService()
+    job_service = JobService()
     storage = TemporaryStorage(tmp_path / "uploads")
-    export_store = ExportStore()
+    export_store = ExportService(storage, None, None)
     session = session_service.create(source_files=[])
     export_path = storage.write_json_export(session.id, "export-test", {"test": True})
     export_store.add(
@@ -193,8 +191,8 @@ def test_cleanup_removes_export_metadata_and_file(tmp_path) -> None:
         job_service=job_service,
         storage=storage,
         prediction_store=PredictionStore(),
-        annotation_service=AnnotationService(AnnotationStore()),
-        export_store=export_store,
+        annotation_service=AnnotationService(),
+        export_service=export_store, plotly_service=PlotlyService(None),
     )
 
     assert cleanup_service.delete_session(session.id) is True
@@ -204,8 +202,8 @@ def test_cleanup_removes_export_metadata_and_file(tmp_path) -> None:
 
 def test_cleanup_rechecks_deadline_when_job_finishes_during_cleanup(tmp_path, monkeypatch) -> None:
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    sessions = SessionService(SessionStore(), clock=lambda: now)
-    jobs = JobService(JobStore(), on_completion=sessions.renew_after_job)
+    sessions = SessionService(clock=lambda: now)
+    jobs = JobService(on_completion=sessions.renew_after_job)
     sessions.active_job_check = jobs.has_active_job
     session = sessions.create([])
     job = jobs.create(session.id, "inference")
@@ -221,7 +219,7 @@ def test_cleanup_rechecks_deadline_when_job_finishes_during_cleanup(tmp_path, mo
     cleanup = SessionCleanupService(
         session_service=sessions, job_service=jobs,
         storage=TemporaryStorage(tmp_path / "uploads"), prediction_store=PredictionStore(),
-        annotation_service=AnnotationService(AnnotationStore()), export_store=ExportStore(),
+        annotation_service=AnnotationService(), export_service=ExportService(None, None, None), plotly_service=PlotlyService(None),
     )
     assert cleanup.cleanup_expired() == []
-    assert sessions.store.get(session.id) is session
+    assert sessions.peek(session.id) is session

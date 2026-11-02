@@ -6,9 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.services.plotly_service import HighFrequencySignal, PlotFigureNotFoundError, PlotSessionNotFoundError
-from sleepwalker.server.stores.session_store import SessionState
-from sleepwalker.server.validation.study import SignalInfo, StudyFormat
+from sleepwalker.server.recording.plots import HighFrequencySignal, PlotFigureNotFoundError, PlotSessionNotFoundError
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 
 class FakeFigure:
@@ -82,6 +82,6 @@ def test_closing_view_does_not_delete_the_session():
     app = create_app()
     session, plots = prepare_plot(app)
     assert plots.delete_figure(session.id)
-    assert app.state.session_service.store.get(session.id) is session
+    assert app.state.session_service.peek(session.id) is session
     with pytest.raises(PlotFigureNotFoundError):
         plots.update_figure(session.id, {})

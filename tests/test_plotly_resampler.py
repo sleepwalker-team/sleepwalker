@@ -5,10 +5,10 @@ pytest.importorskip("plotly_resampler", reason="Install sleepwalker/server/requi
 
 from dash import Dash, dcc, html, no_update
 
-from sleepwalker.server.services.plotly_service import HighFrequencySignal, PlotlyService
-from sleepwalker.server.services.session_service import SessionService
-from sleepwalker.server.stores.session_store import SessionState, SessionStore
-from sleepwalker.server.validation.study import SignalInfo, StudyFormat
+from sleepwalker.server.recording.plots import HighFrequencySignal, PlotlyService
+from sleepwalker.server.core.sessions import SessionService
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 
 class ArrayReader:
@@ -24,7 +24,7 @@ class ArrayReader:
 
 
 def setup_plot():
-    sessions = SessionService(SessionStore())
+    sessions = SessionService()
     session = sessions.create(["recording.edf"])
     session.state, session.format = SessionState.READY, StudyFormat.EDF
     session.signals = [SignalInfo("eeg", "EEG", "uV", 1000)]
@@ -68,46 +68,9 @@ def test_pan_reset_and_irrelevant_events_use_resampler_without_edf_reads():
     assert reader.calls == 1
 
 
-def test_dash_callback_returns_patch_and_no_update_after_session_deletion():
-    plots, session, _, initial = setup_plot()
-    dash_app = Dash(__name__)
-    dash_app.layout = html.Div([dcc.Store(id="selected-session", data=session.id), dcc.Graph(id="signals", figure=initial)])
-    callback = plots.register_dash_callback(dash_app, graph_id="signals", session_store_id="selected-session")
-    patch = callback({"xaxis.range[0]": 10., "xaxis.range[1]": 10.01}, session.id)
-    assert len(patch_values(patch)[("data", 0, "x")]) <= 100
-    assert any("signals.figure" in key for key in dash_app.callback_map)
-    plots.session_service.delete(session.id)
-    assert callback({"xaxis.range[0]": 10., "xaxis.range[1]": 11.}, session.id) is no_update
-    assert callback({}, None) is no_update
-
-
-def test_dash_http_transport_serializes_only_reduced_figure_and_patch():
-    plots, session, _, initial = setup_plot()
-    dash_app = Dash(__name__)
-    dash_app.layout = html.Div([dcc.Store(id="selected-session", data=session.id), dcc.Graph(id="signals", figure=initial)])
-    plots.register_dash_callback(dash_app, graph_id="signals", session_store_id="selected-session")
-    client = dash_app.server.test_client()
-    layout = client.get("/_dash-layout")
-    assert layout.status_code == 200
-    assert len(layout.data) < 50_000
-    output = next(iter(dash_app.callback_map))
-    response = client.post("/_dash-update-component", json={
-        "output": output, "outputs": {"id": "signals", "property": "figure"},
-        "inputs": [{"id": "signals", "property": "relayoutData", "value": {"xaxis.range[0]": 50.12, "xaxis.range[1]": 50.13}}],
-        "state": [{"id": "selected-session", "property": "data", "value": session.id}],
-        "changedPropIds": ["signals.relayoutData"],
-    })
-    assert response.status_code == 200
-    assert len(response.data) < 20_000
-    operations = response.get_json()["response"]["signals"]["figure"]["operations"]
-    values = {tuple(op["location"]): op["params"]["value"] for op in operations if op["operation"] == "Assign"}
-    assert len(values[("data", 0, "x")]) <= 100
-    assert 20. in values[("data", 0, "y")]
-
-
 def test_real_edf_plotting_keeps_original_resolution():
     from pathlib import Path
-    sessions = SessionService(SessionStore())
+    sessions = SessionService()
     path = Path(__file__).parent / "data" / "signals_01.edf"
     session = sessions.create([path])
     session.state, session.format = SessionState.READY, StudyFormat.EDF

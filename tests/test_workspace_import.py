@@ -1,3 +1,5 @@
+from functools import partial
+from sleepwalker.server.core.lifecycle import run_session_job
 import hashlib
 import json
 import shutil
@@ -11,19 +13,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
-from sleepwalker.server.api.imports import execute_import_job
-from sleepwalker.server.services.model_registry import ModelRegistry
-from sleepwalker.server.services.workspace_export_service import WorkspaceExportService
-from sleepwalker.server.storage.temporary_storage import TemporaryStorage
-from sleepwalker.server.stores.job_store import JobState
-from sleepwalker.server.stores.prediction_store import PredictionKind, PredictionResult
-from sleepwalker.server.stores.session_store import SessionState
-from sleepwalker.server.validation import validate_study
-from sleepwalker.server.validation.workspace import (
-    InvalidWorkspaceError,
-    WorkspaceLimits,
-    inspect_workspace,
-)
+from sleepwalker.server.inference.catalog import ModelCatalog
+from sleepwalker.server.core.storage import TemporaryStorage
+from sleepwalker.server.core.jobs import JobState
+from sleepwalker.server.results.predictions import PredictionKind, PredictionResult
+from sleepwalker.server.core.sessions import SessionState
+from sleepwalker.server.recording.study import validate_study
+from sleepwalker.server.results.workspace import InvalidWorkspaceError, WorkspaceLimits, inspect_workspace
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -60,10 +56,9 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resol
         deletion = annotations.delete_event(session.id, edit.event_id)
         annotations.revert(session.id, deletion.id)
 
-    exporter = WorkspaceExportService(app.state.result_export_service, ModelRegistry())
-    documents, sources = exporter.build_documents(session)
+    documents, sources = app.state.export_service.build_workspace_documents(session)
     path = storage.write_workspace_export(session.id, "export-test", documents, sources, lambda: None)
-    return path, session, app.state.result_export_service.build_payload(session)
+    return path, session, app.state.export_service.build_payload(session)
 
 
 def _alter_bundle(path, target, change, update_checksums=True):
@@ -106,9 +101,9 @@ def _run_import(app, session, job, path):
     def operation(report_progress, check_cancelled):
         app.state.workspace_import_service.run(session, path, report_progress, check_cancelled)
 
-    execute_import_job(
-        session, job.id, operation, app.state.job_executor,
-        app.state.workspace_import_service, app.state.session_cleanup_service,
+    run_session_job(
+        job.id, session.id, operation, app.state.job_executor, app.state.session_cleanup_service,
+        success_message="Import completed", on_finished=partial(app.state.workspace_import_service.finalize, session),
     )
 
 
@@ -127,7 +122,7 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
     assert session.recording_start == original.recording_start
     assert session.source_files[0].read_bytes() == original.source_files[0].read_bytes()
     assert not path.exists()
-    restored = app.state.result_export_service.build_payload(session)
+    restored = app.state.export_service.build_payload(session)
     assert restored["tasks"] == payload["tasks"]
     original_ids = {edit["id"] for edit in payload["annotations"]}
     new_edits = restored["annotations"]
@@ -135,12 +130,12 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
     assert {edit["session_id"] for edit in new_edits} == {session.id}
     assert new_edits[-1]["reverted_edit_id"] == new_edits[-2]["id"]
     if kind == PredictionKind.EPOCH:
-        assert app.state.annotation_service.current_labels(session.id) == []
+        assert app.state.annotation_service.snapshot(session.id).labels == []
     else:
         assert new_edits[0]["event_id"] == new_edits[1]["event_id"]
         assert new_edits[0]["event_id"] != payload["annotations"][0]["event_id"]
-        assert len(app.state.annotation_service.current_events(session.id)) == 1
-    assert app.state.model_registry.list() == []
+        assert len(app.state.annotation_service.snapshot(session.id).events) == 1
+    assert app.state.model_catalog.list() == []
 
 
 @pytest.mark.parametrize(("start", "resolution"), [(35.0, 10.0), (25.0, 5.0), (300.0, 30.0)])
@@ -149,10 +144,10 @@ def test_workspace_round_trip_preserves_shifted_epoch_edits(tmp_path, start, res
     app, session, job, path = _prepare_import(tmp_path, bundle)
     _run_import(app, session, job, path)
     assert job.state == JobState.SUCCEEDED, job.error
-    restored = app.state.result_export_service.build_payload(session)
+    restored = app.state.export_service.build_payload(session)
     assert restored["tasks"] == payload["tasks"]
     assert [edit["start"] for edit in restored["annotations"] if edit["operation"] == "set_label"] == [start]
-    assert app.state.annotation_service.current_labels(session.id) == []
+    assert app.state.annotation_service.snapshot(session.id).labels == []
 
 
 @pytest.mark.parametrize("bad_start", [0.0, 30.0, 35.1, 40.0, 45.0])
@@ -166,7 +161,7 @@ def test_workspace_rejects_epoch_edits_without_a_matching_prediction(tmp_path, b
     assert job.state == JobState.FAILED
     assert job.error.code == "INVALID_BUNDLE"
     assert app.state.prediction_store.list_for_session(session.id) == []
-    assert app.state.annotation_service.current_labels(session.id) == []
+    assert app.state.annotation_service.snapshot(session.id).labels == []
 
 
 def test_workspace_canonicalizes_roundoff_in_epoch_edits(tmp_path):
@@ -177,7 +172,7 @@ def test_workspace_canonicalizes_roundoff_in_epoch_edits(tmp_path):
     app, session, job, path = _prepare_import(tmp_path, altered)
     _run_import(app, session, job, path)
     assert job.state == JobState.SUCCEEDED, job.error
-    edit = app.state.annotation_service.store.list_for_session(session.id)[0]
+    edit = app.state.annotation_service.list_edits(session.id)[0]
     assert edit.start == 35.0
 
 
@@ -277,9 +272,9 @@ def test_cancelled_import_cleans_up_partially_extracted_sources(tmp_path):
 
         app.state.workspace_import_service.run(session, path, report_progress, cancel_during_extraction)
 
-    execute_import_job(
-        session, job.id, operation, app.state.job_executor,
-        app.state.workspace_import_service, app.state.session_cleanup_service,
+    run_session_job(
+        job.id, session.id, operation, app.state.job_executor, app.state.session_cleanup_service,
+        success_message="Import completed", on_finished=partial(app.state.workspace_import_service.finalize, session),
     )
 
     assert job.state == JobState.CANCELLED
@@ -294,7 +289,7 @@ def test_session_deletion_cancels_import_and_removes_job_and_files(tmp_path):
     assert app.state.session_cleanup_service.request_delete(session.id) is True
     _run_import(app, session, job, path)
     assert app.state.job_service.get(job.id) is None
-    assert app.state.session_service.store.get(session.id) is None
+    assert app.state.session_service.peek(session.id) is None
     assert not path.exists()
 
 
@@ -336,8 +331,7 @@ def test_import_preserves_original_model_provenance_for_reexport(tmp_path):
     app, session, job, path = _prepare_import(tmp_path, altered)
     _run_import(app, session, job, path)
     assert job.state == JobState.SUCCEEDED
-    exporter = WorkspaceExportService(app.state.result_export_service, app.state.model_registry)
-    documents, _ = exporter.build_documents(session)
+    documents, _ = app.state.export_service.build_workspace_documents(session)
     assert documents["provenance/models.json"][0]["name"] == "Original model"
     assert documents["provenance/models.json"][0]["version"] == "v1"
 
@@ -409,7 +403,7 @@ def test_import_http_rejects_invalid_zip_and_cleans_upload(tmp_path):
         )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_BUNDLE"
-    assert app.state.session_service.store.list() == []
+    assert app.state.session_service.list() == []
     assert {path.name for path in storage.root.iterdir()} == {".server.lock"}
 
 
@@ -424,7 +418,7 @@ def test_import_http_rejects_unsupported_version(tmp_path):
         response = client.post("/api/v1/sessions/import", files={"bundle": ("new.zip", source)})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "UNSUPPORTED_FORMAT_VERSION"
-    assert app.state.session_service.store.list() == []
+    assert app.state.session_service.list() == []
 
 
 def test_import_http_rejects_oversized_upload(tmp_path):

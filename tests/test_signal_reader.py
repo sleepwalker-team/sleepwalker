@@ -1,15 +1,48 @@
+import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from sleepwalker.server.services.signal_reader import EdfSignalReader, SignalSamples, downsample_extrema
+from sleepwalker.server.recording.signals import EdfSignalReader, SignalSamples
+
+
+def downsample_extrema(samples: SignalSamples, max_points: int) -> SignalSamples:
+    sample_count = len(samples.times)
+
+    if sample_count <= max_points:
+        return samples
+
+    if max_points == 2:
+        indices = [0, sample_count - 1]
+    else:
+        interior_count = sample_count - 2
+        bucket_count = min(max_points - 2, interior_count)
+        indices = [0]
+
+        for bucket in range(bucket_count):
+            bucket_start = 1 + math.floor(bucket * interior_count / bucket_count)
+            bucket_end = 1 + math.floor((bucket + 1) * interior_count / bucket_count)
+            strongest = max(
+                range(bucket_start, bucket_end),
+                key=lambda index: abs(samples.values[index]),
+            )
+            indices.append(strongest)
+
+        indices.append(sample_count - 1)
+
+    return SignalSamples(
+        times=[samples.times[index] for index in indices],
+        values=[samples.values[index] for index in indices],
+        sample_count=samples.sample_count if samples.sample_count is not None else sample_count,
+    )
 
 
 def test_downsample_extrema_preserves_boundaries_and_strongest_values() -> None:
     samples = SignalSamples(
         times=[float(index) for index in range(10)],
         values=[0.0, 1.0, -8.0, 2.0, 1.0, 9.0, 2.0, -7.0, 1.0, 0.0],
+        sample_count=10,
     )
 
     reduced = downsample_extrema(samples, max_points=4)
@@ -52,13 +85,14 @@ def test_streaming_reader_matches_existing_extrema_selection(max_points, monkeyp
     values[19] = 99.0
     values[20] = -99.0
     reader = ArrayReader(values)
-    monkeypatch.setattr("sleepwalker.server.services.signal_reader.pyedflib.EdfReader", lambda _: reader)
-    monkeypatch.setattr("sleepwalker.server.services.signal_reader.SIGNAL_CHUNK_SIZE", 7)
+    monkeypatch.setattr("sleepwalker.server.recording.signals.pyedflib.EdfReader", lambda _: reader)
+    monkeypatch.setattr("sleepwalker.server.recording.signals.SIGNAL_CHUNK_SIZE", 7)
     start, end = 0.15, 11.95
     indices = [index for index in range(len(values)) if start <= index / 10.0 < end]
     baseline = SignalSamples(
         times=[index / 10.0 for index in indices],
         values=[float(values[index]) for index in indices],
+        sample_count=len(indices),
     )
     expected = downsample_extrema(baseline, max_points)
     actual = EdfSignalReader().read(Path("test.edf"), "EEG", start, end, max_points=max_points)
@@ -83,7 +117,7 @@ def test_large_signal_is_read_in_bounded_chunks_not_as_one_array(monkeypatch):
             return np.arange(start, start + n, dtype=float)
 
     reader = LargeReader()
-    monkeypatch.setattr("sleepwalker.server.services.signal_reader.pyedflib.EdfReader", lambda _: reader)
+    monkeypatch.setattr("sleepwalker.server.recording.signals.pyedflib.EdfReader", lambda _: reader)
     samples = EdfSignalReader().read(Path("large.edf"), "EEG", 0.0, 1_000_000.0, max_points=128)
     assert len(samples.times) == len(samples.values) == 128
     assert samples.sample_count == 10_000_000
@@ -100,7 +134,7 @@ def test_reader_closes_file_on_midstream_failure(monkeypatch):
         raise RuntimeError("read failed")
 
     reader.readSignal = fail
-    monkeypatch.setattr("sleepwalker.server.services.signal_reader.pyedflib.EdfReader", lambda _: reader)
+    monkeypatch.setattr("sleepwalker.server.recording.signals.pyedflib.EdfReader", lambda _: reader)
     with pytest.raises(RuntimeError, match="read failed"):
         EdfSignalReader().read(Path("test.edf"), "EEG", 0.0, 10.0, max_points=8)
     assert reader.closed

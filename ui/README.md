@@ -95,15 +95,21 @@ Der Docker-Build wurde in dieser Arbeitsumgebung mangels Docker nicht ausgeführ
   Bei mehreren Modellen für dieselbe Aufgabe lässt sich jeweils eines auswählen.
   Weitere, noch nicht inferierte Aufgaben können im Viewer unter **Modelle …**
   gestartet werden. Bereits vorhandene Tasks werden nicht überschrieben.
-- Die Modellauswahl zeigt die benötigten Eingänge. Kann die API für ein Modell
-  keine passende Kanalzuordnung finden, wird dieses Modell mit seinen konkreten
-  fehlenden Zuordnungen angezeigt; die übrigen ausgewählten Modelle werden
-  separat erneut zum Start eingereicht. Abgewiesene Anfragen erzeugen dabei noch
-  keinen Inferenzjob. Die Prüfung und Aliasauflösung bleiben vollständig beim
-  bestehenden Server. Unter **Kanalzuordnung** und **Modelle …** sind die
-  vorhandenen EDF-Kanalnamen sichtbar. Abweichende Namen oder Ableitungen werden
-  nicht automatisch umbenannt. Die Auswahl sichtbarer Plotkanäle verändert die
-  Modelleingänge nicht.
+- Die Modellauswahl zeigt die benötigten Eingänge. Erkennt die UI für ein
+  ausgewähltes Modell nicht alle Eingänge (dieselbe Namensregel wie der Server,
+  über `channel_aliases` aus `GET /models`), öffnet sich vor dem Start der Dialog
+  **Kanalzuordnung**: links die Modelleingänge, rechts die EDF-Kanäle, verbunden
+  durch Linien in der Farbe des Modells. Erkannte Paare sind schon verbunden
+  (durchgezogen), Verbindungen von Hand sind gestrichelt. Verbinden per Klick auf
+  Eingang und dann Kanal oder per Ziehen; eine Linie oder × löst sie wieder.
+  „nicht ausführen“ schließt ein Modell aus. Gestartet werden kann erst, wenn
+  jedes aktive Modell vollständig verbunden ist; ein EDF-Kanal versorgt pro Modell
+  höchstens einen Eingang. Von Hand verbundene Modelle gehen als `channel_map` an
+  die API, die übrigen nutzen die Zuordnung des Servers. Abweichende Ableitungen
+  müssen fachlich geprüft werden. Lehnt der Server ein Modell trotzdem ab, wird es
+  wie bisher unter **Kanalzuordnung** mit den fehlenden Eingängen angezeigt, und
+  die übrigen Modelle werden erneut eingereicht. Die Auswahl sichtbarer Plotkanäle
+  verändert die Modelleingänge nicht.
 - **Kanäle …** bestimmt Auswahl und Reihenfolge. Nur ausgewählte Kanäle werden
   in den vorhandenen Resampler geladen.
 - Im Signalplot ziehen, um ein Intervall zu markieren. Das Mauswerkzeug
@@ -210,7 +216,9 @@ werden nicht zwischen Webworkern oder Replikaten geteilt. Die separate
 Inferenzumgebung bleibt ein eigener Subprozess.
 
 Der Resampler lädt vollständige ausgewählte Kanäle in den Server-RAM; die
-Übertragung in den Browser wird auf ungefähr 2.000 Punkte pro Kanal begrenzt.
+Übertragung in den Browser wird auf ungefähr 2.000 Punkte pro sichtbarer
+Fensterbreite und Kanal begrenzt; links und rechts wird je eine Fensterbreite
+mitgeschickt, damit beim Verschieben kein leerer Rand entsteht.
 Zoom verwendet Resampler-Patches und lädt die EDF nicht erneut. Die
 Resampler-Aufrufe enthalten den Zeitbereich aller Subplots, damit auch untere
 Kanäle beim tiefen Zoom die Originalsamples erhalten. Die Plothöhe ist direkt an

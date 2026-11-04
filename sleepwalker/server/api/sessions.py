@@ -72,7 +72,8 @@ def start_inference(
     # Resolved once here: this job keeps using these packages even if a newer one appears.
     models = _resolve_models(payload.models, catalog)
     _check_tasks_available(models, session, predictions)
-    _check_channels(models, session)
+    _check_channel_map(payload.channel_map, models, session)
+    _check_channels([model for model in models if model.id not in payload.channel_map], session)
 
     if runner is None:
         raise APIError(status.HTTP_503_SERVICE_UNAVAILABLE, "COMPUTE_UNAVAILABLE", "Inference execution is not available.")
@@ -82,7 +83,7 @@ def start_inference(
     except ActiveJobExistsError as exc:
         raise job_already_running(exc) from exc
 
-    background_tasks.add_task(run_session_job, job.id, session.id, partial(runner.run, session, models), executor, cleanup)
+    background_tasks.add_task(run_session_job, job.id, session.id, partial(runner.run, session, models, channel_map=payload.channel_map), executor, cleanup)
     return JobAcceptedResponse(job_id=job.id, state=job.state)
 
 
@@ -117,6 +118,23 @@ def _check_tasks_available(models: list[ModelInfo], session: Session, prediction
     for task in by_task:
         if predictions.get_by_task(session.id, task):
             raise unprocessable("MODEL_INCOMPATIBLE", "Predictions already exist for this task.", {"task": task})
+
+
+def _check_channel_map(channel_map: dict[str, dict[str, str]], models: list[ModelInfo], session: Session) -> None:
+    by_id = {model.id: model for model in models}
+    signals = {signal.id for signal in session.signals or []}
+    for model_id, mapping in channel_map.items():
+        model = by_id.get(model_id)
+        if model is None:
+            raise bad_request("Channel map names a model that is not selected.", {"model_id": model_id})
+        if set(mapping) != set(model.input_channels):
+            raise bad_request("Channel map must assign every input channel of the model.", {"model_id": model_id, "channels": list(model.input_channels)})
+        unknown = sorted(set(mapping.values()) - signals)
+        if unknown:
+            raise bad_request("Channel map names unknown signals.", {"model_id": model_id, "signals": unknown})
+        if len(set(mapping.values())) != len(mapping):
+            # One EDF signal carries one name, so it cannot feed two inputs of one model.
+            raise bad_request("Channel map uses a signal for more than one input of the model.", {"model_id": model_id})
 
 
 def _check_channels(models: list[ModelInfo], session: Session) -> None:

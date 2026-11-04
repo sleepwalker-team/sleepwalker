@@ -64,6 +64,7 @@ class WorkspaceModel(WorkspaceDocument):
     version: Text | None = None
     input_channels: list[Text] | None = None
     capabilities: list[Text] | None = None
+    channel_map: dict[Text, Text] | None = None
 
 
 class WorkspaceManifest(WorkspaceDocument):

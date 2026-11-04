@@ -45,7 +45,7 @@ All paths start with `/api/v1`, except `/health`.
 | `POST /sessions` | Upload a study (`files`, multipart) | 201 session |
 | `GET /sessions/{id}` | Session state, signals, tasks | 200 |
 | `DELETE /sessions/{id}` | Cancel its jobs and delete all its data | 204 |
-| `POST /sessions/{id}/inference` | Start models: `{"models": ["id"]}` | 202 job |
+| `POST /sessions/{id}/inference` | Start models: `{"models": ["id"], "channel_map": {...}}` | 202 job |
 | `GET /sessions/{id}/tasks` | Tasks that have predictions | 200 |
 | `GET /sessions/{id}/predictions/{task}?start=&end=` | Predictions in a time range | 200 |
 | `GET /sessions/{id}/signals` | List signals | 200 |
@@ -96,6 +96,7 @@ server/
 | `recording/study.py` | Recognise and validate uploaded files |
 | `recording/signals.py` | Bounded EDF range reads for REST |
 | `recording/plots.py` | `plotly-resampler` figures for the Dash UI |
+| `recording/relabel.py` | EDF copy with renamed signals for a channel mapping |
 | `inference/catalog.py` | `ModelCatalog`: which models exist right now |
 | `inference/runner.py` | Starts the worker, checks and stores its results |
 | `inference/worker.py` | Runs **in the inference venv**, loads the model |
@@ -155,6 +156,18 @@ Request and result travel as JSON and CSV through a private temporary directory
 that is removed even after a forced kill. All selected models must succeed before
 any result is published. One job runs at a time; others wait in `running`. The
 worker's traceback goes to the server log, never to clients.
+
+### Channel mapping
+
+A model finds its inputs by the EDF signal names its package accepts (`GET /models`
+lists them as `channel_aliases`). If a recording names a signal differently, the
+client can assign it: `"channel_map": {"<model id>": {"<input>": "<signal id>", ...}}`
+must cover every input of that model, and one signal can feed only one input per
+model. The worker then gets a copy of the EDF in the session folder in which only
+the header labels differ: the chosen signal carries the input's first package name,
+and other signals that would also match are renamed `unused N`. The mapping is
+stored with the model's provenance and exported with the workspace. Different
+derivations are a clinical decision; the API only applies what the client chose.
 
 Prediction kinds are `epoch`, `continuous` and `event`. Today's packages produce
 only `epoch`, and a manifest has no way yet to declare another kind; viewing,

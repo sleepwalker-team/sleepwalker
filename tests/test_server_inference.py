@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from sleepwalker.server.app import create_app
 from sleepwalker.server.api.schemas import SessionState
@@ -18,16 +19,17 @@ class SuccessfulInferenceRunner:
         self.session_id: str | None = None
         self.model_ids: list[str] = []
 
-    def run(self, session, models, report_progress, check_cancelled) -> None:
+    def run(self, session, models, report_progress, check_cancelled, channel_map=None) -> None:
         self.session_id = session.id
         self.model_ids = [model.id for model in models]
+        self.channel_map = channel_map
         check_cancelled()
         report_progress(JobPhase.PREPROCESSING, None, "Preparing EDF data")
         report_progress(JobPhase.INFERENCE, 0.5, "Running inference")
 
 
 class FailingInferenceRunner:
-    def run(self, _session, models, _report_progress, _check_cancelled) -> None:
+    def run(self, _session, models, _report_progress, _check_cancelled, channel_map=None) -> None:
         raise JobExecutionError(
             code="MODEL_INCOMPATIBLE",
             message="Model is incompatible with the recording.",
@@ -296,3 +298,57 @@ def test_start_inference_rejects_models_with_duplicate_task() -> None:
         "task": "sleep_stage",
         "model_ids": [first_model.id, second_model.id],
     }
+
+
+def _mapping_client(runner):
+    service = SessionService()
+    session = service.create(source_files=[])
+    session.state = SessionState.READY
+    session.signals = [
+        SignalInfo(id="EEG Fpz-Cz", label="EEG Fpz-Cz", unit="uV", sample_rate=100),
+        SignalInfo(id="EEG Pz-Oz", label="EEG Pz-Oz", unit="uV", sample_rate=100),
+    ]
+    model = replace(create_model(), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
+    app = create_app(session_service=service, model_catalog=ModelCatalog(models=[model]), inference_runner=runner)
+    return TestClient(app), session, model
+
+
+def test_start_inference_uses_channel_map_for_unmatched_inputs() -> None:
+    runner = SuccessfulInferenceRunner()
+    client, session, model = _mapping_client(runner)
+    with client:
+        response = client.post(
+            f"/api/v1/sessions/{session.id}/inference",
+            json={"models": [model.id], "channel_map": {model.id: {"eeg": "EEG Fpz-Cz"}}},
+        )
+    assert response.status_code == 202
+    assert runner.channel_map == {model.id: {"eeg": "EEG Fpz-Cz"}}
+
+
+@pytest.mark.parametrize("channel_map", [
+    {"other-model": {"eeg": "EEG Fpz-Cz"}},
+    {"sleep-model": {}},
+    {"sleep-model": {"eeg": "EEG Fpz-Cz", "eog": "EEG Pz-Oz"}},
+    {"sleep-model": {"eeg": "missing signal"}},
+])
+def test_start_inference_rejects_invalid_channel_map(channel_map) -> None:
+    runner = SuccessfulInferenceRunner()
+    client, session, model = _mapping_client(runner)
+    with client:
+        response = client.post(f"/api/v1/sessions/{session.id}/inference", json={"models": [model.id], "channel_map": channel_map})
+    assert response.status_code == 400
+    assert runner.session_id is None
+
+
+def test_start_inference_rejects_one_signal_for_two_inputs() -> None:
+    service = SessionService()
+    session = service.create(source_files=[])
+    session.state = SessionState.READY
+    session.signals = [SignalInfo(id="EEG", label="EEG", unit="uV", sample_rate=100)]
+    model = replace(create_model(), input_channels=("eeg", "eog"), channel_aliases={"eeg": ("C3-M2",), "eog": ("E1-M2",)})
+    with TestClient(create_app(session_service=service, model_catalog=ModelCatalog(models=[model]), inference_runner=SuccessfulInferenceRunner())) as client:
+        response = client.post(
+            f"/api/v1/sessions/{session.id}/inference",
+            json={"models": [model.id], "channel_map": {model.id: {"eeg": "EEG", "eog": "EEG"}}},
+        )
+    assert response.status_code == 400

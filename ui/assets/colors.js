@@ -1,4 +1,4 @@
-const palette=["#245cf0","#008f96","#d52b9b","#6727c9","#f47916","#3c9b35"];
+export const palette=["#245cf0","#008f96","#d52b9b","#6727c9","#f47916","#3c9b35"];
 const stages={wake:"#f2c500",w:"#f2c500",n1:"#36b8ea",n2:"#245cf0",n3:"#6727c9",rem:"#d52b9b"};
 export const isNegativeClass=label=>/^(no(?:[ _-]|$)|kein|regular breathing$|none$)/i.test(String(label));
 export function labelColor(label) {

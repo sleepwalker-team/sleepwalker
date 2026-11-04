@@ -268,7 +268,16 @@ export const english = {
   "Für kontinuierliche Werte auf höchstens 15 min zoomen": "Zoom to 15 minutes or less for continuous values",
   "Ungültige Plotansicht.": "Invalid plot view.",
   "Mindestens einen gültigen Kanal auswählen.": "Select at least one valid channel.",
-  "Signalansicht konnte nicht initialisiert werden.": "Could not initialize the signal viewer."
+  "Signalansicht konnte nicht initialisiert werden.": "Could not initialize the signal viewer.",
+  "Kanalzuordnung": "Channel mapping",
+  "Nicht alle Modelleingänge wurden erkannt. Links einen Eingang wählen und rechts mit einem EDF-Kanal verbinden, oder das Modell nicht ausführen. Erkannte Kanäle sind bereits verbunden.": "Not all model inputs were recognised. Select an input on the left and connect it to an EDF channel on the right, or skip the model. Recognised channels are already connected.",
+  "Abweichende Ableitungen müssen fachlich geprüft werden. Gestrichelte Linien sind von Hand verbunden.": "Different derivations require expert review. Dashed lines were connected by hand.",
+  "nicht ausführen": "skip",
+  "${0} → ${1}: klicken zum Lösen": "${0} → ${1}: click to disconnect",
+  "Verbindung von ${0} lösen": "Disconnect ${0}",
+  "Ein EDF-Kanal kann pro Modell nur einen Eingang versorgen.": "An EDF channel can feed only one input per model.",
+  "${0} Eingänge noch offen. Verbinden oder Modell nicht ausführen.": "${0} inputs still open. Connect them or skip the model.",
+  "Jetzt rechts einen EDF-Kanal wählen.": "Now choose an EDF channel on the right."
 };
 export const LANGUAGE_KEY = "sleepwalker.language";
 let selected = "de";

@@ -2,6 +2,8 @@ import {t, language, locale, setLanguage, applyTranslations, translationFor, ren
 import {isNegativeClass, labelColor} from "./colors.js?v=20261026-theme-1";
 import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-theme-1";
 import {submitCompatibleModels} from "./inference.js?v=20261026-theme-1";
+import {isMatched} from "./channels.js?v=20261026-theme-1";
+import {openChannelDialog} from "./channel_dialog.js?v=20261026-theme-1";
 import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-theme-1";
 
 import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261026-theme-1";
@@ -597,10 +599,20 @@ function watchJob(job) {
 }
 async function startInference(models) {
   if(!state.session||!models.length)return;
-  const id=state.session.id,generation=state.generation;
+  const id=state.session.id,generation=state.generation,signals=state.session.signals||[];
+  let channelMap={};
+  // Ask only when some input has no match; matched models keep the server's own matching.
+  const chosen=models.map(modelId=>state.models.find(model=>model.id===modelId)).filter(Boolean);
+  if(chosen.some(model=>!isMatched(model,signals))) {
+    const request=await openChannelDialog(chosen,signals,model=>`${taskName(model)} · ${model.name}`);
+    if(!request||generation!==state.generation)return;
+    models=request.models;channelMap=request.channel_map;
+    for(const modelId of Object.keys(channelMap))state.inputIssues.delete(modelId);
+    renderInputIssues();
+  }
   try {
     const result=await submitCompatibleModels(models,
-      selected=>api(`${sessionPath(id)}/inference`,{method:"POST",json:{models:selected}}),
+      selected=>api(`${sessionPath(id)}/inference`,{method:"POST",json:{models:selected,channel_map:Object.fromEntries(Object.entries(channelMap).filter(([modelId])=>selected.includes(modelId)))}}),
       issue=>{state.inputIssues.set(issue.modelId,issue);renderInputIssues();},
       ()=>generation===state.generation);
     if(result.cancelled)return;
@@ -633,7 +645,7 @@ function openInferenceDialog() {
   for(const model of state.models) {
     if(existing.has(model.task))continue;
     const row=element("div",undefined,"channel-row inference-model-row"),label=element("label"),input=element("input"),issue=state.inputIssues.get(model.id),description=element("span",`${taskName(model)} · ${model.name}`);
-    input.type="checkbox";input.value=model.id;input.dataset.task=model.task;input.disabled=Boolean(issue);input.checked=!issue&&!seen.has(model.task);if(!issue)seen.add(model.task);
+    input.type="checkbox";input.value=model.id;input.dataset.task=model.task;input.checked=!issue&&!seen.has(model.task);if(!issue)seen.add(model.task);
     description.append(element("small",t`Benötigte Eingänge: ${model.input_channels.join(", ")}`));
     if(issue)description.append(element("small",t`Nicht zugeordnet: ${issue.channels.join(", ")}`,"input-issue-text"));
     label.append(input,description);row.append(label);container.append(row);

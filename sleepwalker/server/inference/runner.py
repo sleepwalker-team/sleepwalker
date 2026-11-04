@@ -16,6 +16,7 @@ import pandas as pd
 
 from ..core.jobs import CancellationCheck, JobExecutionError, JobPhase, ProgressCallback
 from ..core.sessions import Session
+from ..recording.relabel import channel_renames, read_edf_labels, relabel_edf
 from ..recording.study import StudyFormat
 from ..results.predictions import PredictionKind, PredictionResult, PredictionStore, map_predictions
 from .catalog import ModelInfo
@@ -30,7 +31,10 @@ WORKER_ERRORS = {
 
 
 class InferenceRunner(Protocol):
-    def run(self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> None:
+    def run(
+        self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,
+        channel_map: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         ...
 
 
@@ -167,7 +171,11 @@ class PackageInferenceRunner:
         self.prediction_client = prediction_client if prediction_client is not None else SubprocessInferenceClient(inference_python)
         self._slots = Semaphore(max_parallel_jobs)
 
-    def run(self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> None:
+    def run(
+        self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,
+        channel_map: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        channel_map = channel_map or {}
         if session.format != StudyFormat.EDF or len(session.source_files) != 1 or session.recording_start is None:
             raise JobExecutionError("MODEL_INCOMPATIBLE", "Inference requires one EDF and recording start metadata.")
         if not models:
@@ -177,17 +185,33 @@ class PackageInferenceRunner:
         while not self._slots.acquire(timeout=0.1):
             check_cancelled()
         try:
-            results = [self._predict(session, model, index / len(models), report_progress, check_cancelled) for index, model in enumerate(models)]
+            results = [
+                self._predict(session, model, channel_map.get(model.id), index / len(models), report_progress, check_cancelled)
+                for index, model in enumerate(models)
+            ]
         finally:
             self._slots.release()
 
         check_cancelled()
         self.prediction_store.add_many(results)
-        session.model_provenance = [*session.model_provenance, *(model.provenance() for model in models)]
+        session.model_provenance = [*session.model_provenance, *(_provenance(model, channel_map.get(model.id)) for model in models)]
 
-    def _predict(self, session: Session, model: ModelInfo, progress: float, report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> PredictionResult:
+    def _predict(
+        self, session: Session, model: ModelInfo, mapping: dict[str, str] | None, progress: float,
+        report_progress: ProgressCallback, check_cancelled: CancellationCheck,
+    ) -> PredictionResult:
         report_progress(JobPhase.INFERENCE, progress, f"Running model {model.id}")
-        frame = self.prediction_client.predict(model, session.source_files[0], device=self.device, batch_size=self.batch_size, check_cancelled=check_cancelled)
+        edf_path = session.source_files[0]
+        # A relabeled copy sits in the session's own folder, so session cleanup also removes it.
+        with TemporaryDirectory(prefix="relabeled-", dir=edf_path.parent) as directory:
+            if mapping:
+                relabeled = Path(directory) / edf_path.name
+                try:
+                    relabel_edf(edf_path, relabeled, channel_renames(read_edf_labels(edf_path), model.channel_aliases, mapping))
+                except ValueError as exc:
+                    raise JobExecutionError("MODEL_INCOMPATIBLE", "Channel map cannot be applied to this recording.", {"model_id": model.id}) from exc
+                edf_path = relabeled
+            frame = self.prediction_client.predict(model, edf_path, device=self.device, batch_size=self.batch_size, check_cancelled=check_cancelled)
         check_cancelled()
         try:
             result = PredictionResult(
@@ -199,3 +223,11 @@ class PackageInferenceRunner:
         except (KeyError, TypeError, ValueError) as exc:
             raise JobExecutionError("MODEL_INCOMPATIBLE", "Model returned predictions in an incompatible format.", {"model_id": model.id, "output_kind": model.output_kind.value}) from exc
         return result
+
+
+def _provenance(model: ModelInfo, mapping: dict[str, str] | None) -> dict:
+    """Record which signal fed which input when the user chose it."""
+    provenance = model.provenance()
+    if mapping:
+        provenance["channel_map"] = dict(mapping)
+    return provenance

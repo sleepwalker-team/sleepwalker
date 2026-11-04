@@ -21,7 +21,7 @@ class TestRunner:
     def __init__(self, store):
         self.store = store
 
-    def run(self, session, models, report_progress, check_cancelled):
+    def run(self, session, models, report_progress, check_cancelled, channel_map=None):
         results = []
         for model in models:
             check_cancelled()

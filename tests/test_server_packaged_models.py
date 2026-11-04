@@ -148,9 +148,14 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
         assert app.state.prediction_store.list_for_session(session_id) == []
 
 
-def test_real_worker_cancellation_removes_framework_edf_cache(real_model_configuration, synthetic_model_edf):
+def test_real_worker_cancellation_removes_framework_edf_cache(real_model_configuration, tmp_path):
     python, models = real_model_configuration
     model = next(model for model in ModelCatalog(models).list() if model.task == "sleep")
+    # Long enough that the cache is still filled when the job is cancelled.
+    edf = tmp_path / "long.edf"
+    t = np.arange(3 * 3600 * 100) / 100
+    header = highlevel.make_signal_header("C3-M2", dimension="uV", sample_frequency=100, physical_min=-500, physical_max=500)
+    assert highlevel.write_edf(str(edf), [35 * np.sin(2 * np.pi * 10 * t)], [header], header=highlevel.make_header(startdate=datetime(2025, 1, 1)))
     # The framework puts its cache in /dev/shm, or the temporary directory if that is not writable.
     def caches():
         return {path for root in (Path("/dev/shm"), Path(tempfile.gettempdir())) for path in root.glob("sleepwalker-edf-cache-*")}
@@ -162,7 +167,34 @@ def test_real_worker_cancellation_removes_framework_edf_cache(real_model_configu
         # Cancel once the recording is in RAM; that is what must not be left behind.
         if any(any(path.iterdir()) for path in created if path.exists()):
             raise JobCancelledError
-        assert time.monotonic() - started < 20, "Real worker did not fill its EDF cache"
+        assert time.monotonic() - started < 30, "Real worker did not fill its EDF cache"
     with pytest.raises(JobCancelledError):
-        SubprocessInferenceClient(python).predict(model, synthetic_model_edf, device="cpu", batch_size=1, check_cancelled=check_cancelled)
+        SubprocessInferenceClient(python).predict(model, edf, device="cpu", batch_size=1, check_cancelled=check_cancelled)
     assert created and not any(path.exists() for path in created)
+
+
+def test_real_model_runs_with_a_hand_mapped_channel_and_exports_the_mapping(real_model_configuration, synthetic_model_edf, tmp_path):
+    from sleepwalker.server.recording.relabel import relabel_edf
+
+    python, models = real_model_configuration
+    renamed = tmp_path / "renamed.edf"
+    relabel_edf(synthetic_model_edf, renamed, {"C3-M2": "EEG Fpz-Cz"})
+    app = create_local_app(models, inference_python=python, batch_size=1)
+    with TestClient(app) as client:
+        model = next(model for model in client.get("/api/v1/models").json()["models"] if model["task"] == "sleep")
+        with renamed.open("rb") as file:
+            session_id = client.post("/api/v1/sessions", files={"files": (renamed.name, file)}).json()["id"]
+        unmapped = client.post(f"/api/v1/sessions/{session_id}/inference", json={"models": [model["id"]]})
+        assert unmapped.json()["error"]["code"] == "MISSING_REQUIRED_CHANNEL"
+        accepted = client.post(f"/api/v1/sessions/{session_id}/inference", json={"models": [model["id"]], "channel_map": {model["id"]: {"eeg": "EEG Fpz-Cz"}}})
+        assert accepted.status_code == 202, accepted.text
+        job = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}").json()
+        assert job["state"] == "succeeded", job
+        assert client.get(f"/api/v1/sessions/{session_id}/predictions/sleep").json()["predictions"]
+        exported = client.post(f"/api/v1/sessions/{session_id}/exports", json={"format": "sleepwalker", "mode": "workspace"})
+        assert exported.status_code == 202, exported.text
+        bundle = client.get(f"/api/v1/exports/{exported.json()['export_id']}/download").content
+        imported = client.post("/api/v1/sessions/import", files={"bundle": ("mapped.sleepwalker.zip", bundle, "application/zip")})
+        assert client.get(f"/api/v1/jobs/{imported.json()['job_id']}").json()["state"] == "succeeded"
+    session = app.state.session_service.peek(imported.json()["session_id"])
+    assert session.model_provenance[0]["channel_map"] == {"eeg": "EEG Fpz-Cz"}

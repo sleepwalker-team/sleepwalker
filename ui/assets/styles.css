@@ -190,3 +190,27 @@ dialog > label { margin-top:14px; }
 .theme-toggle svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .theme-toggle .theme-moon, :root[data-theme="dark"] .theme-toggle .theme-sun { display:none; }
 :root[data-theme="dark"] .theme-toggle .theme-moon { display:block; }
+/* Channel mapping: model inputs left, EDF signals right, connected by SVG lines. */
+dialog.mapping-dialog { width:min(820px,calc(100vw - 30px)); }
+.mapping-board { position:relative; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); column-gap:120px; margin-top:14px; }
+.mapping-column { display:flex; flex-direction:column; gap:6px; position:relative; z-index:1; }
+.mapping-lines { position:absolute; inset:0; overflow:visible; pointer-events:none; z-index:2; }
+.mapping-line { fill:none; stroke-width:2.5; }
+.mapping-line.manual { stroke-dasharray:6 4; }
+.mapping-hit { fill:none; stroke:transparent; stroke-width:14; pointer-events:stroke; cursor:pointer; }
+.mapping-model { border:1px solid var(--soft-line); border-left:4px solid var(--model-color); border-radius:var(--radius-control); padding:8px; display:flex; flex-direction:column; gap:5px; }
+.mapping-model.skipped { opacity:.5; }
+.mapping-model-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.mapping-skip { display:flex; align-items:center; gap:5px; margin:0; color:var(--muted); font-size:12px; white-space:nowrap; }
+.mapping-input-row { display:flex; align-items:center; gap:4px; }
+.mapping-port { display:flex; justify-content:space-between; align-items:center; gap:8px; width:100%; min-height:28px; padding:3px 9px; text-align:left; }
+.mapping-port small { color:var(--muted); }
+.input-port { border-right:3px solid var(--model-color); }
+.input-port.open { border-color:var(--error-line); background:var(--error-bg); }
+.input-port.duplicate { border-color:var(--warning-line); background:var(--error-bg); }
+.input-port.pending { outline:2px solid var(--model-color); outline-offset:1px; }
+.signal-port:disabled { opacity:1; cursor:default; }
+.signal-port:not(:disabled):hover { background:var(--hover); }
+.mapping-unlink { min-height:26px; padding:2px 8px; }
+.mapping-hint { color:var(--warning-ink); margin-top:12px; }
+@media (max-width:640px) { .mapping-board { column-gap:56px; } }

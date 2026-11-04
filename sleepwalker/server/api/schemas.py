@@ -130,6 +130,9 @@ class AnnotationListResponse(BaseModel):
 
 class InferenceRequest(BaseModel):
     models: list[str]
+    # Per model, input channel -> signal ID. Covers every input of a listed model;
+    # models not listed are matched by the names in their package.
+    channel_map: dict[str, dict[str, str]] = {}
 
 
 class JobAcceptedResponse(BaseModel):
@@ -154,6 +157,8 @@ class ModelResponse(BaseModel):
     task: str
     classes: list[str]
     input_channels: list[str]
+    # Per input channel, the EDF signal names its package accepts.
+    channel_aliases: dict[str, list[str]]
     capabilities: list[str]
     output_kind: PredictionKind
     output_resolution: float

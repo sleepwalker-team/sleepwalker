@@ -157,3 +157,29 @@ def test_waiting_for_a_busy_inference_slot_can_be_cancelled(tmp_path):
     with pytest.raises(JobCancelledError):
         runner.run(session, [model], lambda *args: None, cancel)
     assert client.calls == []
+
+
+def test_runner_gives_the_worker_a_relabeled_copy_and_records_the_mapping(tmp_path):
+    import numpy as np
+    from pyedflib import highlevel
+    from sleepwalker.server.recording.relabel import read_edf_labels
+
+    edf = tmp_path / "session" / "recording.edf"
+    edf.parent.mkdir()
+    headers = highlevel.make_signal_headers(["EEG Fpz-Cz", "C4-M1"], dimension="uV", sample_frequency=100, physical_min=-2, physical_max=2)
+    highlevel.write_edf(str(edf), [np.zeros(1000), np.zeros(1000)], headers)
+    model = replace(create_model(tmp_path / "model"), channel_aliases={"eeg": ("C3-M2", "C4-M1")})
+    session = create_session(edf)
+    seen = {}
+
+    class InspectingClient(FakeClient):
+        def predict(self, model, edf_path, **kwargs):
+            seen["path"], seen["labels"] = edf_path, read_edf_labels(edf_path)
+            return super().predict(model, edf_path, **kwargs)
+
+    runner = PackageInferenceRunner(PredictionStore(), prediction_client=InspectingClient())
+    runner.run(session, [model], lambda *args: None, lambda: None, channel_map={model.id: {"eeg": "EEG Fpz-Cz"}})
+    assert seen["labels"][:2] == ["C3-M2", "unused 0"]
+    assert seen["path"] != edf and not seen["path"].exists()
+    assert read_edf_labels(edf)[:2] == ["EEG Fpz-Cz", "C4-M1"]
+    assert session.model_provenance == [{**model.provenance(), "channel_map": {"eeg": "EEG Fpz-Cz"}}]

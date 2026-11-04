@@ -14,10 +14,7 @@ def worker_module(monkeypatch):
     # imports here; exercise its real error handling without loading any model.
     deployment = ModuleType("sleepwalker.deployment")
     deployment.load_packaged_model = lambda *args, **kwargs: None
-    cache = ModuleType("sleepwalker.datasets.EDFCache")
-    cache.EDFCache = object
     monkeypatch.setitem(sys.modules, deployment.__name__, deployment)
-    monkeypatch.setitem(sys.modules, cache.__name__, cache)
     path = Path(__file__).parents[1] / "sleepwalker/server/inference/worker.py"
     spec = importlib.util.spec_from_file_location("inference_worker_under_test", path)
     module = importlib.util.module_from_spec(spec)

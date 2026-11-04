@@ -138,13 +138,17 @@ accept them as uploads. Model packages are not part of the repository, so a fres
 ## Inference
 
 `inference/runner.py` starts `inference/worker.py` as a separate process for each model,
-using the configured Python. This has three purposes:
+using the configured Python. The worker loads the package and calls its
+`predict_patient`, so each package decides how it runs on a recording. The separate
+process has three purposes:
 
 - **Compatibility:** the worker uses the framework version pinned in
   `requirements-inference.txt`. `PYTHONPATH`, `LD_LIBRARY_PATH` and similar variables
   are removed so that neither this checkout nor a system libtorch can interfere.
-- **Cancellation:** cancelling kills the whole process group, including the
-  framework's cache processes.
+- **Cancellation:** cancelling first sends `SIGTERM` to the worker, which lets the
+  framework remove its EDF cache in `/dev/shm`. After 10 seconds the whole process
+  group is killed. A worker stuck that long can leave its cache behind, and cancelling
+  while the framework is still creating the cache leaves an empty folder there.
 - **Memory:** all model memory is released when the worker exits.
 
 Request and result travel as JSON and CSV through a private temporary directory

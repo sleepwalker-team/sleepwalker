@@ -80,7 +80,7 @@ def main():
         plot_frame.evaluate("Plotly.relayout(document.querySelector('.js-plotly-plot'), {'xaxis.range[0]':40,'xaxis.range[1]':70})")
         expect(page.locator("#range-label")).to_have_text("00:00:40 – 00:01:10")
         sample_count = plot_frame.evaluate("document.querySelector('.js-plotly-plot').data[0].x.length")
-        assert sample_count <= 2000
+        assert sample_count <= 6000
 
         page.locator("#channels-open").click()
         page.locator("#channel-list input").nth(1).uncheck()

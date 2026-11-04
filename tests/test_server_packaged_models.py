@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shutil
+import tempfile
 import time
 
 import numpy as np
@@ -11,7 +12,6 @@ import pytest
 
 from sleepwalker.server.inference.catalog import ModelCatalog
 from sleepwalker.server.app import create_local_app
-from sleepwalker.server.inference import runner as subprocess_inference
 from sleepwalker.server.core.jobs import JobCancelledError
 from sleepwalker.server.inference.runner import SubprocessInferenceClient
 
@@ -98,7 +98,7 @@ def test_real_package_from_edf_upload_to_api_predictions(real_model_configuratio
         assert client.delete(f"/api/v1/sessions/{session_id}").status_code == 204
 
 
-@pytest.mark.parametrize("problem", ["payload_checksum", "executable_contract"])
+@pytest.mark.parametrize("problem", ["payload_checksum", "unknown_class"])
 def test_real_worker_rejects_modified_model_without_partial_results(real_model_configuration, synthetic_model_edf, tmp_path, problem):
     python, models = real_model_configuration
     modified = tmp_path / "modified-models" / "sw-sleep"
@@ -110,7 +110,8 @@ def test_real_worker_rejects_modified_model_without_partial_results(real_model_c
             payload.write(b"corrupted")
     else:
         metadata = json.loads((modified / "manifest.json").read_text())
-        metadata["classification"]["classes"].reverse()
+        # A class the model never outputs: the runner must reject the result.
+        metadata["classification"]["classes"][0] = "not_a_model_class"
         (modified / "manifest.json").write_text(json.dumps(metadata))
     app = create_local_app(modified.parent, inference_python=python, batch_size=1)
     model = app.state.model_catalog.list()[0]
@@ -147,21 +148,21 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
         assert app.state.prediction_store.list_for_session(session_id) == []
 
 
-def test_real_worker_cancellation_removes_owned_edf_cache(real_model_configuration, synthetic_model_edf, tmp_path, monkeypatch):
+def test_real_worker_cancellation_removes_framework_edf_cache(real_model_configuration, synthetic_model_edf):
     python, models = real_model_configuration
     model = next(model for model in ModelCatalog(models).list() if model.task == "sleep")
-    original_directory = subprocess_inference.TemporaryDirectory
-    paths = []
-    def create_directory(**kwargs):
-        directory = original_directory(dir=tmp_path, **kwargs)
-        paths.append(Path(directory.name))
-        return directory
-    monkeypatch.setattr(subprocess_inference, "TemporaryDirectory", create_directory)
+    # The framework puts its cache in /dev/shm, or the temporary directory if that is not writable.
+    def caches():
+        return {path for root in (Path("/dev/shm"), Path(tempfile.gettempdir())) for path in root.glob("sleepwalker-edf-cache-*")}
+    before = caches()
+    created = set()
     started = time.monotonic()
     def check_cancelled():
-        if any(list(path.glob("sleepwalker-edf-cache-*")) for path in paths):
+        created.update(caches() - before)
+        # Cancel once the recording is in RAM; that is what must not be left behind.
+        if any(any(path.iterdir()) for path in created if path.exists()):
             raise JobCancelledError
-        assert time.monotonic() - started < 20, "Real worker did not create its owned EDF cache"
+        assert time.monotonic() - started < 20, "Real worker did not fill its EDF cache"
     with pytest.raises(JobCancelledError):
         SubprocessInferenceClient(python).predict(model, synthetic_model_edf, device="cpu", batch_size=1, check_cancelled=check_cancelled)
-    assert paths and all(not path.exists() for path in paths)
+    assert created and not any(path.exists() for path in created)

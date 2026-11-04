@@ -53,7 +53,7 @@ def main():
             frame.wait_for_function(f"""(() => {{
                 const g = {GRAPH}, range = g?.layout?.xaxis?.range;
                 return g?.getBoundingClientRect().height >= 790 && g.data.length === 8 &&
-                    g._fullData.every(t => t._length > 0 && t._length <= 2000) &&
+                    g._fullData.every(t => t._length > 0 && t._length <= 6000) &&
                     g.data.every(t => Math.abs(t.x[0] - range[0]) < .1 &&
                         Math.abs(t.x[t.x.length-1] - range[1]) < .1);
             }})()""", timeout=10000)

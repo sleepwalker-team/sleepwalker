@@ -15,6 +15,11 @@ from sleepwalker.server.recording.plots import (
     PlotFigureNotFoundError, PlotlyUnavailableError, PlotSessionNotFoundError,
 )
 
+# Points per visible width. Data is also sent for one width on each side, so
+# panning shows signal right away instead of an empty edge until mouse release.
+VISIBLE_POINTS = 2000
+BUFFER_WIDTHS = 1
+
 
 def time_range(data, duration):
     """Accept Plotly relayout shapes, including matched subplot axes."""
@@ -38,6 +43,11 @@ def time_range(data, duration):
             start = max(0.0, min(start, duration - width))
             return [start, start + width]
     return None
+
+
+def with_buffer(bounds, duration):
+    width = bounds[1] - bounds[0]
+    return [max(0.0, bounds[0] - BUFFER_WIDTHS * width), min(duration, bounds[1] + BUFFER_WIDTHS * width)]
 
 
 def style_figure(figure, signals, bounds, revision, duration):
@@ -147,15 +157,16 @@ class PlotController:
             # Matched axes synchronize the browser viewport, but the resampler
             # filters data by each trace's own subplot axis. Request every axis
             # so lower channels are not left at the whole-recording resolution.
+            fetch = with_buffer(bounds, duration)
             viewport = {}
             for index in range(len(channels)):
                 axis = "xaxis" + (str(index + 1) if index else "")
-                viewport[axis + ".range[0]"] = bounds[0]
-                viewport[axis + ".range[1]"] = bounds[1]
+                viewport[axis + ".range[0]"] = fetch[0]
+                viewport[axis + ".range[1]"] = fetch[1]
             try:
                 created = view.channels != tuple(channels) or not self.service.has_figure(session_id, view_id=view_id)
                 if created:
-                    initial = self.service.create_figure(session_id, channels, view_id=view_id, max_points=2000)
+                    initial = self.service.create_figure(session_id, channels, view_id=view_id, max_points=VISIBLE_POINTS * (1 + 2 * BUFFER_WIDTHS))
                     patch = self.service.update_figure(session_id, viewport, view_id=view_id)
                     apply_assignments(initial, patch)
                     view.channels = tuple(channels)

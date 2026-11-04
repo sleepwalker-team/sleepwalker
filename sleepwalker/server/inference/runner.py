@@ -64,17 +64,15 @@ def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start
 
 
 def stop_worker(process: subprocess.Popen) -> None:
-    """Also stop the official framework's multiprocessing cache children."""
+    """Let the worker clean up its framework cache, then kill whatever is left."""
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
+        # Only the worker: its cache manager child must stay alive for the cleanup.
+        process.terminate()
+        process.wait(timeout=10)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
         pass
     finally:
-        # A child may have survived even after the worker itself exited.
+        # Also stops the framework's multiprocessing children, even after the worker exited.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -94,8 +92,7 @@ class SubprocessInferenceClient:
             request_path = root / "request.json"
             request_path.write_text(json.dumps({
                 "version": 1, "package_path": str(model.package_path.absolute()), "edf_path": str(edf_path.absolute()),
-                "device": device, "batch_size": batch_size, "task": model.task, "classes": list(model.classes),
-                "input_channels": list(model.input_channels), "resolution": model.output_resolution, "sha256": model.payload_sha256,
+                "device": device, "batch_size": batch_size, "sha256": model.payload_sha256,
             }), encoding="utf-8")
             with (root / "worker.log").open("w+b") as log:
                 try:

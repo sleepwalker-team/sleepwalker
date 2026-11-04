@@ -44,7 +44,7 @@ def test_client_runs_without_api_pythonpath_and_cleans_transport_files(make_mode
         "assert 'PYTHONHOME' not in os.environ\n"
         "assert 'LD_LIBRARY_PATH' not in os.environ\n"
         "assert 'LD_PRELOAD' not in os.environ\n"
-        "assert request['task'] == 'sleep' and request['batch_size'] == 4\n"
+        "assert request['batch_size'] == 4 and request['device'] == 'cpu'\n"
         "assert request['edf_path'].endswith('recording with spaces.edf')\n"
         "(root / 'predictions.csv').write_text('time,task,valid,prob__wake,prob__n1\\n2025-01-01 00:05:00,sleep,True,0.9,0.1\\n')\n"
         "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': True}))\n"

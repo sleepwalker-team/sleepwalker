@@ -13,7 +13,7 @@ from sleepwalker.server.core.sessions import SessionState
 from sleepwalker.server.recording.study import SignalInfo, StudyFormat
 
 from ui.app import create_ui_app
-from ui.plots import PlotController, apply_assignments, time_range
+from ui.plots import PlotController, apply_assignments, time_range, with_buffer
 
 EDF = Path(__file__).resolve().parents[2] / "tests" / "data" / "signals_01.edf"
 
@@ -96,7 +96,7 @@ def test_initial_visible_range_uses_original_samples_without_second_read(api):
     assert initial["layout"]["xaxis"]["minallowed"] == 0
     assert initial["layout"]["xaxis"]["maxallowed"] == 100
     assert 20 in initial["data"][0]["y"]
-    assert len(initial["data"][0]["x"]) <= 2000
+    assert len(initial["data"][0]["x"]) <= 6000
     patch, status = controller.render(command(session, revision=2), {"xaxis.range[0]": 10, "xaxis.range[1]": 10.2})
     assert patch is not no_update
     assert status["range"] == [10, 10.2]
@@ -111,8 +111,24 @@ def test_navigation_before_browser_initialization_returns_complete_reduced_figur
     assert isinstance(initial, dict)
     assert initial["data"]
     assert initial["layout"]["xaxis"]["range"] == [10., 10.2]
-    assert len(initial["data"][0]["x"]) <= 2000
+    assert len(initial["data"][0]["x"]) <= 6000
     assert reader.calls == 1
+
+
+def test_data_reaches_one_width_beyond_the_visible_range(api):
+    session, _ = prepared(api)
+    ui = PlotController(api.state.plotly_service)
+    ui.render(command(session, initialize=True))
+    figure, status = ui.render(command(session, initialize=True, revision=2, range=[10., 10.2]))
+    x = figure["data"][0]["x"]
+    assert status["range"] == [10., 10.2]
+    assert figure["layout"]["xaxis"]["range"] == [10., 10.2]
+    assert min(x) == pytest.approx(9.8, abs=0.002) and max(x) == pytest.approx(10.4, abs=0.002)
+
+
+@pytest.mark.parametrize("bounds,expected", [([0., 2.], [0., 4.]), ([98., 100.], [96., 100.]), ([0., 100.], [0., 100.])])
+def test_buffer_stays_inside_the_recording(bounds, expected):
+    assert with_buffer(bounds, 100.) == expected
 
 
 def test_zoom_resamples_every_subplot_at_the_visible_resolution(api):
@@ -121,16 +137,17 @@ def test_zoom_resamples_every_subplot_at_the_visible_resolution(api):
     initial, _ = ui.render(command(session, channels=["EEG", "EOG"]))
     for trace in initial["data"]:
         assert 20 in trace["y"]
-        assert len(trace["x"]) <= 12
+        assert len(trace["x"]) <= 32  # three widths of 0.01 s at 1000 Hz: visible part plus buffer
     for axis in ["xaxis", "xaxis2"]:
         assert initial["layout"][axis]["minallowed"] == 0
         assert initial["layout"][axis]["maxallowed"] == session.duration
     patch, _ = ui.render(command(session, channels=["EEG", "EOG"], revision=2, range=[20., 20.1]))
     apply_assignments(initial, patch)
+    # Visible range [20, 20.1] plus one width of buffer on each side.
     for trace in initial["data"]:
-        assert 99 <= len(trace["x"]) <= 102
-        assert trace["x"][0] >= 20.
-        assert trace["x"][-1] <= 20.1
+        assert 299 <= len(trace["x"]) <= 302
+        assert trace["x"][0] >= 19.9 - 1e-9
+        assert trace["x"][-1] <= 20.2 + 1e-9
     assert reader.calls == 1
 
 
@@ -143,7 +160,7 @@ def test_real_api_edf_upload_and_resampler_share_session(api):
         session = response.json()
         request = {"session": session["id"], "view": "edf-tab", "channels": [session["signals"][0]["id"]], "range": [10, 10.05], "revision": 1}
         initial, _ = ui.state.plots.render(request)
-        assert len(initial["data"][0]["x"]) <= 2000
+        assert len(initial["data"][0]["x"]) <= 6000
         assert np.diff(initial["data"][0]["x"]).min() <= .01
         assert client.delete(f'/api/v1/sessions/{session["id"]}').status_code == 204
         assert not api.state.plotly_service.has_figure(session["id"], view_id="edf-tab")

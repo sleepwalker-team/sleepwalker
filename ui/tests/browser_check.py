@@ -26,7 +26,17 @@ def main():
         page.locator("#edf-file").set_input_files(EDF)
         page.screenshot(path=str(args.artifacts / "entry.png"), full_page=True)
         page.locator("#open-infer").click()
+        # The unmatched test model opens the channel mapping; matched inputs are already connected.
+        expect(page.locator("#mapping-dialog")).to_be_visible(timeout=30000)
+        expect(page.locator("#mapping-lines path.mapping-line")).to_have_count(3)
+        expect(page.locator("#mapping-start")).to_be_disabled()
+        page.screenshot(path=str(args.artifacts / "channel-mapping.png"))
+        page.locator("#mapping-dialog .mapping-model").last.locator("input[type=checkbox]").check()
+        page.locator("#mapping-start").click()
         expect(page.locator("#viewer")).to_be_visible(timeout=30000)
+        # Pan is the default; the following checks mark intervals.
+        expect(page.locator("#pan-tool")).to_have_attribute("aria-pressed", "true")
+        page.locator("#select-tool").click()
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
         expect(page.locator("#task-select option")).to_have_count(3, timeout=30000)
         expect(page.locator("#prediction-label")).to_have_text("N2", timeout=30000)
@@ -42,14 +52,14 @@ def main():
         assert pixels["event"][:3]==[244,121,22],pixels
         assert pixels["gap"][3]==0,pixels
         assert pixels["baseline"][:3]==[201,205,203],pixels
-        expect(page.locator("#model-input-report")).to_be_visible()
-        expect(page.locator("#model-input-issues")).to_contain_text("TEST · unmatched inputs")
-        expect(page.locator("#model-input-issues")).to_contain_text("C3-M2, E1-M2, Chin EMG, ECG")
-        expect(page.locator("#model-input-signals")).to_contain_text("EEG")
+        # A skipped model can still be started later, through the mapping.
         page.locator("#infer-open").click()
-        expect(page.locator('#inference-models input[value="test-unmatched"]')).to_be_disabled()
-        expect(page.locator("#inference-start")).to_be_disabled()
-        page.locator("#inference-dialog .dialog-heading button").click()
+        expect(page.locator('#inference-models input[value="test-unmatched"]')).to_be_enabled()
+        expect(page.locator('#inference-models input[value="test-unmatched"]')).to_be_checked()
+        page.locator("#inference-start").click()
+        expect(page.locator("#mapping-dialog")).to_be_visible()
+        page.locator("#mapping-cancel").click()
+        expect(page.locator("#mapping-dialog")).to_be_hidden()
         frame = page.frame_locator("#signal-frame")
         expect(frame.locator(".js-plotly-plot")).to_be_visible()
         def timeline_point(time, row=0, bounds=(0,120)):

@@ -27,7 +27,7 @@ const state = {
   annotations:{edits:[],labels:[],events:[]}, expanded:new Set(), absolute:false,
   view:makeViewId(), revision:0, frameReady:false, plotLoaded:false, generation:0, rangeRequest:0,
   predictionAbort:null, predictionTimer:null, job:null, jobStream:null, jobTimer:null, jobEpoch:0,
-  export:null, busy:false, mutation:false, inputIssues:new Map(), selection:null, mode:"select", correction:null,
+  export:null, busy:false, mutation:false, inputIssues:new Map(), selection:null, mode:"pan", correction:null, displayRange:null, predictionRange:null,
 };
 let profiles = readStorage(localStorage,"sleepwalker.servers",[]);
 if (!Array.isArray(profiles)) profiles = [];
@@ -94,13 +94,23 @@ function parseError(data,status) {
 }
 async function api(path,{json,...options}={}) {
   if (json !== undefined) { options.body=JSON.stringify(json); options.headers={...options.headers,"Content-Type":"application/json"}; }
+  // Browsers report a request cancelled mid-body with different error types; the signal is reliable.
+  const cancelled = () => new DOMException("Request cancelled.","AbortError");
   let response;
   try { response=await fetch(path,{credentials:"same-origin",...options}); }
-  catch (error) { if(error.name === "AbortError") throw error; throw new Error(t("Verbindung zum Server unterbrochen. Die Session bleibt auf dem Server; erneut verbinden oder die Seite neu laden.")); }
+  catch (error) {
+    if(error.name === "AbortError" || options.signal?.aborted) throw cancelled();
+    console.error("Request failed:", path, error);
+    throw new Error(t("Verbindung zum Server unterbrochen. Die Session bleibt auf dem Server; erneut verbinden oder die Seite neu laden."));
+  }
   if (response.status === 204) return null;
-  const data=await response.json().catch(() => null);
+  let failure=null;
+  const data=await response.json().catch(error => { if(options.signal?.aborted) throw cancelled(); failure=error; return null; });
   if (!response.ok) throw parseError(data,response.status);
-  if (data === null) throw new Error(t("Der Server hat keine gültige Antwort geliefert."));
+  if (data === null) {
+    console.error("Invalid response:", path, response.status, response.headers.get("content-type"), failure);
+    throw new Error(t`Der Server hat keine gültige Antwort geliefert (HTTP ${response.status}, ${path.split("?")[0]}): ${failure?.message || "null"}`);
+  }
   return data;
 }
 function bind(id,handler) { $(id).addEventListener("click",() => Promise.resolve().then(handler).catch(handleError)); }
@@ -285,7 +295,7 @@ async function activateSession(session,{title,saved}={}) {
   state.selection=null;state.correction=null;closeSelectionMenu();if($("correction-dialog").open)$("correction-dialog").close();
   state.view=makeViewId();
   state.plotLoaded=false;
-  state.session=session; state.title=title || saved?.title || t("Aufzeichnung"); state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
+  state.displayRange=null;state.predictionRange=null;state.session=session; state.title=title || saved?.title || t("Aufzeichnung"); state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
   const available=(session.signals||[]).map(s=>s.id);
   state.channels=Array.isArray(saved?.channels)?saved.channels.filter(c=>available.includes(c)):chooseChannels(session.signals||[]);
   if(!state.channels.length&&available.length)state.channels=chooseChannels(session.signals);
@@ -293,7 +303,7 @@ async function activateSession(session,{title,saved}={}) {
   if(saved?.range&&Number.isFinite(saved.range[0])&&Number.isFinite(saved.range[1])&&session.duration)state.range=clampRange(saved.range[0],saved.range[1]);
   if(Number.isFinite(saved?.time))state.time=Math.max(0,Math.min(saved.time,(session.duration||1)-1e-6));
   state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));
-  setInteractionMode(saved?.mode==="pan"?"pan":"select");setSessionURL(session.id);
+  setInteractionMode(saved?.mode==="select"?"select":"pan");setSessionURL(session.id);
   state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",t`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
   text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString(locale()) : "—");
   show("plot-loading");show("signal-frame",session.state==="ready");
@@ -336,9 +346,19 @@ function clampRange(start,end) {
 }
 function setRange(start,end,fromPlot=false) {
   if(!state.session||!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return;
-  const next=clampRange(start,end);if(next.every((x,i)=>Math.abs(x-state.range[i])<1e-6))return;
+  const previewed=state.displayRange;state.displayRange=null;
+  const next=clampRange(start,end);if(next.every((x,i)=>Math.abs(x-state.range[i])<1e-6)){if(previewed){renderRange();drawTimeline();}return;}
   state.range=next;renderRange();schedulePredictions();drawTimeline();rememberSession();
   if(!fromPlot)requestPlot();
+}
+// Moves timeline and signals during a drag or wheel gesture, without requests; setRange settles it.
+function previewRange(start,end,fromPlot=false) {
+  if(!state.session||!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return state.range;
+  state.displayRange=clampRange(start,end);
+  text("range-label",`${timeLabel(state.displayRange[0])} – ${timeLabel(state.displayRange[1])}`);
+  drawTimeline();
+  if(!fromPlot)sendPlot("preview",{range:state.displayRange});
+  return state.displayRange;
 }
 function renderRange() {
   text("range-label",`${timeLabel(state.range[0])} – ${timeLabel(state.range[1])}`);
@@ -354,14 +374,16 @@ function schedulePredictions() {
 async function refreshPredictions() {
   if(!state.session||state.session.state!=="ready")return;
   const generation=state.generation,request=++state.rangeRequest,controller=new AbortController();state.predictionAbort=controller;
-  const [start,end]=state.range,id=state.session.id;show("prediction-loading",state.tasks.length>0);
+  // One window width on each side, like the signals, so panning shows predictions right away.
+  const [start,end]=state.range,width=end-start,id=state.session.id;show("prediction-loading",state.tasks.length>0);
+  const buffered=[Math.max(0,start-width),Math.min(state.session.duration,end+width)];
   try {
     const data=await Promise.all(state.tasks.map(async task=>{
-      if(task.kind==="continuous"&&end-start>900)return[task.id,[]];
-      const response=await api(`${sessionPath(id)}/predictions/${encodeURIComponent(task.id)}?${new URLSearchParams({start,end})}`,{signal:controller.signal});return[task.id,response.predictions];
+      if(task.kind==="continuous"&&width>900)return[task.id,[]];
+      const response=await api(`${sessionPath(id)}/predictions/${encodeURIComponent(task.id)}?${new URLSearchParams({start:buffered[0],end:buffered[1]})}`,{signal:controller.signal});return[task.id,response.predictions];
     }));
     if(generation!==state.generation||request!==state.rangeRequest||controller.signal.aborted)return;
-    state.predictions=new Map(data);renderContext();drawTimeline();
+    state.predictions=new Map(data);state.predictionRange=buffered;renderContext();drawTimeline();
   } finally {if(request===state.rangeRequest&&!controller.signal.aborted)show("prediction-loading",false);}
 }
 let legendKey="";
@@ -382,13 +404,15 @@ function renderTimelineLegend() {
 }
 function drawTimeline() {
   renderTimelineLegend();
-  timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.range,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className,t});
+  timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.displayRange||state.range,mode:state.mode,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className,t});
 }
 const timeline=new Timeline($("timeline"),{
   select:(task,time,target)=>target?selectRegion(target):selectTime(time,task),
   interval:(task,start,end)=>selectRegion({kind:"interval",task,start,end}),
   context:openSelectionMenu,
   toggle:task=>{if(state.expanded.has(task))state.expanded.delete(task);else state.expanded.add(task);drawTimeline();rememberSession();},
+  preview:range=>previewRange(range[0],range[1]),
+  commit:range=>setRange(range[0],range[1]),
 });
 function selectTime(time,taskId=state.taskId,keepInterval=false) {
   if(!state.session)return;state.time=Math.max(0,Math.min(time,state.session.duration-1e-6));state.taskId=taskId;
@@ -470,6 +494,7 @@ function openSelectionMenu({task=state.taskId,time=state.time,target=null,x,y}) 
 }
 function setInteractionMode(mode) {
   state.mode=mode;$("select-tool").setAttribute("aria-pressed",String(mode==="select"));$("pan-tool").setAttribute("aria-pressed",String(mode==="pan"));
+  text("interaction-hint",mode==="pan"?t("Ziehen: verschieben · Scrollen: zoomen · Klick: Zeitpunkt wählen · Rechtsklick: Auswahl bearbeiten"):t("Ziehen: Intervall markieren · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten"));drawTimeline();
   sendPlot("mode",{mode});rememberSession();
 }
 function openCorrection() {
@@ -729,6 +754,8 @@ window.addEventListener("message",event=>{
     if(Number.isInteger(status.revision)&&status.revision<state.revision)return;
     if(status.error){show("plot-loading",false);handleError(Object.assign(new Error(status.error),status.expired?{code:"SESSION_NOT_FOUND"}:{}));return;}
     if(status.range){state.plotLoaded=true;show("plot-loading",false);$("signal-frame").style.height=`${status.height}px`;setRange(status.range[0],status.range[1],true);}
+  } else if(data.type==="ranging"&&data.session===state.session.id&&data.view===state.view&&Array.isArray(data.range)) {
+    previewRange(data.range[0],data.range[1],true);
   } else if(data.type==="range"&&data.session===state.session.id&&data.view===state.view&&Array.isArray(data.range)) {
     setRange(data.range[0],data.range[1]);
   } else if(data.type==="interval"&&data.session===state.session.id&&data.view===state.view&&Array.isArray(data.range)) {

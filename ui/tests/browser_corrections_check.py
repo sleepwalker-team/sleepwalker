@@ -22,8 +22,13 @@ def main():
         page.goto(args.url+"/ui/")
         expect(page.locator("#connection-status")).to_have_text("Verbunden")
         page.locator("#edf-file").set_input_files(EDF);page.locator("#open-infer").click()
+        expect(page.locator("#mapping-dialog")).to_be_visible()
+        page.locator("#mapping-dialog .mapping-model").last.locator("input[type=checkbox]").check()
+        page.locator("#mapping-start").click()
         expect(page.locator("#viewer")).to_be_visible()
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
+        # Pan is the default; corrections need the selection tool.
+        page.locator("#select-tool").click()
         expect(page.locator("#task-select option")).to_have_count(3)
         expect(page.locator("#prediction-label")).to_have_text("N2")
         frame=next(f for f in page.frames if "/ui/plot/" in f.url)
@@ -149,7 +154,7 @@ def main():
         expect(page.locator("#notice-text")).to_have_text("2 Änderungen gelöscht.")
         assert not snapshot()["labels"]
         assert context.request.get(path+"/predictions/sleep?start=0&end=120").json()==original
-        # Wheel zoom also remains available in the default selection tool.
+        # Wheel zoom also remains available in the selection tool.
         box=frame.locator(".nsewdrag").first.bounding_box()
         page.mouse.move(box["x"]+box["width"]/2,box["y"]+box["height"]/2)
         page.mouse.wheel(0,-100)

@@ -2,10 +2,10 @@
 (() => {
   "use strict";
   // Keep the controller in this asset so running GUIs need only a browser reload.
-  const createSignalMotion = ({graph, current, notify, geometry}) => {
+  const createSignalMotion = ({graph, current, notify, moving, geometry}) => {
     const reduced = matchMedia("(prefers-reduced-motion: reduce)");
     let gesture = null, frame = 0, animation = null, wanted = null, busy = false;
-    let active = false, finishing = false, lastRange = null, wheelTarget = null, edgeFrame = 0, wheelTimer = null;
+    let active = false, finishing = false, lastRange = null, wheelTarget = null, edgeFrame = 0, wheelTimer = null, previewing = false;
     const edge = document.createElement("div");
     edge.className = "signal-edge";
     edge.hidden = true;
@@ -50,6 +50,8 @@
       const update = {};
       for (const key of Object.keys(graph().layout).filter(k => /^xaxis\d*$/.test(k))) update[key + ".range"] = pair;
       lastRange = pair;
+      // Lets the prediction timeline follow every frame of a drag or wheel gesture.
+      if (!previewing) moving(pair);
       try { await window.Plotly.relayout(graph(), update); }
       finally {
         busy = false; geometry();
@@ -60,7 +62,9 @@
     function schedule() {
       if (!frame) frame = requestAnimationFrame(() => { frame = 0; flush(); });
     }
-    function show(pair) { active = true; wanted = bounded(pair); schedule(); }
+    function show(pair) { active = true; previewing = false; wanted = bounded(pair); schedule(); }
+    // The parent moves the view (timeline gesture); nothing is reported back or committed here.
+    function preview(pair) { stop(); previewing = true; wanted = bounded(pair); schedule(); }
     function commit() {
       if (busy || wanted || animation || gesture) return;
       finishing = false; active = false; wheelTarget = null;
@@ -160,7 +164,7 @@
     }
     document.addEventListener("wheel", wheel, {capture:true,passive:false});
     window.addEventListener("blur", () => { if (gesture) {releaseEdge();gesture=null;finish();} });
-    return {down,stop,accept:next => {
+    return {down,stop,preview,accept:next => {
       const old = current();
       if (next.session !== old?.session || next.view !== old?.view || !lastRange ||
           !next.range?.every((value,i) => Math.abs(value-lastRange[i]) < 1e-6)) stop();
@@ -183,7 +187,8 @@
   document.documentElement.dataset.theme = theme;
   let interval = null, mode = "select", applyingLayout = false;
   const motion = createSignalMotion({graph, current:() => request, geometry,
-    notify:range => { if (request) send("range", {range,session:request.session,view:request.view}); }});
+    notify:range => { if (request) send("range", {range,session:request.session,view:request.view}); },
+    moving:range => { if (request) send("ranging", {range,session:request.session,view:request.view}); }});
   function geometry() {
     const gd = graph();
     if (gd?._fullLayout?._size) send("geometry", {left: gd._fullLayout._size.l, right: gd._fullLayout._size.r, width: gd._fullLayout.width});
@@ -295,6 +300,8 @@
       // Coalesce wheel/drag bursts; Dash discards obsolete callback responses,
       // and the parent rejects statuses older than its current revision.
       submitTimer = window.setTimeout(() => { const next = pending; pending = null; if (next) submit(next); }, 80);
+    } else if (event.data.type === "preview" && request && Array.isArray(event.data.range) && event.data.range.every(Number.isFinite)) {
+      motion.preview(event.data.range);
     } else if (event.data.type === "cursor" && Number.isFinite(event.data.time)) {
       cursor = event.data.time;
       drawCursor();

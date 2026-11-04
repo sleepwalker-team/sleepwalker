@@ -155,6 +155,7 @@ export const english = {
   "Anfrage fehlgeschlagen (HTTP ${0}).": "Request failed (HTTP ${0}).",
   "Verbindung zum Server unterbrochen. Die Session bleibt auf dem Server; erneut verbinden oder die Seite neu laden.": "The server connection was interrupted. The session remains on the server; reconnect or reload the page.",
   "Der Server hat keine gültige Antwort geliefert.": "The server returned an invalid response.",
+  "Der Server hat keine gültige Antwort geliefert (HTTP ${0}, ${1}): ${2}": "The server returned an invalid response (HTTP ${0}, ${1}): ${2}",
   "Eine HTTP- oder HTTPS-Serveradresse ohne Zugangsdaten eingeben.": "Enter an HTTP or HTTPS server address without credentials.",
   "Lokal": "Local",
   "Die Adresse stellt keine passende Sleepwalker-GUI bereit.": "This address does not provide a compatible Sleepwalker GUI.",
@@ -277,7 +278,10 @@ export const english = {
   "Verbindung von ${0} lösen": "Disconnect ${0}",
   "Ein EDF-Kanal kann pro Modell nur einen Eingang versorgen.": "An EDF channel can feed only one input per model.",
   "${0} Eingänge noch offen. Verbinden oder Modell nicht ausführen.": "${0} inputs still open. Connect them or skip the model.",
-  "Jetzt rechts einen EDF-Kanal wählen.": "Now choose an EDF channel on the right."
+  "Jetzt rechts einen EDF-Kanal wählen.": "Now choose an EDF channel on the right.",
+  "Ziehen: verschieben · Scrollen: zoomen · Klick: Zeitpunkt wählen · Rechtsklick: Auswahl bearbeiten": "Drag: pan · Scroll: zoom · Click: choose time · Right-click: edit selection",
+  "Ziehen: Intervall markieren · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten": "Drag: select interval · Scroll: zoom · Right-click: edit selection",
+  "Keine Vorhersage in diesem Ausschnitt": "No prediction in this window"
 };
 export const LANGUAGE_KEY = "sleepwalker.language";
 let selected = "de";

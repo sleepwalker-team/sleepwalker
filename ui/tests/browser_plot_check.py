@@ -54,8 +54,12 @@ def main():
                 const g = {GRAPH}, range = g?.layout?.xaxis?.range;
                 return g?.getBoundingClientRect().height >= 790 && g.data.length === 8 &&
                     g._fullData.every(t => t._length > 0 && t._length <= 6000) &&
-                    g.data.every(t => Math.abs(t.x[0] - range[0]) < .1 &&
-                        Math.abs(t.x[t.x.length-1] - range[1]) < .1);
+                    // Data covers the visible range plus one window width on each side.
+                    g.data.every(t => {{
+                        const width = range[1] - range[0], end = g.layout.xaxis.maxallowed;
+                        return Math.abs(t.x[0] - Math.max(0, range[0] - width)) < .1 &&
+                            Math.abs(t.x[t.x.length-1] - Math.min(end, range[1] + width)) < .1;
+                    }});
             }})()""", timeout=10000)
             expect(frame.locator(".js-plotly-plot")).to_be_visible()
 
@@ -70,7 +74,8 @@ def main():
         # The original responsive Graph collapsed to 0 px after this update.
         # A deep zoom also needs original samples in every lower subplot.
         frame.evaluate(f"Plotly.relayout({GRAPH}, {{'xaxis.range': [120.12, 120.17]}})")
-        frame.wait_for_function(f"{GRAPH}.data.every(t => t.x.length >= 4 && t.x.length <= 6)")
+        # Visible samples plus one window width of buffer on each side.
+        frame.wait_for_function(f"{GRAPH}.data.every(t => t.x.length >= 12 && t.x.length <= 18)")
         settled()
         frame.evaluate(f"Plotly.relayout({GRAPH}, {{'xaxis.range': [120, 150]}})")
         expect(page.locator("#range-label")).to_have_text("00:02:00 – 00:02:30")

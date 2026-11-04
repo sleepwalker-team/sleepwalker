@@ -43,7 +43,8 @@ export function openChannelDialog(models, signals, describeModel) {
       for (const input of model.input_channels) {
         const signal = entry.links[input];
         if (!signal) continue;
-        const d = curve(anchor(inputPort(model.id, input), "right"), anchor(signalPort(signal), "left"));
+        // Start right of the row, so the line does not cross the × button.
+        const d = curve(anchor(inputPort(model.id, input).parentElement, "right"), anchor(signalPort(signal), "left"));
         const path = document.createElementNS(SVG, "path");
         path.setAttribute("d", d);
         path.setAttribute("class", "mapping-line" + (isManual(entry, input) ? " manual" : ""));
@@ -61,7 +62,7 @@ export function openChannelDialog(models, signals, describeModel) {
     }
     if (drag?.moved && pointer) {
       const path = document.createElementNS(SVG, "path");
-      path.setAttribute("d", curve(anchor(inputPort(drag.modelId, drag.input), "right"), pointer));
+      path.setAttribute("d", curve(anchor(inputPort(drag.modelId, drag.input).parentElement, "right"), pointer));
       path.setAttribute("class", "mapping-line manual");
       path.style.stroke = color.get(drag.modelId);
       lines.append(path);

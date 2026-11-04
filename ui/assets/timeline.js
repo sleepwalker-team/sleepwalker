@@ -12,25 +12,34 @@ export function currentPrediction(task, predictions, time) {
   return predictions.find(p => p.start <= time && time < p.end) || null;
 }
 export function formatTime(seconds, fractional = false) {
-  const t = Math.max(0, Number(seconds) || 0);
+  // Round to tenths first, so 82.97 s reads 00:01:23.0 and not 00:01:22.0.
+  const t = fractional ? Math.round(Math.max(0, Number(seconds) || 0) * 10) / 10 : Math.max(0, Number(seconds) || 0);
   const hours = Math.floor(t / 3600), minutes = Math.floor(t / 60) % 60, secs = Math.floor(t) % 60;
   return `${String(hours).padStart(2,"0")}:${String(minutes).padStart(2,"0")}:${String(secs).padStart(2,"0")}${fractional && t % 1 > .001 ? (t % 1).toFixed(1).slice(1) : ""}`;
 }
 
 export class Timeline {
-  constructor(canvas, {select, interval, toggle, context}) {
+  // preview(range) moves the view while a gesture runs; commit(range) settles it, like the signal plot.
+  constructor(canvas, {select, interval, toggle, context, preview, commit}) {
     this.canvas = canvas; this.select = select; this.interval = interval; this.toggle = toggle; this.context = context;
-    this.left = 126; this.right = 22; this.rows = []; this.data = null; this.drag = null;
+    this.preview = preview; this.commit = commit;
+    this.left = 126; this.right = 22; this.rows = []; this.data = null; this.drag = null; this.wheelTarget = null; this.wheelTimer = null;
     new ResizeObserver(() => this.draw()).observe(canvas.parentElement);
     canvas.addEventListener("pointerdown", event => {
       if (!this.data || event.button !== 0) return;
       const p = this.position(event), row = this.rows.find(r => p.y >= r.y && p.y <= r.y + r.height);
       if (!row) return;
       if (p.x < this.left) { this.toggle(row.task.id); return; }
-      this.drag = {x: p.x, current:p.x, row}; canvas.setPointerCapture(event.pointerId);
+      this.drag = {x: p.x, current:p.x, row, pan:this.data.mode === "pan", range:[...this.data.range], moved:false};
+      canvas.setPointerCapture(event.pointerId);
     });
     canvas.addEventListener("pointermove", event => {
       const p = this.position(event), row = this.rows.find(r => p.y >= r.y && p.y <= r.y + r.height);
+      if (this.drag?.pan) {
+        this.drag.current = p.x; this.drag.moved ||= Math.abs(p.x - this.drag.x) > 2;
+        if (this.drag.moved) this.preview(this.panned(p.x));
+        return;
+      }
       if (this.drag) { this.drag.current = p.x; this.draw(); }
       if (!row || p.x < this.left || !this.data) return;
       const time = this.timeAt(p.x);
@@ -39,13 +48,39 @@ export class Timeline {
     });
     canvas.addEventListener("pointerup", event => {
       if (!this.drag) return;
-      const {x, row} = this.drag; this.drag = null;
-      const p = this.position(event), start = this.timeAt(x), end = this.timeAt(p.x);
-      if (Math.abs(p.x - x) > 5) this.interval(row.task.id, Math.min(start,end), Math.max(start,end));
+      const {x, row, pan, moved} = this.drag, p = this.position(event);
+      if (pan && moved) { const range = this.panned(p.x); this.drag = null; this.commit(range); return; }
+      this.drag = null;
+      const start = this.timeAt(x), end = this.timeAt(p.x);
+      if (!pan && Math.abs(p.x - x) > 5) this.interval(row.task.id, Math.min(start,end), Math.max(start,end));
       else this.select(row.task.id, end, this.hit(row,end));
       this.draw();
     });
-    canvas.addEventListener("pointercancel", () => { this.drag = null; this.draw(); });
+    canvas.addEventListener("pointercancel", () => {
+      const drag = this.drag; this.drag = null;
+      if (drag?.pan && drag.moved) this.commit(this.panned(drag.current, drag)); else this.draw();
+    });
+    // Same gestures as the signal plot: wheel or pinch zooms around the pointer, horizontal scroll pans.
+    canvas.addEventListener("wheel", event => {
+      if (!this.data || !this.width) return;
+      const p = this.position(event);
+      if (p.x < this.left || p.x > this.width - this.right) return;
+      event.preventDefault();
+      const pair = this.wheelTarget || this.data.range, plotWidth = this.width - this.left - this.right;
+      if (!event.ctrlKey && (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY))) {
+        const delta = (event.shiftKey ? event.deltaY : event.deltaX) * (pair[1] - pair[0]) / plotWidth;
+        this.wheelTarget = [pair[0] + delta, pair[1] + delta];
+      } else {
+        const units = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.canvas.clientHeight : 1;
+        const factor = Math.exp(Math.max(-1.5, Math.min(1.5, event.deltaY * units * .002)));
+        const anchor = Math.max(0, Math.min(1, (p.x - this.left) / plotWidth));
+        const width = (pair[1] - pair[0]) * factor, start = pair[0] + (pair[1] - pair[0] - width) * anchor;
+        this.wheelTarget = [start, start + width];
+      }
+      this.wheelTarget = this.preview(this.wheelTarget);
+      clearTimeout(this.wheelTimer);
+      this.wheelTimer = setTimeout(() => { const range = this.wheelTarget; this.wheelTarget = null; this.commit(range); }, 90);
+    }, {passive:false});
     canvas.addEventListener("contextmenu", event => {
       if (!this.data) return;
       const p = this.position(event), row = this.rows.find(r => p.y >= r.y && p.y <= r.y + r.height);
@@ -61,6 +96,10 @@ export class Timeline {
       const next = Math.max(0, Math.min(this.data.tasks.length - 1, index + (event.key === "ArrowUp" ? -1 : 1)));
       if (this.data.tasks[next]) this.select(this.data.tasks[next].id, this.data.time);
     });
+  }
+  panned(x, drag = this.drag) {
+    const [start, end] = drag.range, seconds = (x - drag.x) * (end - start) / (this.width - this.left - this.right);
+    return [start - seconds, end - seconds];
   }
   position(event) { const rect = this.canvas.getBoundingClientRect(); return {x:event.clientX - rect.left,y:event.clientY - rect.top}; }
   hit(row,time) { return selectionAt(row.task,this.data.predictions.get(row.task.id)||[],this.data.annotations,time,row.klass); }
@@ -114,6 +153,10 @@ export class Timeline {
       const baseline=y+(task.kind==="continuous"?25.5:15.5);
       c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(this.left,baseline);c.lineTo(this.width-this.right,baseline);c.stroke();
       c.save(); c.beginPath(); c.rect(this.left,y,plotWidth,32); c.clip();
+      const visible = items.some(p => (p.end ?? p.time + task.resolution) > range[0] && (p.start ?? p.time) < range[1]);
+      if (!klass && !visible && task.kind !== "event" && !(task.kind === "continuous" && range[1]-range[0] > 900)) {
+        c.fillStyle = muted; c.fillText(t("Keine Vorhersage in diesem Ausschnitt"), this.left + 8, y + 15);
+      }
       if (task.kind === "continuous") {
         const labels = klass ? [klass] : task.classes.filter(label=>!isNegativeClass(label));
         for (const cls of labels) {

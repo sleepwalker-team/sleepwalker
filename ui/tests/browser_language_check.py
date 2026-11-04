@@ -39,6 +39,7 @@ def main():
         page.locator('#goto-time').fill('00:02:00');page.locator('#goto-form button').click()
         frame=next(frame for frame in page.frames if '/ui/plot/' in frame.url)
         frame.wait_for_function("document.querySelector('.js-plotly-plot')._fullLayout.xaxis.range[0]===120")
+        page.locator('#select-tool').click()
         box=frame.locator('.nsewdrag').first.bounding_box()
         x,y=box['x']+box['width']*.15,box['y']+box['height']*.5
         page.mouse.move(x,y);page.mouse.down();page.mouse.move(x+box['width']*.3,y,steps=10);page.mouse.up()

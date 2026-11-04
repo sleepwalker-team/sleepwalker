@@ -46,7 +46,9 @@ def main():
         page.locator('#goto-time').fill('00:02:00');page.locator('#goto-form button').click()
         frame.wait_for_function(f"{GRAPH}._fullLayout.xaxis.range[0]===120")
         expect(page.locator('#prediction-loading')).to_be_hidden(timeout=30000)
-        frame.wait_for_function(f"{GRAPH}.data[0].x[0]>=120 && {GRAPH}.data[0].x.at(-1)<=240")
+        # The visible range [120, 240] plus one window width of buffer on each side.
+        frame.wait_for_function(f"{GRAPH}.data[0].x[0]>=0 && {GRAPH}.data[0].x[0]<=120 && {GRAPH}.data[0].x.at(-1)>=239 && {GRAPH}.data[0].x.at(-1)<=360")
+        page.locator('#select-tool').click()
         box=frame.locator('.nsewdrag').first.bounding_box()
         x,y=box['x']+box['width']*.1,box['y']+box['height']*.5
         page.mouse.move(x,y);page.mouse.down();page.mouse.move(x+box['width']*.35,y,steps=8);page.mouse.up()

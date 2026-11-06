@@ -27,8 +27,11 @@ class TestRunner:
             check_cancelled()
             report_progress(JobPhase.INFERENCE, None, "Deterministic GUI test predictions")
             if model.output_kind == PredictionKind.EVENT:
-                starts = np.array([15., 65., 110.])
-                frame = pd.DataFrame({"start": starts, "end": starts + 5, "prob__arousal": 1.})
+                # Arousals at 15, 65 and 110 s; the later two with changing probability.
+                times = np.arange(.5, session.duration, 1.)
+                inside = lambda start: (times > start) & (times < start + 5)
+                p = np.select([inside(15), inside(65) | inside(110)], [1., .5 + .1 * (times % 5)], .05)
+                frame = pd.DataFrame({"time": times, "prob__arousal": p, "prob__no_arousal": 1 - p})
             elif model.output_kind == PredictionKind.CONTINUOUS:
                 times = np.arange(0, session.duration, model.output_resolution)
                 p = .3 + .2 * np.sin(times / 20)
@@ -48,7 +51,7 @@ class TestRunner:
 def test_api(root):
     specs = [
         ("sleep", ("wake", "n1", "n2", "n3", "rem"), 30, PredictionKind.EPOCH),
-        ("arousal", ("arousal",), 1, PredictionKind.EVENT),
+        ("arousal", ("arousal", "no_arousal"), 1, PredictionKind.EVENT),
         ("desaturation", ("desaturation", "no desaturation"), 1, PredictionKind.CONTINUOUS),
     ]
     models = [ModelInfo(id=f"test-{task}", name=f"TEST · {task}", task=task, classes=classes,

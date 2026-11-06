@@ -1,6 +1,6 @@
 import pytest
 
-from sleepwalker.server.results.annotations import AnnotationEditNotFoundError, AnnotationEventNotFoundError, AnnotationService
+from sleepwalker.server.results.annotations import AnnotationEditNotFoundError, AnnotationService
 from sleepwalker.server.results.annotations import AnnotationOperation
 
 
@@ -24,7 +24,7 @@ def test_event_delete_and_revert_preserve_history() -> None:
 
     assert service.snapshot("sess-test").events == [event]
 
-    deletion = service.delete_event("sess-test", event.event_id or "")
+    deletion = service.delete_event("sess-test", "arousal", event.event_id or "")
 
     assert service.snapshot("sess-test").events == []
     assert len(store.list_edits("sess-test")) == 2
@@ -35,11 +35,8 @@ def test_event_delete_and_revert_preserve_history() -> None:
     assert len(store.list_edits("sess-test")) == 3
 
 
-def test_annotation_service_rejects_missing_event_and_edit() -> None:
+def test_annotation_service_rejects_missing_edit() -> None:
     service = AnnotationService()
-
-    with pytest.raises(AnnotationEventNotFoundError):
-        service.delete_event("sess-test", "evt-unknown")
 
     with pytest.raises(AnnotationEditNotFoundError):
         service.revert("sess-test", "edit-unknown")
@@ -81,7 +78,7 @@ def test_annotation_snapshot_keeps_history_and_resolved_state_consistent() -> No
     event = service.add_event("sess-test", "arousal", 12.0, 18.0, "arousal")
     snapshot = service.snapshot("sess-test")
     service.set_label("sess-test", "sleep_stage", 30.0, "n3")
-    service.delete_event("sess-test", event.event_id)
+    service.delete_event("sess-test", "arousal", event.event_id)
 
     assert snapshot.edits == [label, event]
     assert snapshot.labels == [label]
@@ -90,3 +87,4 @@ def test_annotation_snapshot_keeps_history_and_resolved_state_consistent() -> No
     assert len(current.edits) == 4
     assert current.labels[0].label == "n3"
     assert current.events == []
+    assert [edit.event_id for edit in current.deleted_events] == [event.event_id]

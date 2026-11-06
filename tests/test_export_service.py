@@ -113,7 +113,6 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
             package_path=tmp_path / "sleep-model.swmodel",
         ).provenance()
     )
-    times = {"start": [0.0], "end": [30.0]} if kind == PredictionKind.EVENT else {"time": [15.0]}
     service.prediction_store.add(
         PredictionResult(
             session_id=session.id,
@@ -121,7 +120,7 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
             task="sleep_stage",
             classes=("wake", "n1"),
             resolution=30.0,
-            frame=pd.DataFrame({**times, "prob__wake": [0.8], "prob__n1": [0.2]}),
+            frame=pd.DataFrame({"time": [15.0], "prob__wake": [0.8], "prob__n1": [0.2]}),
             kind=kind,
         )
     )
@@ -164,6 +163,7 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
         assert task["kind"] == kind.value
         assert task["model_id"] == "sleep-model"
         assert task["predictions"][0]["probabilities"] == {"wake": 0.8, "n1": 0.2}
+        assert "events" not in task
         edits = json.loads(archive.read("annotations/edits.json"))
         assert [item["id"] for item in edits] == [edit.id, reverted.id]
         assert edits[1]["reverted_edit_id"] == edit.id
@@ -173,6 +173,7 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
         assert models[0]["input_channels"] == ["eeg"]
         assert models == manifest["models"]
         assert "package_path" not in models[0]
+    assert ("events" in service.build_payload(session)["tasks"][0]) == (kind == PredictionKind.EVENT)
 
 
 def test_workspace_cancel_during_copy_removes_partial_archive(tmp_path, monkeypatch) -> None:

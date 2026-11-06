@@ -107,6 +107,7 @@ def main():
         page.locator("#context-edit").click()
         page.locator("#correction-start").fill("45")
         page.locator("#correction-end").fill("49")
+        page.locator("#correction-label").select_option("arousal")
         page.locator("#apply-correction").click()
         expect(page.locator("#history")).to_contain_text("Ereignis: Arousal")
         page.locator("#goto-time").fill("00:00:46")

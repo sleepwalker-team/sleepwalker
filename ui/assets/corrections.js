@@ -38,26 +38,34 @@ export async function saveCorrection({task, range, label, event = null}, post, p
   return saved;
 }
 
-export function selectionAt(task, predictions, annotations, time, klass = null) {
+// Model events the user has deleted stay deleted until the deletion is reverted.
+export const activeModelEvents = (modelEvents, annotations) => {
+  const deleted = new Set((annotations.deleted_events || []).map(edit => edit.event_id));
+  return modelEvents.filter(event => !deleted.has(event.id));
+};
+
+export function selectionAt(task, predictions, annotations, time, klass = null, modelEvents = []) {
   const matches = item => item.task === task.id && item.start <= time && time < (item.end ?? item.start + task.resolution) && (!klass || item.label === klass);
   const event = [...annotations.events].reverse().find(matches);
   if (event) return {kind:"event", task:task.id, start:event.start, end:event.end, label:event.label, editId:event.edit_id, eventId:event.event_id};
   const label = annotations.labels.find(item => item.task===task.id && item.start<=time && time<item.start+task.resolution);
   if (label) return klass && label.label!==klass ? null : {kind:"label", task:task.id, start:label.start, end:label.start + task.resolution, label:label.label, editId:label.edit_id};
+  const model = activeModelEvents(modelEvents, annotations).find(e => e.start <= time && time < e.end && (!klass || e.label === klass));
+  if (model) return {kind:"event", source:"model", task:task.id, start:model.start, end:model.end, label:model.label, eventId:model.id};
   const prediction = predictions.find(p => (p.start ?? p.time) <= time && time < (p.end ?? p.time + task.resolution) && (!klass || !p.label || p.label === klass));
   if (!prediction) return null;
   const winner = prediction.label ?? Object.entries(prediction.probabilities).sort((a,b) => b[1] - a[1])[0]?.[0];
   return {kind:"prediction", task:task.id, start:prediction.start ?? prediction.time, end:prediction.end ?? prediction.time + task.resolution, label:klass || winner};
 }
 
-export function selectedCorrections(selection, task, annotations) {
+export function selectedCorrections(selection, task, annotations, modelEvents = []) {
   if (!selection || !task) return [];
   const labels = annotations.labels.filter(item => item.task===task.id && (
     selection.kind==="label" ? item.edit_id===selection.editId :
     selection.kind==="interval" && item.start<selection.end && item.start+task.resolution>selection.start));
-  const events = annotations.events.filter(item => item.task===task.id && (
-    selection.kind==="event" ? item.event_id===selection.eventId :
-    selection.kind==="interval" && item.start>=selection.start && item.end<=selection.end));
+  const ids = [...annotations.events.filter(item => item.task===task.id).map(item => ({...item, id:item.event_id})), ...activeModelEvents(modelEvents, annotations)]
+    .filter(item => selection.kind==="event" ? item.id===selection.eventId : selection.kind==="interval" && item.start>=selection.start && item.end<=selection.end)
+    .map(item => item.id);
   return [...labels.map(item=>({operation:"revert",edit_id:item.edit_id})),
-    ...events.map(item=>({operation:"delete_event",task:task.id,event_id:item.event_id}))];
+    ...ids.map(id=>({operation:"delete_event",task:task.id,event_id:id}))];
 }

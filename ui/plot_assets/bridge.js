@@ -212,7 +212,9 @@
         update[`annotations[${index}].font.color`] = annotation.font?.size === 10 ? colors.muted : (theme === "light" ? "#262a2c" : colors.ink);
       }
     }
-    if (gd?.layout && gd.layout.dragmode !== mode) {update.dragmode=mode;update.selectdirection="h";}
+    // Zoom also draws a selection box; its range then becomes the new view.
+    const dragmode = mode === "pan" ? "pan" : "select";
+    if (gd?.layout && gd.layout.dragmode !== dragmode) {update.dragmode=dragmode;update.selectdirection="h";}
     // Native Plotly limits stop the gesture itself, before a resampler round trip.
     // Apply on every subplot and after channel/session changes. This also upgrades
     // already-running UI instances whose initial Python figure has no limits yet.
@@ -262,10 +264,13 @@
       gd.on("plotly_selected", selected => {
         const pair = Object.entries(selected?.range || {}).find(([axis,pair]) => /^x\d*$/.test(axis) && Array.isArray(pair))?.[1];
         if (!request || !pair || !pair.every(Number.isFinite) || pair[1] <= pair[0]) return;
-        interval = pair;
         lastSelectionAt = performance.now();
-        drawInterval();
-        send("interval", {range:pair,session:request.session,view:request.view});
+        if (mode === "zoom") send("range", {range:pair,session:request.session,view:request.view});
+        else {
+          interval = pair;
+          drawInterval();
+          send("interval", {range:pair,session:request.session,view:request.view});
+        }
         // Keep a single selection across all subplots. Remove Plotly's local
         // persistent rectangle/handles after its drag has finished.
         window.setTimeout(() => {
@@ -308,7 +313,7 @@
     } else if (event.data.type === "interval") {
       interval = Array.isArray(event.data.range) ? event.data.range : null;
       drawInterval();
-    } else if (event.data.type === "mode" && ["select","pan"].includes(event.data.mode)) {
+    } else if (event.data.type === "mode" && ["select","pan","zoom"].includes(event.data.mode)) {
       if (mode !== event.data.mode) motion.stop(true);
       mode = event.data.mode;
       geometry();

@@ -1,6 +1,6 @@
 import {t, language, locale, setLanguage, applyTranslations, translationFor, renderTranslation} from "./i18n.js?v=20261026-theme-1";
 import {isNegativeClass, labelColor} from "./colors.js?v=20261026-theme-1";
-import {Timeline, currentPrediction, formatTime} from "./timeline.js?v=20261026-theme-1";
+import {Timeline, currentPrediction, formatTime, thresholdEvents} from "./timeline.js?v=20261026-theme-1";
 import {submitCompatibleModels} from "./inference.js?v=20261026-theme-1";
 import {isMatched} from "./channels.js?v=20261026-theme-1";
 import {openChannelDialog} from "./channel_dialog.js?v=20261026-theme-1";
@@ -23,7 +23,7 @@ const taskName = task => taskNames[task.task || task.id] ? t(taskNames[task.task
 const className = label => classNames[String(label).toLowerCase()] ? t(classNames[String(label).toLowerCase()]) : label;
 const state = {
   connected:false, file:null, models:[], session:null, title:t("Aufzeichnung"), channels:[], channelDraft:[],
-  range:[0,120], time:0, interval:null, taskId:null, tasks:[], predictions:new Map(),
+  range:[0,120], time:0, interval:null, taskId:null, tasks:[], predictions:new Map(), modelEvents:new Map(), loading:new Set(), thresholds:{},
   annotations:{edits:[],labels:[],events:[]}, expanded:new Set(), absolute:false,
   view:makeViewId(), revision:0, frameReady:false, plotLoaded:false, generation:0, rangeRequest:0,
   predictionAbort:null, predictionTimer:null, job:null, jobStream:null, jobTimer:null, jobEpoch:0,
@@ -295,7 +295,7 @@ async function activateSession(session,{title,saved}={}) {
   state.selection=null;state.correction=null;closeSelectionMenu();if($("correction-dialog").open)$("correction-dialog").close();
   state.view=makeViewId();
   state.plotLoaded=false;
-  state.displayRange=null;state.predictionRange=null;state.session=session; state.title=title || saved?.title || t("Aufzeichnung"); state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
+  state.displayRange=null;state.predictionRange=null;state.session=session; state.title=title || saved?.title || t("Aufzeichnung"); state.predictions=new Map();state.modelEvents=new Map();state.thresholds={...saved?.thresholds};state.annotations={edits:[],labels:[],events:[]};state.expanded=new Set((Array.isArray(saved?.expanded)?saved.expanded:[]).filter(id=>typeof id==="string"));state.inputIssues=new Map();renderInputIssues();
   const available=(session.signals||[]).map(s=>s.id);
   state.channels=Array.isArray(saved?.channels)?saved.channels.filter(c=>available.includes(c)):chooseChannels(session.signals||[]);
   if(!state.channels.length&&available.length)state.channels=chooseChannels(session.signals);
@@ -303,7 +303,7 @@ async function activateSession(session,{title,saved}={}) {
   if(saved?.range&&Number.isFinite(saved.range[0])&&Number.isFinite(saved.range[1])&&session.duration)state.range=clampRange(saved.range[0],saved.range[1]);
   if(Number.isFinite(saved?.time))state.time=Math.max(0,Math.min(saved.time,(session.duration||1)-1e-6));
   state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));
-  setInteractionMode(saved?.mode==="select"?"select":"pan");setSessionURL(session.id);
+  setInteractionMode(["select","zoom"].includes(saved?.mode)?saved.mode:"pan");setSessionURL(session.id);
   state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",t`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
   text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString(locale()) : "—");
   show("plot-loading");show("signal-frame",session.state==="ready");
@@ -334,7 +334,7 @@ async function refreshAnnotations() {
   state.annotations=data;
   if(["label","event"].includes(state.selection?.kind)) {
     const selected=state.selection,task=state.tasks.find(t=>t.id===selected.task);
-    const current=task?selectionAt(task,state.predictions.get(task.id)||[],data,(selected.start+selected.end)/2):null;
+    const current=task?selectionAt(task,state.predictions.get(task.id)||[],data,(selected.start+selected.end)/2,null,displayedEvents(task.id)):null;
     state.selection=current||{kind:"interval",task:selected.task,start:selected.start,end:selected.end};
     state.interval=[state.selection.start,state.selection.end];sendPlot("interval",{range:state.interval});
   }
@@ -369,21 +369,26 @@ function renderRange() {
 }
 function navigate(direction) {const width=state.range[1]-state.range[0];setRange(state.range[0]+direction*width,state.range[1]+direction*width);}
 function schedulePredictions() {
+  // Loading starts now, not after the delay, so no "no prediction" flashes up meanwhile.
+  state.loading=new Set(state.tasks.map(task=>task.id));
   clearTimeout(state.predictionTimer);state.predictionAbort?.abort();state.predictionTimer=setTimeout(()=>refreshPredictions().catch(handleError),130);
 }
 async function refreshPredictions() {
   if(!state.session||state.session.state!=="ready")return;
   const generation=state.generation,request=++state.rangeRequest,controller=new AbortController();state.predictionAbort=controller;
+  const current=()=>generation===state.generation&&request===state.rangeRequest&&!controller.signal.aborted;
   // One window width on each side, like the signals, so panning shows predictions right away.
   const [start,end]=state.range,width=end-start,id=state.session.id;show("prediction-loading",state.tasks.length>0);
   const buffered=[Math.max(0,start-width),Math.min(state.session.duration,end+width)];
   try {
-    const data=await Promise.all(state.tasks.map(async task=>{
-      if(task.kind==="continuous"&&width>900)return[task.id,[]];
-      const response=await api(`${sessionPath(id)}/predictions/${encodeURIComponent(task.id)}?${new URLSearchParams({start:buffered[0],end:buffered[1]})}`,{signal:controller.signal});return[task.id,response.predictions];
+    // Each track appears as soon as its own response arrives, not with the slowest one.
+    await Promise.all(state.tasks.map(async task=>{
+      const response=task.kind==="continuous"&&width>900?{predictions:[]}:await api(`${sessionPath(id)}/predictions/${encodeURIComponent(task.id)}?${new URLSearchParams({start:buffered[0],end:buffered[1]})}`,{signal:controller.signal});
+      if(!current())return;
+      state.predictions.set(task.id,response.predictions);state.modelEvents.set(task.id,response.events||[]);state.loading.delete(task.id);
+      renderContext();drawTimeline();
     }));
-    if(generation!==state.generation||request!==state.rangeRequest||controller.signal.aborted)return;
-    state.predictions=new Map(data);state.predictionRange=buffered;renderContext();drawTimeline();
+    if(current())state.predictionRange=buffered;
   } finally {if(request===state.rangeRequest&&!controller.signal.aborted)show("prediction-loading",false);}
 }
 let legendKey="";
@@ -404,10 +409,10 @@ function renderTimelineLegend() {
 }
 function drawTimeline() {
   renderTimelineLegend();
-  timeline.update({tasks:state.tasks,predictions:state.predictions,annotations:state.annotations,expanded:state.expanded,range:state.displayRange||state.range,mode:state.mode,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className,t});
+  timeline.update({tasks:state.tasks,predictions:state.predictions,modelEvents:new Map(state.tasks.map(task=>[task.id,displayedEvents(task.id)])),loading:state.loading,annotations:state.annotations,expanded:state.expanded,range:state.displayRange||state.range,mode:state.mode,time:state.time,taskId:state.taskId,selection:state.selection,timeLabel,taskName,className,t});
 }
 const timeline=new Timeline($("timeline"),{
-  select:(task,time,target)=>target?selectRegion(target):selectTime(time,task),
+  select:(task,time,target)=>target?selectRegion(target,time):selectTime(time,task),
   interval:(task,start,end)=>selectRegion({kind:"interval",task,start,end}),
   context:openSelectionMenu,
   toggle:task=>{if(state.expanded.has(task))state.expanded.delete(task);else state.expanded.add(task);drawTimeline();rememberSession();},
@@ -427,7 +432,7 @@ function renderContext() {
   const prediction=currentPrediction(task,items,state.time);
   const selected=state.interval||(prediction&&task?.kind==="epoch"?[prediction.start,prediction.end]:null);
   text("selection-range",selected?`${timeLabel(selected[0])} – ${timeLabel(selected[1])}`:timeLabel(state.time));
-  const selectionKind={interval:t("Markiertes Intervall"),event:t("Eigenes Ereignis"),label:t("Eigene Klassenkorrektur")}[state.selection?.kind];
+  const selectionKind=state.selection?.source==="model"?t("Modell-Ereignis"):{interval:t("Markiertes Intervall"),event:t("Eigenes Ereignis"),label:t("Eigene Klassenkorrektur")}[state.selection?.kind];
   text("selection-meta",t`${selectionKind?selectionKind+" · ":task?.kind==="epoch"?t`${task.resolution}-s-Epoche · `:""}Zeitpunkt ${timeLabel(state.time)}`);
   text("prediction-label",prediction?className(prediction.label):"—");
   const confidence=prediction?.probabilities?.[prediction.label];text("prediction-confidence",Number.isFinite(confidence)?`${Math.round(confidence*100)} %`:"");
@@ -439,6 +444,9 @@ function renderContext() {
     row.append(element("span",className(label)),bar,element("span",`${Math.round(value*100)} %`,"value mono"));probabilities.append(row);
   }
   show("probability-details",Boolean(prediction));
+  const threshold=state.thresholds[task?.id];show("threshold-row",task?.kind==="event");
+  $("threshold").value=threshold??.5;$("threshold-reset").disabled=threshold===undefined;
+  text("threshold-value",threshold===undefined?t("höchste Klasse"):`${Math.round(threshold*100)} %`);
   $("selection-edit").disabled=state.mutation||!state.selection||!state.tasks.length;
   text("viewer-status",t`Auswahl: ${timeLabel(state.time)}${task?` · ${taskName(task)}`:""}${human?t(" · manuell korrigiert"):""}`);
   text("timeline-summary",task?t`${taskName(task)} bei ${timeLabel(state.time)}: ${human?className(human.label):prediction?className(prediction.label):t("keine Vorhersage")}`:t("Keine Ergebnisspuren verfügbar."));
@@ -463,29 +471,42 @@ async function annotate(payload) {
   if(!state.session||state.mutation)return;
   await mutateAnnotations(post=>post(payload));notice(t("Änderung in der temporären Session gespeichert."));
 }
-function selectRegion(selection) {
+function selectRegion(selection,time) {
   if(!state.session)return;
   const start=Math.max(0,selection.start),end=Math.min(state.session.duration,selection.end);
   if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start)return;
   state.selection={...selection,start,end};state.interval=[start,end];
-  selectTime((start+end)/2,selection.task||state.taskId,true);
+  // A click keeps its time, so the panel shows the probability where it landed.
+  selectTime(time??(start+end)/2,selection.task||state.taskId,true);
 }
+const modelEvents=task=>state.modelEvents.get(task)||[];
+// Without a threshold the server's events apply; a threshold changes only what is shown.
+function displayedEvents(id) {
+  const task=state.tasks.find(t=>t.id===id),threshold=state.thresholds[id];
+  return task?.kind==="event"&&Number.isFinite(threshold)?thresholdEvents(task,state.predictions.get(id)||[],threshold):modelEvents(id);
+}
+function setThreshold(value) {
+  if(value===null)delete state.thresholds[state.taskId];else state.thresholds[state.taskId]=value;
+  renderContext();drawTimeline();rememberSession();
+}
+// Human edits, as opposed to model output.
+const isChange=selection=>selection.kind==="label"||selection.kind==="event"&&selection.source!=="model";
 function closeSelectionMenu() {show("selection-menu",false);}
 function openSelectionMenu({task=state.taskId,time=state.time,target=null,x,y}) {
   if(!state.session||state.mutation)return;
   const selected=state.selection;
   if(!selected||selected.task!==task||time<selected.start||time>=selected.end) {
     const spec=state.tasks.find(t=>t.id===task);
-    const hit=target||(spec?selectionAt(spec,state.predictions.get(task)||[],state.annotations,time):null);
+    const hit=target||(spec?selectionAt(spec,state.predictions.get(task)||[],state.annotations,time,null,displayedEvents(task)):null);
     selectRegion(hit||{kind:"interval",task,start:time,end:Math.min(state.session.duration,time+Math.max(spec?.resolution||1,.05))});
   }
   const selection=state.selection;if(!selection)return;
   const spec=state.tasks.find(t=>t.id===selection.task);
   text("selection-menu-summary",`${spec?taskName(spec):t("Auswahl")} · ${formatTime(selection.start,true)}–${formatTime(selection.end,true)}`);
-  text("context-edit",selection.kind==="event"||selection.kind==="label"?t("Änderung bearbeiten"):t("Korrigieren"));
+  text("context-edit",isChange(selection)?t("Änderung bearbeiten"):t("Korrigieren"));
   $("context-edit").disabled=!state.tasks.length;
-  const changes=selectedCorrections(selection,spec,state.annotations);
-  show("context-delete",changes.length>0);text("context-delete",changes.length>1?t`${changes.length} Änderungen löschen`:t("Änderung löschen"));
+  const changes=selectedCorrections(selection,spec,state.annotations,modelEvents(selection.task));
+  show("context-delete",changes.length>0);text("context-delete",changes.length>1?t`${changes.length} Änderungen löschen`:selection.source==="model"?t("Ereignis löschen"):t("Änderung löschen"));
   show("context-delete-prediction",selection.kind==="prediction");show("context-limit",selection.kind==="prediction");
   const menu=$("selection-menu");show("selection-menu");
   menu.style.left=`${Math.max(8,Math.min(x??innerWidth/2,innerWidth-menu.offsetWidth-8))}px`;
@@ -493,8 +514,8 @@ function openSelectionMenu({task=state.taskId,time=state.time,target=null,x,y}) 
   $("context-edit").focus({preventScroll:true});
 }
 function setInteractionMode(mode) {
-  state.mode=mode;$("select-tool").setAttribute("aria-pressed",String(mode==="select"));$("pan-tool").setAttribute("aria-pressed",String(mode==="pan"));
-  text("interaction-hint",mode==="pan"?t("Ziehen: verschieben · Scrollen: zoomen · Klick: Zeitpunkt wählen · Rechtsklick: Auswahl bearbeiten"):t("Ziehen: Intervall markieren · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten"));drawTimeline();
+  state.mode=mode;for(const tool of ["pan","select","zoom"])$(`${tool}-tool`).setAttribute("aria-pressed",String(mode===tool));
+  text("interaction-hint",{pan:t("Ziehen: verschieben · Scrollen: zoomen · Klick: Zeitpunkt wählen · Rechtsklick: Auswahl bearbeiten"),select:t("Ziehen: Intervall markieren · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten"),zoom:t("Ziehen: Bereich vergrößern · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten")}[mode]);drawTimeline();
   sendPlot("mode",{mode});rememberSession();
 }
 function openCorrection() {
@@ -507,13 +528,13 @@ function openCorrection() {
   select.disabled=["event","label","prediction"].includes(state.correction.kind);
   $("correction-start").value=Number(state.correction.start.toFixed(6));$("correction-end").value=Number(state.correction.end.toFixed(6));
   updateCorrectionClasses();show("correction-error",false);updateCorrectionPreview();
-  text("correction-title",state.correction.kind==="event"||state.correction.kind==="label"?t("Änderung bearbeiten"):t("Auswahl korrigieren"));
+  text("correction-title",isChange(state.correction)?t("Änderung bearbeiten"):t("Auswahl korrigieren"));
   $("correction-dialog").showModal();
 }
 function updateCorrectionClasses() {
   const task=state.tasks.find(t=>t.id===$("correction-task").value),select=$("correction-label");select.replaceChildren();
   for(const label of task?.classes||[])select.add(new Option(className(label),label));
-  const previous=task?selectionAt(task,state.predictions.get(task.id)||[],state.annotations,(state.correction.start+state.correction.end)/2):null;
+  const previous=task?selectionAt(task,state.predictions.get(task.id)||[],state.annotations,(state.correction.start+state.correction.end)/2,null,displayedEvents(task.id)):null;
   const label=state.correction?.task===task?.id&&state.correction.label?state.correction.label:previous?.label;
   if(task?.classes.includes(label))select.value=label;
 }
@@ -549,7 +570,8 @@ async function applyCorrection() {
   let count=0,total=0;
   try {
     const {task,range}=dialogRange(),label=$("correction-label").value;
-    const event=state.correction.kind==="event"?state.correction:null;
+    // Only events the server knows can be replaced; one shown only through a threshold is just added.
+    const event=state.correction.kind==="event"&&selectedCorrections(state.correction,task,state.annotations,modelEvents(task.id)).length?state.correction:null;
     show("correction-error",false);
     for(const control of $("correction-form").elements)control.disabled=true;
     const saved=await mutateAnnotations(post=>saveCorrection({task,range,label,event},post,(done,all)=>{count=done;total=all;text("apply-correction",t`Speichern ${done}/${all}`);}));
@@ -567,13 +589,13 @@ async function applyCorrection() {
 }
 async function deleteSelectedCorrection() {
   closeSelectionMenu();const selection=state.selection;
-  const task=state.tasks.find(t=>t.id===selection?.task),changes=selectedCorrections(selection,task,state.annotations);
+  const task=state.tasks.find(t=>t.id===selection?.task),changes=selectedCorrections(selection,task,state.annotations,modelEvents(selection?.task));
   if(!changes.length)return;
   let deleted=0;
   try {await mutateAnnotations(async post=>{for(const operation of changes){await post(operation);deleted++;}});}
   catch(error){if(deleted)throw new Error(t`${deleted} von ${changes.length} Änderungen wurden gelöscht. ${errorMessage(error)}`);throw error;}
   const time=(selection.start+selection.end)/2;
-  const next=task?selectionAt(task,state.predictions.get(task.id)||[],state.annotations,time):null;
+  const next=task?selectionAt(task,state.predictions.get(task.id)||[],state.annotations,time,null,displayedEvents(task.id)):null;
   if(next)selectRegion(next);else selectTime(time,selection.task);
   notice(changes.length>1?t`${changes.length} Änderungen gelöscht.`:t("Änderung gelöscht."));
 }
@@ -719,7 +741,7 @@ function closeView(expired=false) {
   if($("correction-dialog").open)$("correction-dialog").close();
   sendPlot("close");stopWatchingJob();state.predictionAbort?.abort();clearTimeout(state.predictionTimer);state.generation++;
   writeStorage(sessionStorage,"sleepwalker.session",null);setSessionURL(null);
-  state.session=null;state.tasks=[];state.predictions=new Map();state.annotations={edits:[],labels:[],events:[]};state.job=null;state.export=null;
+  state.session=null;state.tasks=[];state.predictions=new Map();state.modelEvents=new Map();state.annotations={edits:[],labels:[],events:[]};state.job=null;state.export=null;
   setViewer(false);text("study-title",t("Aufzeichnung öffnen"));text("study-meta","");show("job-panel",false);
   for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
   renderResume();if(!expired)refreshRecentSessions().catch(handleError);
@@ -834,7 +856,8 @@ $("goto-form").addEventListener("submit",event=>{event.preventDefault();const va
 bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));renderRange();renderContext();drawTimeline();rememberSession();});
 $("task-select").addEventListener("change",()=>selectTime(state.time,$("task-select").value));
 bind("refresh-annotations",refreshAnnotations);
-bind("select-tool",()=>setInteractionMode("select"));bind("pan-tool",()=>setInteractionMode("pan"));
+bind("select-tool",()=>setInteractionMode("select"));bind("pan-tool",()=>setInteractionMode("pan"));bind("zoom-tool",()=>setInteractionMode("zoom"));
+$("threshold").addEventListener("input",()=>setThreshold(Number($("threshold").value)));bind("threshold-reset",()=>setThreshold(null));
 bind("selection-edit",openCorrection);bind("context-edit",openCorrection);bind("context-delete",deleteSelectedCorrection);
 bind("correction-close",closeCorrection);bind("correction-cancel",closeCorrection);
 $("correction-form").addEventListener("submit",event=>{event.preventDefault();applyCorrection().catch(handleError);});

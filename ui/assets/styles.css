@@ -128,6 +128,8 @@ progress { width:100%; height:5px; accent-color:var(--progress); }
 .inspector section > p:last-child { margin-bottom:0; }
 .inspector label { font-size:12px; }
 .prediction-label { margin:24px 0 18px; }
+.threshold-row { display:grid; grid-template-columns:1fr auto; align-items:center; gap:4px 10px; margin-top:10px; }
+.threshold-row input { grid-column:1 / -1; width:100%; }
 .prediction-value { display:flex; justify-content:space-between; align-items:center; gap:15px; }
 .prediction-value strong { font-size:27px; font-weight:600; overflow-wrap:anywhere; }
 .prediction-value > span { font-size:20px; white-space:nowrap; }

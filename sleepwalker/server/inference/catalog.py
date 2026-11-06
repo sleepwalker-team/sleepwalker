@@ -16,7 +16,7 @@ from typing import Annotated
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
-from ..results.predictions import PredictionKind
+from ..results.predictions import PredictionKind, background_class
 
 logger = logging.getLogger(__name__)
 PACKAGE_FORMAT = "sleepwalker-packaged-model-v1"
@@ -132,6 +132,7 @@ def read_model_manifest(package_path: Path) -> ModelInfo:
             classes=tuple(contract.classes), input_channels=tuple(manifest.input_channels),
             capabilities=tuple(manifest.capabilities), output_resolution=resolution,
             package_path=package_path, channel_aliases=aliases, payload_sha256=manifest.sha256,
+            output_kind=PredictionKind.EVENT if background_class(contract.classes) else PredictionKind.EPOCH,
         )
     except (OSError, KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise InvalidModelPackageError(f"Invalid model metadata: {package_path.name}") from exc

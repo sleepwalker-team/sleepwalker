@@ -1,12 +1,14 @@
 import math
+from bisect import bisect_left, bisect_right
+from operator import attrgetter
 
 from fastapi import APIRouter
 
 from ..core.sessions import SessionState
-from ..results.predictions import IntervalPrediction, PredictionResult, map_predictions
+from ..results.predictions import PredictionKind, PredictionResult
 from .deps import Predictions, SessionDep
 from .errors import bad_request, conflict, not_found
-from .schemas import ContinuousPredictionResponse, IntervalPredictionResponse, PredictionResponse, TaskListResponse, TaskResponse
+from .schemas import ContinuousPredictionResponse, IntervalPredictionResponse, ModelEventResponse, PredictionResponse, TaskListResponse, TaskResponse
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["predictions"])
 
@@ -26,7 +28,7 @@ def list_tasks(session: SessionDep, predictions: Predictions) -> TaskListRespons
     return TaskListResponse(tasks=[to_task_response(result) for result in predictions.list_for_session(session.id)])
 
 
-@router.get("/{session_id}/predictions/{task_id}", response_model=PredictionResponse)
+@router.get("/{session_id}/predictions/{task_id}", response_model=PredictionResponse, response_model_exclude_none=True)
 def get_predictions(session: SessionDep, task_id: str, predictions: Predictions, start: float = 0.0, end: float | None = None) -> PredictionResponse:
     if session.state != SessionState.READY or session.recording_start is None or session.duration is None:
         raise conflict("INVALID_SESSION_STATE", "Session is not ready for prediction access.", {"state": session.state.value})
@@ -39,12 +41,16 @@ def get_predictions(session: SessionDep, task_id: str, predictions: Predictions,
     if not math.isfinite(start) or not math.isfinite(range_end) or start < 0.0 or range_end <= start or range_end > session.duration:
         raise bad_request("Prediction time range is invalid.", {"start": start, "end": range_end}, code="INVALID_TIME_RANGE")
 
-    records = []
-    for prediction in map_predictions(result, session.recording_start):
-        if isinstance(prediction, IntervalPrediction):
-            if prediction.end > start and prediction.start < range_end:
-                records.append(IntervalPredictionResponse(**vars(prediction)))
-        elif start <= prediction.time < range_end:
-            records.append(ContinuousPredictionResponse(**vars(prediction)))
+    # Records are sorted by time, so the requested range is a slice.
+    mapped, model_events = predictions.mapped(result, session.recording_start)
+    if result.kind == PredictionKind.CONTINUOUS:
+        time = attrgetter("time")
+        records = [ContinuousPredictionResponse(**vars(p)) for p in mapped[bisect_left(mapped, start, key=time):bisect_left(mapped, range_end, key=time)]]
+    else:
+        visible = mapped[bisect_right(mapped, start, key=attrgetter("end")):bisect_left(mapped, range_end, key=attrgetter("start"))]
+        records = [IntervalPredictionResponse(**vars(p)) for p in visible]
 
-    return PredictionResponse(task=result.task, kind=result.kind, classes=list(result.classes), predictions=records)
+    events = None
+    if result.kind == PredictionKind.EVENT:
+        events = [ModelEventResponse(**vars(event)) for event in model_events if event.end > start and event.start < range_end]
+    return PredictionResponse(task=result.task, kind=result.kind, classes=list(result.classes), predictions=records, events=events)

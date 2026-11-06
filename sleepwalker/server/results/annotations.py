@@ -28,10 +28,6 @@ class AnnotationEdit:
     reverted_edit_id: str | None = None
 
 
-class AnnotationEventNotFoundError(Exception):
-    pass
-
-
 class AnnotationEditNotFoundError(Exception):
     pass
 
@@ -41,6 +37,7 @@ class AnnotationSnapshot:
     edits: list[AnnotationEdit]
     labels: list[AnnotationEdit]
     events: list[AnnotationEdit]
+    deleted_events: list[AnnotationEdit]
 
 
 class AnnotationService:
@@ -54,11 +51,9 @@ class AnnotationService:
     def add_event(self, session_id: str, task: str, start: float, end: float, label: str) -> AnnotationEdit:
         return self._add_edit(session_id, AnnotationOperation.ADD_EVENT, task=task, start=start, end=end, label=label, event_id=f"evt_{uuid4()}")
 
-    def delete_event(self, session_id: str, event_id: str) -> AnnotationEdit:
-        event = next((event for event in self.snapshot(session_id).events if event.event_id == event_id), None)
-        if event is None:
-            raise AnnotationEventNotFoundError(event_id)
-        return self._add_edit(session_id, AnnotationOperation.DELETE_EVENT, task=event.task, event_id=event_id)
+    def delete_event(self, session_id: str, task: str, event_id: str) -> AnnotationEdit:
+        """Delete a human or model event; callers check that it exists and is still active."""
+        return self._add_edit(session_id, AnnotationOperation.DELETE_EVENT, task=task, event_id=event_id)
 
     def revert(self, session_id: str, edit_id: str) -> AnnotationEdit:
         with self._lock:
@@ -76,11 +71,12 @@ class AnnotationService:
         edits = self.list_edits(session_id)
         reverted = self._reverted_ids(edits)
         active = [edit for edit in edits if edit.id not in reverted]
-        deleted_events = {edit.event_id for edit in active if edit.operation == AnnotationOperation.DELETE_EVENT}
-        events = [edit for edit in active if edit.operation == AnnotationOperation.ADD_EVENT and edit.event_id not in deleted_events]
+        deletions = [edit for edit in active if edit.operation == AnnotationOperation.DELETE_EVENT]
+        deleted_ids = {edit.event_id for edit in deletions}
+        events = [edit for edit in active if edit.operation == AnnotationOperation.ADD_EVENT and edit.event_id not in deleted_ids]
         # A later label for the same epoch replaces the earlier one.
         labels = {(edit.task, edit.start): edit for edit in active if edit.operation == AnnotationOperation.SET_LABEL}
-        return AnnotationSnapshot(edits=edits, labels=list(labels.values()), events=events)
+        return AnnotationSnapshot(edits=edits, labels=list(labels.values()), events=events, deleted_events=deletions)
 
     def list_edits(self, session_id: str) -> list[AnnotationEdit]:
         with self._lock:

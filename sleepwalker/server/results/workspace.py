@@ -22,7 +22,7 @@ from ..core.sessions import Session, SessionService, SessionState
 from ..core.storage import DEFAULT_MAX_FILE_SIZE_BYTES, TemporaryStorage
 from ..recording.study import InvalidStudyError, StudyFormat, UnsupportedStudyFormatError, validate_study
 from .annotations import AnnotationEdit, AnnotationOperation, AnnotationService
-from .predictions import PredictionKind, PredictionResult, PredictionStore, epoch_starts, map_predictions, resolve_epoch_start
+from .predictions import PredictionKind, PredictionResult, PredictionStore, epoch_starts, map_predictions, model_events, resolve_epoch_start
 
 Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 PositiveNumber = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
@@ -396,28 +396,21 @@ def _restore_prediction(
         else:
             interval = WorkspaceInterval.model_validate(raw)
             probabilities = interval.probabilities
-            if interval.end <= interval.start:
-                raise InvalidWorkspaceError("Workspace prediction interval is invalid.")
-            if task.kind == PredictionKind.EPOCH:
-                if not math.isclose(interval.end - interval.start, task.resolution):
-                    raise InvalidWorkspaceError("Workspace epoch width does not match its resolution.")
-                row = {"time": (interval.start + interval.end) / 2}
-            else:
-                row = {"start": interval.start, "end": interval.end}
+            if not math.isclose(interval.end - interval.start, task.resolution):
+                raise InvalidWorkspaceError("Workspace interval width does not match its resolution.")
+            row = {"time": (interval.start + interval.end) / 2}
         if set(probabilities) != set(task.classes):
             raise InvalidWorkspaceError("Workspace prediction classes do not match its probabilities.")
         if task.kind != PredictionKind.CONTINUOUS:
             if interval.label != max(task.classes, key=probabilities.__getitem__):
                 raise InvalidWorkspaceError("Workspace prediction label does not match its probabilities.")
-        if "time" in row:
-            if row["time"] in times:
-                raise InvalidWorkspaceError("Workspace contains duplicate prediction times.")
-            times.add(row["time"])
+        if row["time"] in times:
+            raise InvalidWorkspaceError("Workspace contains duplicate prediction times.")
+        times.add(row["time"])
         row.update({f"prob__{label}": probability for label, probability in probabilities.items()})
         rows.append(row)
 
-    columns = ["start", "end"] if task.kind == PredictionKind.EVENT else ["time"]
-    columns += [f"prob__{label}" for label in task.classes]
+    columns = ["time", *(f"prob__{label}" for label in task.classes)]
     return PredictionResult(
         session_id=session_id,
         model_id=task.model_id,
@@ -456,6 +449,9 @@ def _restore_edits(
         result.task: epoch_starts(result, workspace.metadata.recording_start)
         for result in results if result.kind == PredictionKind.EPOCH
     }
+    model_event_ids = {
+        (result.task, event.id) for result in results for event in model_events(result, workspace.metadata.recording_start)
+    }
     old_edits = {}
     event_ids = {}
     edit_ids = {}
@@ -492,13 +488,14 @@ def _restore_edits(
                 event_ids[edit.event_id] = f"evt_{uuid4()}"
                 values["event_id"] = event_ids[edit.event_id]
         elif operation == AnnotationOperation.DELETE_EVENT:
-            if edit.event_id not in event_ids or any(
-                value is not None for value in (edit.start, edit.end, edit.label, edit.reverted_edit_id)
-            ):
+            if any(value is not None for value in (edit.start, edit.end, edit.label, edit.reverted_edit_id)):
                 raise InvalidWorkspaceError("Workspace event deletion is invalid.")
-            event_id = event_ids[edit.event_id]
-            active = {event.event_id: event for event in temporary_service.snapshot(session_id).events}
-            if event_id not in active or active[event_id].task != edit.task:
+            # Human event IDs are replaced on import; model event IDs follow from the restored results.
+            event_id = event_ids.get(edit.event_id, edit.event_id)
+            snapshot = temporary_service.snapshot(session_id)
+            active = {(event.task, event.event_id) for event in snapshot.events}
+            active |= model_event_ids - {(event.task, event.event_id) for event in snapshot.deleted_events}
+            if (edit.task, event_id) not in active:
                 raise InvalidWorkspaceError("Workspace event deletion refers to an inactive event.")
             values["event_id"] = event_id
         else:

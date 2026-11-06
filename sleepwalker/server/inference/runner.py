@@ -40,7 +40,7 @@ class InferenceRunner(Protocol):
 
 def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start: datetime, duration: float | None) -> pd.DataFrame:
     """Adapt official interval-start timestamps once to the API's center convention."""
-    if frame.empty or model.output_kind != PredictionKind.EPOCH:
+    if frame.empty or model.output_kind == PredictionKind.CONTINUOUS:
         raise ValueError("Expected nonempty interval-classification predictions.")
     if "task" not in frame or not frame["task"].eq(model.task).all():
         raise ValueError("Unexpected prediction task.")

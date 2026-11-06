@@ -88,6 +88,14 @@ class IntervalPredictionResponse(BaseModel):
     probabilities: dict[str, float]
 
 
+class ModelEventResponse(BaseModel):
+    id: str
+    start: float
+    end: float
+    label: str
+    confidence: float
+
+
 class ContinuousPredictionResponse(BaseModel):
     time: float
     probabilities: dict[str, float]
@@ -98,6 +106,8 @@ class PredictionResponse(BaseModel):
     kind: PredictionKind
     classes: list[str]
     predictions: list[IntervalPredictionResponse | ContinuousPredictionResponse]
+    # Only for event tasks: the intervals merged into events.
+    events: list[ModelEventResponse] | None = None
 
 
 class AnnotationRequest(BaseModel):
@@ -126,6 +136,7 @@ class AnnotationListResponse(BaseModel):
     edits: list[AnnotationEditResponse]
     labels: list[AnnotationEditResponse]
     events: list[AnnotationEditResponse]
+    deleted_events: list[AnnotationEditResponse]
 
 
 class InferenceRequest(BaseModel):

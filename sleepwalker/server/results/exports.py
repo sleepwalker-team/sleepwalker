@@ -13,7 +13,7 @@ from ..core.jobs import CancellationCheck, Job, JobExecutionError, JobPhase, Job
 from ..core.sessions import Session, utc_now
 from ..core.storage import TemporaryStorage
 from .annotations import AnnotationEdit, AnnotationService
-from .predictions import IntervalPrediction, PredictionResult, PredictionStore, map_predictions
+from .predictions import IntervalPrediction, PredictionKind, PredictionResult, PredictionStore, map_predictions, model_events
 
 
 class ExportState(str, Enum):
@@ -155,6 +155,8 @@ class ExportService:
             "provenance/models.json": models,
         }
         for task in tasks:
+            # Events are derived from the intervals again on import.
+            task.pop("events", None)
             documents[prediction_files[task["task"]]] = task
 
         return documents, sources
@@ -191,7 +193,7 @@ def _prediction_task(result: PredictionResult, session: Session, include_probabi
             record["probabilities"] = prediction.probabilities
         records.append(record)
 
-    return {
+    task = {
         "model_id": result.model_id,
         "task": result.task,
         "kind": result.kind.value,
@@ -199,6 +201,9 @@ def _prediction_task(result: PredictionResult, session: Session, include_probabi
         "resolution": result.resolution,
         "predictions": records,
     }
+    if result.kind == PredictionKind.EVENT:
+        task["events"] = [vars(event) for event in model_events(result, session.recording_start)]
+    return task
 
 
 def _annotation_edit(edit: AnnotationEdit) -> dict:

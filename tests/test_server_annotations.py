@@ -36,7 +36,7 @@ def create_annotation_app(
             frame=pd.DataFrame({
                 "time": [start + resolution / 2 for start in starts],
                 **{f"prob__{label}": [float(index == 0)] * len(starts) for index, label in enumerate(classes)},
-            }) if kind == PredictionKind.EPOCH else pd.DataFrame(),
+            }) if kind != PredictionKind.CONTINUOUS else pd.DataFrame(),
             kind=kind,
         )
     )
@@ -242,7 +242,7 @@ def test_get_annotations_returns_empty_lists_for_unannotated_session() -> None:
         response = client.get(f"/api/v1/sessions/{session.id}/annotations")
 
     assert response.status_code == 200
-    assert response.json() == {"edits": [], "labels": [], "events": []}
+    assert response.json() == {"edits": [], "labels": [], "events": [], "deleted_events": []}
 
 
 def test_get_annotations_resolves_label_history_without_changing_model_predictions() -> None:
@@ -365,3 +365,22 @@ def test_get_annotations_rejects_deleted_session_and_removes_history() -> None:
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
     assert service.list_edits(session.id) == []
+
+
+def test_model_event_can_be_deleted_once_and_restored() -> None:
+    # Every interval predicts "arousal" (index 0), so the whole recording is one model event.
+    app, session, annotations = create_annotation_app(task="arousal", classes=("arousal", "no_arousal"), kind=PredictionKind.EVENT)
+    url = f"/api/v1/sessions/{session.id}/annotations"
+    with TestClient(app) as client:
+        event_id = client.get(f"/api/v1/sessions/{session.id}/predictions/arousal").json()["events"][0]["id"]
+        unknown = client.post(url, json={"operation": "delete_event", "task": "arousal", "event_id": "model:arousal:5000"})
+        deleted = client.post(url, json={"operation": "delete_event", "task": "arousal", "event_id": event_id})
+        again = client.post(url, json={"operation": "delete_event", "task": "arousal", "event_id": event_id})
+        listed = client.get(url).json()["deleted_events"]
+        client.post(url, json={"operation": "revert", "edit_id": deleted.json()["edit_id"]})
+
+    assert event_id == "model:arousal:0"
+    assert unknown.status_code == again.status_code == 404
+    assert deleted.status_code == 201
+    assert [edit["event_id"] for edit in listed] == [event_id]
+    assert annotations.snapshot(session.id).deleted_events == []

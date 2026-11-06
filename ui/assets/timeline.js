@@ -1,5 +1,22 @@
 import {isNegativeClass, labelColor, labelTextColor} from "./colors.js?v=20261026-theme-1";
 export {labelColor};
+// Background classes get no row of their own, so only tasks with several real classes expand.
+const realClasses=task=>task.classes.filter(label=>!isNegativeClass(label));
+const expandable=task=>realClasses(task).length>1;
+// Display-only alternative to the server's events: a block belongs to an event when its most
+// likely non-background class reaches the threshold. IDs follow the server's form.
+export function thresholdEvents(task, items, threshold) {
+  const events = [];
+  for (const p of items) {
+    const [label, value] = Object.entries(p.probabilities).filter(([name]) => !isNegativeClass(name)).sort((a, b) => b[1] - a[1])[0] || [];
+    if (!(value >= threshold)) continue;
+    const last = events.at(-1);
+    if (last?.label === label && Math.abs(last.end - p.start) < 1e-6) last.end = p.end;
+    else events.push({id:`model:${task.id}:${Math.round(p.start * 1000)}`, start:p.start, end:p.end, label});
+  }
+  return events;
+}
+
 export function currentPrediction(task, predictions, time) {
   if (!task) return null;
   if (task.kind === "continuous") {
@@ -29,7 +46,7 @@ export class Timeline {
       if (!this.data || event.button !== 0) return;
       const p = this.position(event), row = this.rows.find(r => p.y >= r.y && p.y <= r.y + r.height);
       if (!row) return;
-      if (p.x < this.left) { this.toggle(row.task.id); return; }
+      if (p.x < this.left) { if (expandable(row.task)) this.toggle(row.task.id); return; }
       this.drag = {x: p.x, current:p.x, row, pan:this.data.mode === "pan", range:[...this.data.range], moved:false};
       canvas.setPointerCapture(event.pointerId);
     });
@@ -44,7 +61,7 @@ export class Timeline {
       if (!row || p.x < this.left || !this.data) return;
       const time = this.timeAt(p.x);
       const selected = this.hit(row,time);
-      canvas.title = `${this.data.taskName(row.task)} · ${this.data.timeLabel(time)} · ${selected ? this.data.className(selected.label) + (["label","event"].includes(selected.kind)?this.data.t(" · manuell"):"") : this.data.t("Keine Vorhersage")}`;
+      canvas.title = `${this.data.taskName(row.task)} · ${this.data.timeLabel(time)} · ${selected ? this.data.className(selected.label) + (["label","event"].includes(selected.kind)&&selected.source!=="model"?this.data.t(" · manuell"):"") : this.data.t("Keine Vorhersage")}`;
     });
     canvas.addEventListener("pointerup", event => {
       if (!this.drag) return;
@@ -52,7 +69,10 @@ export class Timeline {
       if (pan && moved) { const range = this.panned(p.x); this.drag = null; this.commit(range); return; }
       this.drag = null;
       const start = this.timeAt(x), end = this.timeAt(p.x);
-      if (!pan && Math.abs(p.x - x) > 5) this.interval(row.task.id, Math.min(start,end), Math.max(start,end));
+      if (!pan && Math.abs(p.x - x) > 5) {
+        if (this.data.mode === "zoom") this.commit([Math.min(start,end), Math.max(start,end)]);
+        else this.interval(row.task.id, Math.min(start,end), Math.max(start,end));
+      }
       else this.select(row.task.id, end, this.hit(row,end));
       this.draw();
     });
@@ -102,18 +122,18 @@ export class Timeline {
     return [start - seconds, end - seconds];
   }
   position(event) { const rect = this.canvas.getBoundingClientRect(); return {x:event.clientX - rect.left,y:event.clientY - rect.top}; }
-  hit(row,time) { return selectionAt(row.task,this.data.predictions.get(row.task.id)||[],this.data.annotations,time,row.klass); }
+  hit(row,time) { return selectionAt(row.task,this.data.predictions.get(row.task.id)||[],this.data.annotations,time,row.klass,this.data.modelEvents.get(row.task.id)||[]); }
   timeAt(x) { const [start,end] = this.data.range; return Math.min(end - 1e-6, Math.max(start,start + (x - this.left) / (this.width - this.left - this.right) * (end - start))); }
   update(data) { this.data = data; this.draw(); }
   geometry(left, right) { this.left = left; this.right = right; this.draw(); }
   draw() {
     if (!this.data) return;
-    const {tasks, predictions, annotations, expanded, range, time, taskId, selection, timeLabel, taskName, className, t} = this.data;
+    const {tasks, predictions, modelEvents, loading, annotations, expanded, range, time, taskId, selection, timeLabel, taskName, className, t} = this.data;
     this.width = this.canvas.clientWidth;
     if (!this.width) return;
     this.rows = []; let y = 8;
     for (const task of tasks) {
-      const classes = expanded.has(task.id) ? task.classes : [null];
+      const classes = expanded.has(task.id) && expandable(task) ? realClasses(task) : [null];
       for (const klass of classes) { this.rows.push({task, klass, y, height:32}); y += 35; }
     }
     const height = Math.max(92, y + 48), ratio = window.devicePixelRatio || 1;
@@ -127,12 +147,15 @@ export class Timeline {
     const secondary=style.getPropertyValue("--ink-secondary").trim()||"#626a6c",line=style.getPropertyValue("--line").trim()||"#d7d9d8";
     const track=style.getPropertyValue("--track-line").trim()||"#c9cdcb",selectionColor=style.getPropertyValue("--selection").trim()||"#161a1c";
     const cursorColor=style.getPropertyValue("--cursor").trim()||"#687074";
-    const segment=(label,start,end,y,manual=false)=>{
-      const x=xx(Math.max(range[0],start)),w=xx(Math.min(range[1],end))-x;
-      if(w<=0)return;
+    // Probability in steps of ten, spread to 0.3–1 so that unlikely blocks stay visible.
+    const opacity=p=>.3+.7*Math.round(p*10)/10;
+    const segment=(label,start,end,y,manual=false,alpha=1)=>{
+      // Whole pixels: adjacent translucent blocks would otherwise leave light seams.
+      const x=Math.round(xx(Math.max(range[0],start))),w=Math.max(1,Math.round(xx(Math.min(range[1],end)))-x);
+      if(end<=range[0]||start>=range[1])return;
       const negative=isNegativeClass(label);
       if(manual)c.clearRect(x,y+5,w,22);
-      if(!negative){c.fillStyle=labelColor(label);c.fillRect(x,y+7,Math.max(.5,w),16);}
+      if(!negative){c.fillStyle=labelColor(label);c.globalAlpha=alpha;c.fillRect(x,y+7,w,16);c.globalAlpha=1;}
       else if(manual){c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(x,y+15.5);c.lineTo(x+w,y+15.5);c.stroke();}
       c.fillStyle=negative?ink:labelTextColor(label);
       const caption=className(label);
@@ -149,16 +172,16 @@ export class Timeline {
       const label = klass ? `  ${className(klass)}` : taskName(task);
       c.save(); c.beginPath(); c.rect(10,y,this.left - 18,32); c.clip();
       c.fillStyle = task.id === taskId ? ink : secondary;
-      c.fillText((klass ? "" : expanded.has(task.id) ? "▾ " : "▸ ") + label,12,y+15); c.restore();
+      c.fillText((klass || !expandable(task) ? "" : expanded.has(task.id) ? "▾ " : "▸ ") + label,12,y+15); c.restore();
       const baseline=y+(task.kind==="continuous"?25.5:15.5);
       c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(this.left,baseline);c.lineTo(this.width-this.right,baseline);c.stroke();
       c.save(); c.beginPath(); c.rect(this.left,y,plotWidth,32); c.clip();
       const visible = items.some(p => (p.end ?? p.time + task.resolution) > range[0] && (p.start ?? p.time) < range[1]);
-      if (!klass && !visible && task.kind !== "event" && !(task.kind === "continuous" && range[1]-range[0] > 900)) {
-        c.fillStyle = muted; c.fillText(t("Keine Vorhersage in diesem Ausschnitt"), this.left + 8, y + 15);
+      if (!klass && !visible && (loading.has(task.id) || task.kind !== "event") && !(task.kind === "continuous" && range[1]-range[0] > 900)) {
+        c.fillStyle = muted; c.fillText(t(loading.has(task.id) ? "Vorhersage wird geladen …" : "Keine Vorhersage in diesem Ausschnitt"), this.left + 8, y + 15);
       }
       if (task.kind === "continuous") {
-        const labels = klass ? [klass] : task.classes.filter(label=>!isNegativeClass(label));
+        const labels = klass ? [klass] : realClasses(task);
         for (const cls of labels) {
           c.strokeStyle = labelColor(cls); c.lineWidth=isNegativeClass(cls)?1:1.8;
           c.beginPath(); let prev=null;
@@ -172,10 +195,26 @@ export class Timeline {
         }
         if (range[1]-range[0] > 900) { c.fillStyle=muted; c.fillText(t("Für kontinuierliche Werte auf höchstens 15 min zoomen"),this.left+8,y+15); }
       } else {
+        const active=activeModelEvents(modelEvents.get(task.id)||[],annotations);
+        let next=0;
         for (const p of items) {
           if (annotations.labels.some(e => e.task===task.id && Math.abs(e.start-p.start)<1e-6)) continue;
-          if (klass && p.label !== klass) continue;
-          segment(p.label,p.start,p.end,y);
+          // Event tasks show only blocks inside a shown event, in the event's class: a lower
+          // threshold reveals more blocks, while opacity still follows each block's probability.
+          let label = p.label;
+          if (task.kind === "event") {
+            while (next < active.length && active[next].end <= p.start + 1e-6) next++;
+            if (!active[next] || p.start < active[next].start - 1e-6) continue;
+            label = active[next].label;
+          }
+          if (klass && label !== klass) continue;
+          segment(label,p.start,p.end,y,false,opacity(p.probabilities[label]));
+        }
+        // A thin frame shows which blocks form one model event.
+        for (const e of active) {
+          if (e.end<=range[0] || e.start>=range[1] || (klass && e.label!==klass)) continue;
+          const x=xx(e.start),w=xx(e.end)-x;
+          c.strokeStyle=labelColor(e.label);c.lineWidth=1;c.strokeRect(x+.5,y+6.5,Math.max(1,w-1),17);
         }
       }
       for (const edit of annotations.labels.filter(e => e.task===task.id)) {
@@ -187,7 +226,7 @@ export class Timeline {
         if (event.end<=range[0] || event.start>=range[1] || (klass && event.label!==klass)) continue;
         segment(event.label,event.start,event.end,y,true);
       }
-      const marked = this.drag && this.drag.row.task.id === task.id && Math.abs(this.drag.current-this.drag.x)>5
+      const marked = this.drag && !this.drag.pan && this.drag.row.task.id === task.id && Math.abs(this.drag.current-this.drag.x)>5
         ? {start:this.timeAt(Math.min(this.drag.x,this.drag.current)), end:this.timeAt(Math.max(this.drag.x,this.drag.current)),kind:"interval"}
         : selection?.task===task.id ? selection : null;
       if (marked && (!klass || !marked.label || marked.label===klass)) {
@@ -206,5 +245,5 @@ export class Timeline {
     c.textAlign="left";
   }
 }
-import {selectionAt} from "./corrections.js?v=20261026-theme-1";
+import {activeModelEvents, selectionAt} from "./corrections.js?v=20261026-theme-1";
 

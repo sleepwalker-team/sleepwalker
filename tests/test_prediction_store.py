@@ -65,3 +65,22 @@ def test_prediction_store_rejects_duplicate_task_for_session() -> None:
 
     with pytest.raises(ValueError, match="task sleep_stage"):
         store.add(create_result(model_id="model-b"))
+
+
+def test_mapped_records_are_cached_until_the_result_is_replaced() -> None:
+    from dataclasses import replace
+    from datetime import datetime
+
+    from sleepwalker.server.results.predictions import PredictionKind
+
+    store = PredictionStore()
+    frame = pd.DataFrame({"time": [0.5, 1.5], "prob__no_arousal": [0.2, 0.9], "prob__arousal": [0.8, 0.1]})
+    store.add(PredictionResult("sess-test", "model", "arousal", ("no_arousal", "arousal"), 1.0, frame, PredictionKind.EVENT))
+    result = store.get_by_task("sess-test", "arousal")
+    records, events = store.mapped(result, datetime(2025, 1, 1))
+
+    assert store.mapped(result, datetime(2025, 1, 1))[0] is records
+    assert [(event.start, event.end) for event in events] == [(0.0, 1.0)]
+    assert store.mapped(replace(result), datetime(2025, 1, 1))[0] is not records
+    store.delete_session("sess-test")
+    assert store._mapped == {}

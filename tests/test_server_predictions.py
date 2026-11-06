@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from sleepwalker.server.app import create_app
@@ -151,38 +152,19 @@ def test_get_continuous_predictions_returns_probability_samples() -> None:
     }
 
 
-def test_get_event_predictions_returns_explicit_intervals() -> None:
+def test_get_event_predictions_returns_intervals_and_events() -> None:
     app, session = create_prediction_app(
         task="arousal",
         classes=("no_arousal", "arousal"),
-        resolution=1.0,
-        frame=pd.DataFrame(
-            {
-                "start": [12.5, 40.0],
-                "end": [18.0, 45.0],
-                "prob__no_arousal": [0.08, 0.2],
-                "prob__arousal": [0.92, 0.8],
-            }
-        ),
+        resolution=5.0,
+        frame=pd.DataFrame({"time": [7.5, 12.5, 17.5, 42.5], "prob__no_arousal": [0.9, 0.2, 0.4, 0.1], "prob__arousal": [0.1, 0.8, 0.6, 0.9]}),
         kind=PredictionKind.EVENT,
     )
 
     with TestClient(app) as client:
-        response = client.get(
-            f"/api/v1/sessions/{session.id}/predictions/arousal?start=10&end=20"
-        )
+        response = client.get(f"/api/v1/sessions/{session.id}/predictions/arousal?start=11&end=20")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "task": "arousal",
-        "kind": "event",
-        "classes": ["no_arousal", "arousal"],
-        "predictions": [
-            {
-                "start": 12.5,
-                "end": 18.0,
-                "label": "arousal",
-                "probabilities": {"no_arousal": 0.08, "arousal": 0.92},
-            }
-        ],
-    }
+    body = response.json()
+    assert [(p["start"], p["label"]) for p in body["predictions"]] == [(10.0, "arousal"), (15.0, "arousal")]
+    assert body["events"] == [{"id": "model:arousal:10000", "start": 10.0, "end": 20.0, "label": "arousal", "confidence": pytest.approx(0.7)}]

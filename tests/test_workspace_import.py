@@ -24,7 +24,7 @@ from sleepwalker.server.results.workspace import InvalidWorkspaceError, Workspac
 DATA_DIR = Path(__file__).parent / "data"
 
 
-def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resolution=30.0):
+def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resolution=30.0, model_event=None):
     storage = TemporaryStorage(tmp_path / "export")
     app = create_app(temporary_storage=storage)
     session = app.state.session_service.create([])
@@ -35,7 +35,6 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resol
     session.duration = study.duration
     session.recording_start = study.recording_start
     session.signals = study.signals
-    times = {"start": [12.0], "end": [18.0]} if kind == PredictionKind.EVENT else {"time": [epoch_start + epoch_resolution / 2]}
     task = "sleep_stage" if kind == PredictionKind.EPOCH else "arousal"
     result = PredictionResult(
         session_id=session.id,
@@ -44,7 +43,7 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resol
         classes=("negative", "positive"),
         resolution=epoch_resolution if kind == PredictionKind.EPOCH else 1.0,
         kind=kind,
-        frame=pd.DataFrame({**times, "prob__negative": [0.1], "prob__positive": [0.9]}),
+        frame=pd.DataFrame({"time": [epoch_start + epoch_resolution / 2], "prob__negative": [0.1], "prob__positive": [0.9]}),
     )
     app.state.prediction_store.add(result)
     annotations = app.state.annotation_service
@@ -53,8 +52,10 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resol
         annotations.revert(session.id, edit.id)
     else:
         edit = annotations.add_event(session.id, task, 12.0, 18.0, "positive")
-        deletion = annotations.delete_event(session.id, edit.event_id)
+        deletion = annotations.delete_event(session.id, task, edit.event_id)
         annotations.revert(session.id, deletion.id)
+        if model_event:
+            annotations.delete_event(session.id, task, model_event)
 
     documents, sources = app.state.export_service.build_workspace_documents(session)
     path = storage.write_workspace_export(session.id, "export-test", documents, sources, lambda: None)
@@ -136,6 +137,29 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
         assert new_edits[0]["event_id"] != payload["annotations"][0]["event_id"]
         assert len(app.state.annotation_service.snapshot(session.id).events) == 1
     assert app.state.model_catalog.list() == []
+
+
+def test_workspace_keeps_deleted_model_events(tmp_path):
+    # The only interval, 14.5-15.5 s, is a model event.
+    bundle, _, _ = _bundle(tmp_path, PredictionKind.EVENT, model_event="model:arousal:14500")
+    app, session, job, path = _prepare_import(tmp_path, bundle)
+
+    _run_import(app, session, job, path)
+
+    assert job.state == JobState.SUCCEEDED
+    assert [edit.event_id for edit in app.state.annotation_service.snapshot(session.id).deleted_events] == ["model:arousal:14500"]
+
+
+def test_workspace_rejects_deletion_of_unknown_model_event(tmp_path):
+    bundle, _, _ = _bundle(tmp_path, PredictionKind.EVENT, model_event="model:arousal:14500")
+    target = _alter_bundle(bundle, tmp_path / "altered.zip", lambda contents: _edit_json(
+        contents, "annotations/edits.json", lambda edits: edits[-1].update(event_id="model:arousal:99000"),
+    ))
+    app, session, job, path = _prepare_import(tmp_path, target)
+
+    _run_import(app, session, job, path)
+
+    assert job.state == JobState.FAILED
 
 
 @pytest.mark.parametrize(("start", "resolution"), [(35.0, 10.0), (25.0, 5.0), (300.0, 30.0)])

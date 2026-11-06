@@ -3,7 +3,7 @@ import math
 from fastapi import APIRouter, status
 
 from ..core.sessions import SessionState
-from ..results.annotations import AnnotationEdit, AnnotationEditNotFoundError, AnnotationEventNotFoundError, AnnotationOperation
+from ..results.annotations import AnnotationEdit, AnnotationEditNotFoundError, AnnotationOperation
 from ..results.predictions import PredictionKind, PredictionResult, epoch_starts, resolve_epoch_start
 from .deps import Annotations, Predictions, SessionDep, require_ready
 from .errors import bad_request, conflict, not_found
@@ -34,6 +34,7 @@ def get_annotations(session: SessionDep, annotations: Annotations) -> Annotation
         edits=[to_annotation_response(edit) for edit in snapshot.edits],
         labels=[to_annotation_response(edit) for edit in snapshot.labels],
         events=[to_annotation_response(edit) for edit in snapshot.events],
+        deleted_events=[to_annotation_response(edit) for edit in snapshot.deleted_events],
     )
 
 
@@ -75,13 +76,13 @@ def create_annotation(session: SessionDep, payload: AnnotationRequest, predictio
         edit = annotations.add_event(session.id, task.task, start, end, label)
     else:
         event_id = _required(payload.event_id, "event_id")
-        event_not_found = not_found("EVENT_NOT_FOUND", "Annotation event not found.", {"event_id": event_id})
-        if not any(event.event_id == event_id and event.task == task.task for event in annotations.snapshot(session.id).events):
-            raise event_not_found
-        try:
-            edit = annotations.delete_event(session.id, event_id)
-        except AnnotationEventNotFoundError as exc:
-            raise event_not_found from exc
+        snapshot = annotations.snapshot(session.id)
+        human = {event.event_id for event in snapshot.events if event.task == task.task}
+        model = {event.id for event in predictions.mapped(task, session.recording_start)[1]} if task.kind == PredictionKind.EVENT else set()
+        model -= {edit.event_id for edit in snapshot.deleted_events}
+        if event_id not in human | model:
+            raise not_found("EVENT_NOT_FOUND", "Annotation event not found.", {"event_id": event_id})
+        edit = annotations.delete_event(session.id, task.task, event_id)
 
     return to_annotation_response(edit)
 

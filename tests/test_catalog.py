@@ -37,6 +37,14 @@ def test_read_model_manifest_without_loading_payload(make_model_package):
     assert (path / "model.pt").read_bytes() == before
 
 
+@pytest.mark.parametrize(("classes", "kind"), [(["wake", "n1"], PredictionKind.EPOCH), (["no_arousal", "arousal"], PredictionKind.EVENT), (["apnea", "hypopnea", "regular breathing"], PredictionKind.EVENT)])
+def test_manifest_detects_event_tasks_by_their_background_class(make_model_package, classes, kind):
+    path, metadata = make_model_package()
+    metadata["classification"]["classes"] = classes
+    save_manifest(path, metadata)
+    assert read_model_manifest(path).output_kind == kind
+
+
 @pytest.mark.parametrize(("sequence_len", "target_resolution", "expected"), [(1, "30s", 30), (40, "40s", 1), (8, "40s", 5), (8, "80s", 10)])
 def test_manifest_uses_resolution_per_output_step(make_model_package, sequence_len, target_resolution, expected):
     path, _ = make_model_package(sequence_len=sequence_len, target_resolution=target_resolution)

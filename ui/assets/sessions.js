@@ -10,7 +10,7 @@ export function knownSessions(value) {
 export function sessionSnapshot(state, now=Date.now()) {
   return {id:state.session.id,title:state.title,job:state.job,export:state.export,
     range:[...state.range],time:state.time,taskId:state.taskId,channels:[...state.channels],
-    mode:state.mode,absolute:state.absolute,expanded:[...state.expanded],updatedAt:now};
+    mode:state.mode,absolute:state.absolute,expanded:[...state.expanded],thresholds:{...state.thresholds},updatedAt:now};
 }
 
 export function rememberKnownSession(entries, snapshot) {

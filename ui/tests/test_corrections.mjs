@@ -77,3 +77,24 @@ test("interval deletion removes each active correction and only fully contained 
   assert.equal(selectedCorrections({kind:"label",editId:"edit_30"},epoch,annotations).length,1);
   assert.equal(selectedCorrections({kind:"prediction",start:0,end:90},epoch,annotations).length,0);
 });
+
+test("model events are selectable and deletable until deleted",()=>{
+  const models=[{id:"model:arousal:10000",start:10,end:20,label:"arousal",confidence:.8}];
+  const annotations={labels:[],events:[],deleted_events:[]};
+  const predictions=[{start:10,end:11,label:"arousal",probabilities:{arousal:.8,no_arousal:.2}}];
+  const selected=selectionAt(event,predictions,annotations,10.5,null,models);
+  assert.deepEqual([selected.kind,selected.source,selected.eventId,selected.end],["event","model","model:arousal:10000",20]);
+  assert.deepEqual(selectedCorrections(selected,event,annotations,models),[{operation:"delete_event",task:"arousal",event_id:"model:arousal:10000"}]);
+  assert.equal(selectedCorrections({kind:"interval",start:0,end:30},event,annotations,models).length,1);
+  annotations.deleted_events=[{event_id:"model:arousal:10000"}];
+  assert.equal(selectionAt(event,predictions,annotations,10.5,null,models).kind,"prediction");
+  assert.equal(selectedCorrections({kind:"interval",start:0,end:30},event,annotations,models).length,0);
+});
+
+test("a lower threshold reveals more model events in the event's class",async()=>{
+  const {thresholdEvents}=await import(new URL("../assets/timeline.js",import.meta.url));
+  const task={id:"breathing",classes:["apnea","hypopnea","regular breathing"]};
+  const items=[[.1,.1,.8],[.3,.2,.5],[.6,.3,.1],[.2,.35,.45]].map((p,i)=>({start:i,end:i+1,probabilities:{apnea:p[0],hypopnea:p[1],"regular breathing":p[2]}}));
+  assert.deepEqual(thresholdEvents(task,items,.5).map(e=>[e.id,e.start,e.end,e.label]),[["model:breathing:2000",2,3,"apnea"]]);
+  assert.deepEqual(thresholdEvents(task,items,.3).map(e=>[e.start,e.end,e.label]),[[1,3,"apnea"],[3,4,"hypopnea"]]);
+});

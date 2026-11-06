@@ -1,10 +1,11 @@
 """Model results per session and their conversion to API-facing records.
 
-A result's frame holds `prob__<class>` columns plus `time` (epoch: interval
-center; continuous: sample time) or `start`/`end` (event).
+A result's frame holds `prob__<class>` columns plus `time` (epoch and event:
+interval center; continuous: sample time). Events are derived from the intervals.
 """
 
 import math
+import re
 from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -35,7 +36,7 @@ class PredictionResult:
 
 @dataclass(frozen=True)
 class IntervalPrediction:
-    """One epoch or event."""
+    """One fixed interval of an epoch or event task."""
 
     start: float
     end: float
@@ -51,11 +52,29 @@ class PointPrediction:
     probabilities: dict[str, float]
 
 
+@dataclass(frozen=True)
+class ModelEvent:
+    """Consecutive intervals whose most likely class is the same non-background class."""
+
+    id: str
+    start: float
+    end: float
+    label: str
+    confidence: float
+
+
+def background_class(classes: Sequence[str]) -> str | None:
+    """The single "nothing happens" class of an event task; same rule as `isNegativeClass` in the UI."""
+    background = [label for label in classes if re.match(r"(no(?:[ _-]|$)|kein|regular breathing$|none$)", label, re.IGNORECASE)]
+    return background[0] if len(background) == 1 else None
+
+
 class PredictionStore:
     """Holds at most one result per session and task."""
 
     def __init__(self) -> None:
         self._results: dict[tuple[str, str], PredictionResult] = {}
+        self._mapped: dict[tuple[str, str], tuple] = {}
         self._lock = RLock()
 
     def add(self, result: PredictionResult) -> None:
@@ -83,6 +102,17 @@ class PredictionStore:
         with self._lock:
             return self._results.get((session_id, task))
 
+    def mapped(self, result: PredictionResult, recording_start: datetime) -> tuple[list[IntervalPrediction | PointPrediction], list[ModelEvent]]:
+        """Records and events of a result, computed once: results are replaced, never changed in place."""
+        key = (result.session_id, result.task)
+        with self._lock:
+            cached = self._mapped.get(key)
+        if cached is None or cached[0] is not result:
+            cached = (result, map_predictions(result, recording_start), model_events(result, recording_start))
+            with self._lock:
+                self._mapped[key] = cached
+        return cached[1], cached[2]
+
     def list_for_session(self, session_id: str) -> list[PredictionResult]:
         with self._lock:
             results = [result for (stored_session_id, _), result in self._results.items() if stored_session_id == session_id]
@@ -93,6 +123,7 @@ class PredictionStore:
             keys = [key for key in self._results if key[0] == session_id]
             for key in keys:
                 del self._results[key]
+                self._mapped.pop(key, None)
             return len(keys)
 
 
@@ -100,8 +131,7 @@ def map_predictions(result: PredictionResult, recording_start: datetime) -> list
     """Convert a stored frame to time-sorted records; raises ValueError if it is malformed."""
     frame = result.frame
     columns = [f"prob__{label}" for label in result.classes]
-    required = ["start", "end", *columns] if result.kind == PredictionKind.EVENT else ["time", *columns]
-    missing = [column for column in required if column not in frame.columns]
+    missing = [column for column in ["time", *columns] if column not in frame.columns]
     if missing:
         raise ValueError(f"Prediction frame is missing columns: {', '.join(missing)}")
 
@@ -110,26 +140,40 @@ def map_predictions(result: PredictionResult, recording_start: datetime) -> list
         raise ValueError("Prediction frame contains non-finite probabilities.")
     rows = [dict(zip(result.classes, row)) for row in probabilities.tolist()]
 
-    if result.kind == PredictionKind.EVENT:
-        starts = _relative_seconds(frame["start"], recording_start)
-        ends = _relative_seconds(frame["end"], recording_start)
-        if (starts < 0).any() or (ends <= starts).any():
-            raise ValueError("Event prediction frame contains an invalid time range.")
-        order = np.lexsort((ends, starts))
-    else:
-        times = _relative_seconds(frame["time"], recording_start)
-        if len(np.unique(times)) != len(times):
-            raise ValueError("Prediction frame contains duplicate times.")
-        order = np.argsort(times)
+    times = _relative_seconds(frame["time"], recording_start)
+    if len(np.unique(times)) != len(times):
+        raise ValueError("Prediction frame contains duplicate times.")
+    order = np.argsort(times)
 
     if result.kind == PredictionKind.CONTINUOUS:
         return [PointPrediction(float(times[i]), rows[i]) for i in order]
-    if result.kind == PredictionKind.EPOCH:
-        half = result.resolution / 2
-        starts, ends = times - half, times + half
+    half = result.resolution / 2
     return [
-        IntervalPrediction(float(starts[i]), float(ends[i]), max(result.classes, key=rows[i].__getitem__), rows[i])
+        IntervalPrediction(float(times[i] - half), float(times[i] + half), max(result.classes, key=rows[i].__getitem__), rows[i])
         for i in order
+    ]
+
+
+def model_events(result: PredictionResult, recording_start: datetime) -> list[ModelEvent]:
+    """Merge adjacent intervals with the same non-background class; IDs are stable across export and import."""
+    if result.kind != PredictionKind.EVENT:
+        return []
+    background = background_class(result.classes)
+    groups: list[list[IntervalPrediction]] = []
+    for interval in map_predictions(result, recording_start):
+        if interval.label == background:
+            continue
+        last = groups[-1][-1] if groups else None
+        if last and last.label == interval.label and math.isclose(last.end, interval.start, abs_tol=1e-6):
+            groups[-1].append(interval)
+        else:
+            groups.append([interval])
+    return [
+        ModelEvent(
+            f"model:{result.task}:{round(group[0].start * 1000)}", group[0].start, group[-1].end, group[0].label,
+            sum(interval.probabilities[interval.label] for interval in group) / len(group),
+        )
+        for group in groups
     ]
 
 

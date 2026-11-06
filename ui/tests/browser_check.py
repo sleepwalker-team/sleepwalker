@@ -38,7 +38,7 @@ def main():
         expect(page.locator("#pan-tool")).to_have_attribute("aria-pressed", "true")
         page.locator("#select-tool").click()
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
-        expect(page.locator("#task-select option")).to_have_count(3, timeout=30000)
+        expect(page.locator("#task-rows [data-task]")).to_have_count(3, timeout=30000)
         expect(page.locator("#prediction-label")).to_have_text("N2", timeout=30000)
         expect(page.locator("#timeline-legend .legend-task")).to_have_count(3)
         # Verify the rendered design, including transparent space above a thin
@@ -99,7 +99,7 @@ def main():
         plot_frame.wait_for_function("document.querySelector('.js-plotly-plot')?.data?.length === 1")
 
         # Event and continuous tasks support separate human intervals.
-        page.locator("#task-select").select_option("arousal")
+        page.locator("#task-rows [data-task=arousal]").click()
         x,y=timeline_point(45,1,(40,70))
         end_x,_=timeline_point(49,1,(40,70))
         page.mouse.move(x,y);page.mouse.down();page.mouse.move(end_x,y,steps=8);page.mouse.up()
@@ -118,7 +118,7 @@ def main():
         expect(page.locator("#notice-text")).to_have_text("Änderung gelöscht.")
         assert not context.request.get(f"{args.url}/api/v1/sessions/{session_id}/annotations").json()["events"]
 
-        page.locator("#task-select").select_option("desaturation")
+        page.locator("#task-rows [data-task=desaturation]").click()
         expect(page.locator("#prediction-confidence")).not_to_have_text("")
 
         # Full workspace download and import preserve predictions and history.
@@ -138,14 +138,14 @@ def main():
         page.reload()
         expect(page.locator("#connection-status")).to_have_text("Verbunden")
         expect(page.locator("#viewer")).to_be_visible()
-        expect(page.locator("#task-select option")).to_have_count(3)
+        expect(page.locator("#task-rows [data-task]")).to_have_count(3)
         page.locator("#close-open").click()
         page.locator("#close-delete").click()
         expect(page.locator("#entry")).to_be_visible()
         assert context.request.get(f"{args.url}/api/v1/sessions/{session_id}").status == 404
         page.locator("#workspace-file").set_input_files(workspace)
         expect(page.locator("#viewer")).to_be_visible()
-        expect(page.locator("#task-select option")).to_have_count(3, timeout=30000)
+        expect(page.locator("#task-rows [data-task]")).to_have_count(3, timeout=30000)
         expect(page.locator("#history")).to_contain_text("Rückgängig")
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
         expect(page.locator("#prediction-loading")).to_be_hidden(timeout=30000)

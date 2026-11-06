@@ -29,7 +29,7 @@ def main():
         expect(page.locator("#plot-loading")).to_be_hidden(timeout=30000)
         # Pan is the default; corrections need the selection tool.
         page.locator("#select-tool").click()
-        expect(page.locator("#task-select option")).to_have_count(3)
+        expect(page.locator("#task-rows [data-task]")).to_have_count(3)
         expect(page.locator("#prediction-label")).to_have_text("N2")
         frame=next(f for f in page.frames if "/ui/plot/" in f.url)
         frame.wait_for_function("document.querySelector('.js-plotly-plot')?.layout.dragmode==='select'")

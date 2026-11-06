@@ -321,10 +321,8 @@ async function refreshTasks() {
 }
 function updateTaskOptions() {
   state.tasks.sort((a,b)=>{const order=["sleep","sleep_stage","arousal","breathing","desaturation"];const ai=order.indexOf(a.id),bi=order.indexOf(b.id);return (ai<0?99:ai)-(bi<0?99:bi)||a.name.localeCompare(b.name);});
-  const select=$("task-select");select.replaceChildren();for(const task of state.tasks)select.add(new Option(taskName(task),task.id));
   if(!state.tasks.some(t=>t.id===state.taskId))state.taskId=state.tasks[0]?.id||null;
-  if(state.taskId)select.value=state.taskId;
-  select.disabled=!state.tasks.length;text("task-count",t`${state.tasks.length} Tasks`);renderContext();drawTimeline();
+  text("task-count",t`${state.tasks.length} Tasks`);renderContext();drawTimeline();
   if(!state.job)text("inference-state",state.tasks.length?t`${state.tasks.length} Ergebnisspuren`:t("Signale bereit"));
 }
 async function refreshAnnotations() {
@@ -423,11 +421,33 @@ function selectTime(time,taskId=state.taskId,keepInterval=false) {
   if(!state.session)return;state.time=Math.max(0,Math.min(time,state.session.duration-1e-6));state.taskId=taskId;
   if(!keepInterval){state.interval=null;state.selection=null;}
   closeSelectionMenu();
-  if(taskId)$("task-select").value=taskId;
   $("goto-time").value=formatTime(state.time);
   sendPlot("cursor",{time:state.time});sendPlot("interval",{range:state.interval});renderContext();drawTimeline();rememberSession();
 }
+// What a task says at a time, as in its track: a human change first, then the model.
+function taskSummary(task,time) {
+  const items=state.predictions.get(task.id)||[],prediction=currentPrediction(task,items,time);
+  const hit=selectionAt(task,items,state.annotations,time,null,displayedEvents(task.id));
+  const manual=hit?.kind==="label"||hit?.kind==="event"&&hit.source!=="model";
+  // Outside an event, an event track shows nothing: the background class.
+  const label=task.kind==="event"&&hit?.kind==="prediction"?task.classes.find(isNegativeClass):hit?.label??prediction?.label;
+  return {label,manual,value:prediction?.probabilities?.[label]};
+}
+function renderTaskRows() {
+  const rows=$("task-rows"),focused=rows.contains(document.activeElement)?document.activeElement.dataset.task:null;
+  rows.replaceChildren();
+  for(const task of state.tasks) {
+    const {label,manual,value}=taskSummary(task,state.time),row=element("button",undefined,"task-row");
+    row.dataset.task=task.id;row.setAttribute("aria-pressed",String(task.id===state.taskId));
+    const swatch=element("span",undefined,label&&!isNegativeClass(label)?"legend-swatch":"legend-line");
+    swatch.style.setProperty("--class-color",label?labelColor(label):"transparent");
+    row.append(swatch,element("span",taskName(task)),element("span",label?className(label):"—"),element("span",manual?"M":Number.isFinite(value)?`${Math.round(value*100)} %`:"","mono small"));
+    rows.append(row);
+    if(task.id===focused)row.focus();
+  }
+}
 function renderContext() {
+  renderTaskRows();
   const task=state.tasks.find(t=>t.id===state.taskId),items=state.predictions.get(state.taskId)||[];
   const prediction=currentPrediction(task,items,state.time);
   const selected=state.interval||(prediction&&task?.kind==="epoch"?[prediction.start,prediction.end]:null);
@@ -854,7 +874,7 @@ bind("previous",()=>navigate(-1));bind("next",()=>navigate(1));
 $("window-size").addEventListener("change",()=>{const width=$("window-size").value==="all"?state.session.duration:Number($("window-size").value);setRange(state.range[0],state.range[0]+width);});
 $("goto-form").addEventListener("submit",event=>{event.preventDefault();const value=$("goto-time").value;if(!/^\d+:[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)){notice(t("Zeit als HH:MM:SS eingeben."),true);return;}const [h,m,s]=value.split(":").map(Number);const time=h*3600+m*60+s;if(time>=state.session.duration){notice(t("Der Zeitpunkt liegt außerhalb der Aufnahme."),true);return;}const width=state.range[1]-state.range[0];setRange(time,time+width);selectTime(time);});
 bind("time-mode",()=>{state.absolute=!state.absolute;text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));renderRange();renderContext();drawTimeline();rememberSession();});
-$("task-select").addEventListener("change",()=>selectTime(state.time,$("task-select").value));
+$("task-rows").addEventListener("click",event=>{const row=event.target.closest("[data-task]");if(row)selectTime(state.time,row.dataset.task);});
 bind("refresh-annotations",refreshAnnotations);
 bind("select-tool",()=>setInteractionMode("select"));bind("pan-tool",()=>setInteractionMode("pan"));bind("zoom-tool",()=>setInteractionMode("zoom"));
 $("threshold").addEventListener("input",()=>setThreshold(Number($("threshold").value)));bind("threshold-reset",()=>setThreshold(null));

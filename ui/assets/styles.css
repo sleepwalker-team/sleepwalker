@@ -128,6 +128,11 @@ progress { width:100%; height:5px; accent-color:var(--progress); }
 .inspector section > p:last-child { margin-bottom:0; }
 .inspector label { font-size:12px; }
 .prediction-label { margin:24px 0 18px; }
+.task-rows { display:grid; gap:2px; margin-top:10px; }
+.task-row { display:grid; grid-template-columns:10px max-content minmax(0,1fr) 38px; align-items:center; gap:8px; min-height:30px; padding:0 8px; border-color:transparent; background:transparent; text-align:left; font-size:12px; }
+.task-row > span:nth-child(3) { font-weight:600; text-align:right; overflow-wrap:anywhere; }
+.task-row > span:last-child { text-align:right; }
+.task-row[aria-pressed=true] { background:var(--active-bg); border-color:var(--active-line); }
 .threshold-row { display:grid; grid-template-columns:1fr auto; align-items:center; gap:4px 10px; margin-top:10px; }
 .threshold-row input { grid-column:1 / -1; width:100%; }
 .prediction-value { display:flex; justify-content:space-between; align-items:center; gap:15px; }

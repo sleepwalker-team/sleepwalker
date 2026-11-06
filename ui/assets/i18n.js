@@ -186,6 +186,8 @@ export const english = {
   "Eigenes Ereignis": "Manual event",
   "Modell-Ereignis": "Model event",
   "Zoomen": "Zoom",
+  "Zum Zeitpunkt": "At this time",
+  "Aufgaben": "Tasks",
   "Bereich markieren und hineinzoomen": "Mark a range and zoom into it",
   "Ziehen: Bereich vergrößern · Scrollen: zoomen · Rechtsklick: Auswahl bearbeiten": "Drag: zoom into range · Scroll: zoom · Right-click: edit selection",
   "Vorhersage wird geladen …": "Loading prediction …",

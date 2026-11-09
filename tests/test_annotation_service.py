@@ -88,3 +88,19 @@ def test_annotation_snapshot_keeps_history_and_resolved_state_consistent() -> No
     assert current.labels[0].label == "n3"
     assert current.events == []
     assert [edit.event_id for edit in current.deleted_events] == [event.event_id]
+
+
+def test_reverting_a_revert_restores_the_edit_until_it_is_reverted_again() -> None:
+    service = AnnotationService()
+    label = service.set_label("sess-test", "sleep_stage", 30.0, "n3")
+    undo = service.revert("sess-test", label.id)
+    redo = service.revert("sess-test", undo.id)
+
+    assert service.snapshot("sess-test").labels == [label]
+    with pytest.raises(AnnotationEditNotFoundError):
+        service.revert("sess-test", undo.id)
+
+    service.revert("sess-test", label.id)
+    assert service.snapshot("sess-test").labels == []
+    service.revert("sess-test", redo.id)
+    assert service.snapshot("sess-test").labels == []

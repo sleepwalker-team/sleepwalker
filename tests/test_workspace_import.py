@@ -24,7 +24,7 @@ from sleepwalker.server.results.workspace import InvalidWorkspaceError, Workspac
 DATA_DIR = Path(__file__).parent / "data"
 
 
-def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resolution=30.0, model_event=None):
+def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resolution=30.0, model_event=None, redo=False):
     storage = TemporaryStorage(tmp_path / "export")
     app = create_app(temporary_storage=storage)
     session = app.state.session_service.create([])
@@ -49,7 +49,9 @@ def _bundle(tmp_path, kind=PredictionKind.EPOCH, *, epoch_start=0.0, epoch_resol
     annotations = app.state.annotation_service
     if kind == PredictionKind.EPOCH:
         edit = annotations.set_label(session.id, task, epoch_start, "negative")
-        annotations.revert(session.id, edit.id)
+        undo = annotations.revert(session.id, edit.id)
+        if redo:
+            annotations.revert(session.id, undo.id)
     else:
         edit = annotations.add_event(session.id, task, 12.0, 18.0, "positive")
         deletion = annotations.delete_event(session.id, task, edit.event_id)
@@ -137,6 +139,16 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
         assert new_edits[0]["event_id"] != payload["annotations"][0]["event_id"]
         assert len(app.state.annotation_service.snapshot(session.id).events) == 1
     assert app.state.model_catalog.list() == []
+
+
+def test_workspace_keeps_restored_edits(tmp_path):
+    bundle, _, _ = _bundle(tmp_path, redo=True)
+    app, session, job, path = _prepare_import(tmp_path, bundle)
+
+    _run_import(app, session, job, path)
+
+    assert job.state == JobState.SUCCEEDED
+    assert len(app.state.annotation_service.snapshot(session.id).labels) == 1
 
 
 def test_workspace_keeps_deleted_model_events(tmp_path):

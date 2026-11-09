@@ -1,6 +1,6 @@
 """Recognise uploaded study files and read their metadata."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -36,6 +36,8 @@ class StudyInfo:
     duration: float | None = None
     recording_start: datetime | None = None
     signals: list[SignalInfo] | None = None
+    # Only what the recording states: "sex" as written, "age" in whole years.
+    patient: dict = field(default_factory=dict)
 
 
 def validate_study(files: list[Path]) -> StudyInfo:
@@ -82,11 +84,31 @@ def validate_edf(path: Path) -> StudyInfo:
             duration=duration,
             recording_start=reader.getStartdatetime(),
             signals=signals,
+            patient=read_patient(path, reader.getStartdatetime()),
         )
     except (OSError, ValueError, RuntimeError) as exc:
         raise InvalidStudyError("File is not a valid or readable EDF file.") from exc
     finally:
         reader.close()
+
+
+def read_patient(path: Path, recording_start: datetime) -> dict:
+    """Read sex and age from the EDF+ patient field ("code sex birthdate name"); "X" means unknown.
+
+    The raw field is used because pyedflib already interprets the sex code.
+    """
+    with path.open("rb") as file:
+        header = file.read(256)
+    if header[192:196] not in (b"EDF+", b"BDF+"):
+        return {}
+    fields = header[8:88].decode("ascii", "replace").split() + ["X", "X"]
+    patient = {"sex": fields[1]} if fields[1] != "X" else {}
+    try:
+        birth = datetime.strptime(fields[2], "%d-%b-%Y")
+    except ValueError:
+        return patient
+    patient["age"] = recording_start.year - birth.year - ((recording_start.month, recording_start.day) < (birth.month, birth.day))
+    return patient
 
 
 def looks_like_nox_study(files: list[Path]) -> bool:

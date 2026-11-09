@@ -39,6 +39,7 @@ class Session:
     signals: list[SignalInfo] | None = None
     # Metadata of the exact models behind this session's predictions.
     model_provenance: list[dict] = field(default_factory=list)
+    patient: dict = field(default_factory=dict)
 
     def apply_study(self, study: StudyInfo) -> None:
         self.source_files = study.source_files
@@ -46,6 +47,7 @@ class Session:
         self.duration = study.duration
         self.recording_start = study.recording_start
         self.signals = study.signals
+        self.patient = study.patient
 
 
 class SessionService:

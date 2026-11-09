@@ -384,3 +384,17 @@ def test_model_event_can_be_deleted_once_and_restored() -> None:
     assert deleted.status_code == 201
     assert [edit["event_id"] for edit in listed] == [event_id]
     assert annotations.snapshot(session.id).deleted_events == []
+
+
+def test_a_revert_can_be_reverted_once_through_the_api() -> None:
+    app, session, annotations = create_annotation_app()
+    url = f"/api/v1/sessions/{session.id}/annotations"
+    with TestClient(app) as client:
+        label = client.post(url, json={"operation": "set_label", "task": "sleep_stage", "start": 30.0, "label": "n3"}).json()
+        undo = client.post(url, json={"operation": "revert", "edit_id": label["edit_id"]}).json()
+        redo = client.post(url, json={"operation": "revert", "edit_id": undo["edit_id"]})
+        again = client.post(url, json={"operation": "revert", "edit_id": undo["edit_id"]})
+
+    assert redo.status_code == 201
+    assert again.status_code == 404
+    assert [edit.label for edit in annotations.snapshot(session.id).labels] == ["n3"]

@@ -304,7 +304,7 @@ async function activateSession(session,{title,saved}={}) {
   if(Number.isFinite(saved?.time))state.time=Math.max(0,Math.min(saved.time,(session.duration||1)-1e-6));
   state.absolute=Boolean(saved?.absolute);text("time-mode",state.absolute?t("Aufnahmeuhrzeit"):t("Zeit seit Aufnahmebeginn"));
   setInteractionMode(["select","zoom"].includes(saved?.mode)?saved.mode:"pan");setSessionURL(session.id);
-  state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",t`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`);
+  state.tasks=session.tasks||[];setViewer(true);text("study-title",state.title);text("study-meta",studyMeta(session));
   text("recording-start",session.recording_start?.replace("T"," ")||"—");text("expires-at",session.expires_at ? new Date(session.expires_at).toLocaleTimeString(locale()) : "—");
   show("plot-loading");show("signal-frame",session.state==="ready");
   state.job=saved?.job||null;state.export=saved?.export||null;
@@ -471,18 +471,34 @@ function renderContext() {
   text("viewer-status",t`Auswahl: ${timeLabel(state.time)}${task?` · ${taskName(task)}`:""}${human?t(" · manuell korrigiert"):""}`);
   text("timeline-summary",task?t`${taskName(task)} bei ${timeLabel(state.time)}: ${human?className(human.label):prediction?className(prediction.label):t("keine Vorhersage")}`:t("Keine Ergebnisspuren verfügbar."));
 }
+// Patient fields only as the EDF states them; the sex code is shown as written, not interpreted.
+function studyMeta(session) {
+  let meta=t`${session.format?.toUpperCase()||"EDF"} · ${formatTime(session.duration||0)} · temporäre Session`;
+  const {age,sex}=session.patient||{};
+  if(Number.isFinite(age))meta=t`${meta} · ${t`${age} J.`}`;
+  if(sex)meta=t`${meta} · ${t`Geschlecht: ${sex}`}`;
+  return meta;
+}
 function renderHistory() {
   const container=$("history");container.replaceChildren();const edits=state.annotations.edits;
   if(!edits.length){container.append(element("p",t("Noch keine Änderungen."),"muted small"));return;}
-  const reverted=new Set(edits.filter(e=>e.operation==="revert").map(e=>e.reverted_edit_id));
+  // Active reverts by target, decided from the end like on the server: reverting a revert restores its target.
+  const byId=new Map(edits.map(e=>[e.edit_id,e])),undoneBy=new Map();
+  for(const edit of [...edits].reverse())if(edit.operation==="revert"&&!undoneBy.has(edit.edit_id))undoneBy.set(edit.reverted_edit_id,edit);
   const shown=container.dataset.expanded==="true"?edits:[...edits].slice(-8);
   for(const edit of [...shown].reverse()) {
     const row=element("div",undefined,"history-item"),heading=element("div");
     heading.append(element("span",Number.isFinite(edit.start)?formatTime(edit.start,true):new Date(edit.created_at).toLocaleTimeString(locale()),"mono small"));
-    const operation={set_label:t`Klasse: ${className(edit.label)}`,add_event:t`Ereignis: ${className(edit.label)}`,delete_event:t("Ereignis gelöscht"),revert:t("Rückgängig")}[edit.operation]||edit.operation;
+    const target=byId.get(edit.reverted_edit_id);
+    const operation={set_label:t`Klasse: ${className(edit.label)}`,add_event:t`Ereignis: ${className(edit.label)}`,delete_event:t("Ereignis gelöscht"),revert:target?.operation==="revert"?t("Wiederhergestellt"):t("Rückgängig")}[edit.operation]||edit.operation;
     heading.append(element("span",operation,"small"));row.append(heading);
-    row.append(element("p",`${t(taskNames[edit.task]||edit.task)||t("Verlauf")}${reverted.has(edit.edit_id)?t(" · zurückgenommen"):""}`,"muted small"));
-    if(edit.operation!=="revert"&&!reverted.has(edit.edit_id)) { const button=element("button",t("Rückgängig"),"text-button");button.disabled=state.mutation;button.addEventListener("click",()=>annotate({operation:"revert",edit_id:edit.edit_id}).catch(handleError));row.append(button); }
+    // A revert belongs to the task of the change it finally refers to.
+    let source=edit;while(source?.operation==="revert")source=byId.get(source.reverted_edit_id);
+    row.append(element("p",`${source?.task?t(taskNames[source.task]||source.task):t("Verlauf")}${undoneBy.has(edit.edit_id)?t(" · zurückgenommen"):""}`,"muted small"));
+    if(edit.operation!=="revert") {
+      const undo=undoneBy.get(edit.edit_id),button=element("button",undo?t("Wiederherstellen"):t("Rückgängig"),"text-button");
+      button.disabled=state.mutation;button.addEventListener("click",()=>annotate({operation:"revert",edit_id:(undo||edit).edit_id}).catch(handleError));row.append(button);
+    }
     container.append(row);
   }
   if(edits.length>8&&container.dataset.expanded!=="true"){const button=element("button",t`Alle ${edits.length} Änderungen anzeigen`,"text-button small");button.addEventListener("click",()=>{container.dataset.expanded="true";renderHistory();});container.append(button);}

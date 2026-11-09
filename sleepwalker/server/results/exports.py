@@ -170,6 +170,7 @@ def _session_metadata(session: Session) -> dict:
         "format": session.format.value if session.format is not None else None,
         "duration": session.duration,
         "recording_start": _format_datetime(session.recording_start) if session.recording_start is not None else None,
+        "patient": session.patient,
         "signals": [
             {"id": signal.id, "label": signal.label, "unit": signal.unit, "sample_rate": signal.sample_rate}
             for signal in session.signals or []

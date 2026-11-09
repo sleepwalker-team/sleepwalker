@@ -94,6 +94,7 @@ class WorkspaceMetadata(WorkspaceDocument):
     duration: PositiveNumber
     recording_start: datetime
     signals: list[WorkspaceSignal] = Field(min_length=1)
+    patient: dict[Text, int | str] = {}
 
 
 class WorkspaceTask(WorkspaceDocument):
@@ -374,6 +375,7 @@ class WorkspaceImportService:
             session.duration = None
             session.recording_start = None
             session.signals = None
+            session.patient = {}
             session.model_provenance = []
             session.state = SessionState.FAILED
 
@@ -503,9 +505,8 @@ def _restore_edits(
                 value is not None for value in (edit.task, edit.start, edit.end, edit.label, edit.event_id)
             ):
                 raise InvalidWorkspaceError("Workspace annotation revert is invalid.")
-            target = old_edits[edit.reverted_edit_id]
-            previous_reverts = {previous.reverted_edit_id for previous in old_edits.values()}
-            if target.operation == AnnotationOperation.REVERT or target.id in previous_reverts:
+            # Like AnnotationService.revert: only an edit that is active at this point can be reverted.
+            if edit_ids[edit.reverted_edit_id] in AnnotationService._reverted_ids(restored):
                 raise InvalidWorkspaceError("Workspace annotation revert refers to an invalid edit.")
             values["reverted_edit_id"] = edit_ids[edit.reverted_edit_id]
 

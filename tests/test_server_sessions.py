@@ -330,3 +330,22 @@ def test_get_session_includes_prediction_tasks(tmp_path) -> None:
             "resolution": 30.0,
         }
     ]
+
+
+def test_session_reports_patient_fields_only_as_stated_in_the_edf(session_api, tmp_path):
+    from datetime import datetime
+
+    import numpy as np
+    from pyedflib import highlevel
+
+    client, _, _ = session_api
+    path = tmp_path / "patient.edf"
+    header = highlevel.make_header(startdate=datetime(2025, 3, 1, 22, 0), sex="F", birthdate="15 jun 1971")
+    highlevel.write_edf(str(path), [np.zeros(100)], [highlevel.make_signal_header("EEG", sample_frequency=10)], header=header)
+
+    def patient(file):
+        with file.open("rb") as handle:
+            return client.post("/api/v1/sessions", files=[("files", (file.name, handle, "application/octet-stream"))]).json()["patient"]
+
+    assert patient(path) == {"sex": "F", "age": 53}
+    assert patient(DATA_DIR / "signals_01.edf") == {}

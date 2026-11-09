@@ -61,7 +61,6 @@ class AnnotationService:
         if (
             edit is None
             or edit.session_id != session_id
-            or edit.operation == AnnotationOperation.REVERT
             or edit.id in self._reverted_ids(self.list_edits(session_id))
         ):
             raise AnnotationEditNotFoundError(edit_id)
@@ -95,7 +94,15 @@ class AnnotationService:
 
     @staticmethod
     def _reverted_ids(edits: list[AnnotationEdit]) -> set[str]:
-        return {edit.reverted_edit_id for edit in edits if edit.operation == AnnotationOperation.REVERT}
+        """Targets of active reverts. Reverting a revert restores its target (redo).
+
+        A revert always targets an earlier edit, so one pass from the end decides which reverts are active.
+        """
+        reverted = set()
+        for edit in reversed(edits):
+            if edit.operation == AnnotationOperation.REVERT and edit.id not in reverted:
+                reverted.add(edit.reverted_edit_id)
+        return reverted
 
     def _add_edit(self, session_id: str, operation: AnnotationOperation, **values) -> AnnotationEdit:
         edit = AnnotationEdit(id=f"edit_{uuid4()}", session_id=session_id, operation=operation, created_at=datetime.now(timezone.utc), **values)

@@ -50,6 +50,8 @@ class SessionResponse(BaseModel):
     duration: float | None = None
     recording_start: datetime | None = None
     signals: list[SignalResponse] | None = None
+    # From the EDF+ header, if stated: "sex" as written and "age" in years.
+    patient: dict[str, int | str] = {}
 
 
 class SignalSummaryResponse(BaseModel):

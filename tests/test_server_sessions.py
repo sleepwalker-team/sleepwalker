@@ -318,8 +318,12 @@ def test_get_session_includes_prediction_tasks(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        before = client.get(f"/api/v1/sessions/{session.id}").json()["models"]
+        session.model_provenance = [{"id": "sleep-model", "task": "sleep_stage", "version": "sha256:abc"}]
         response = client.get(f"/api/v1/sessions/{session.id}")
 
+    assert before == []
+    assert response.json()["models"] == [{"id": "sleep-model", "task": "sleep_stage", "version": "sha256:abc"}]
     assert response.status_code == 200
     assert response.json()["tasks"] == [
         {

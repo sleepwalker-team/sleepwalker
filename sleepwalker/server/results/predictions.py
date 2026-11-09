@@ -177,6 +177,21 @@ def model_events(result: PredictionResult, recording_start: datetime) -> list[Mo
     ]
 
 
+def downsample(records: list, max_points: int) -> list:
+    """Merge consecutive records into max_points groups, keeping each class's highest probability."""
+    if len(records) <= max_points:
+        return records
+    edges = np.linspace(0, len(records), max_points + 1).astype(int)
+    reduced = []
+    for group in (records[a:b] for a, b in zip(edges, edges[1:])):
+        probabilities = {label: max(r.probabilities[label] for r in group) for label in group[0].probabilities}
+        if isinstance(group[0], PointPrediction):
+            reduced.append(PointPrediction(group[0].time, probabilities))
+        else:
+            reduced.append(IntervalPrediction(group[0].start, group[-1].end, max(probabilities, key=probabilities.__getitem__), probabilities))
+    return reduced
+
+
 def epoch_starts(result: PredictionResult, recording_start: datetime) -> list[float]:
     """Read the actual epoch timeline without mapping or changing probabilities."""
     if result.kind != PredictionKind.EPOCH:

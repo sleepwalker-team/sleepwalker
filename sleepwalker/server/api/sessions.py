@@ -161,4 +161,5 @@ def to_session_response(session: Session, tasks: list[TaskResponse]) -> SessionR
         recording_start=session.recording_start,
         signals=[SignalResponse(**vars(signal)) for signal in session.signals] if session.signals is not None else None,
         patient=session.patient,
+        models=session.model_provenance,
     )

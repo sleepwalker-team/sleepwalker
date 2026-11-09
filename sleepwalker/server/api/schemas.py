@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -52,6 +52,8 @@ class SessionResponse(BaseModel):
     signals: list[SignalResponse] | None = None
     # From the EDF+ header, if stated: "sex" as written and "age" in years.
     patient: dict[str, int | str] = {}
+    # Exactly which models produced the predictions; "version" is the SHA-256 of the weights.
+    models: list[dict[str, Any]] = []
 
 
 class SignalSummaryResponse(BaseModel):
@@ -103,13 +105,38 @@ class ContinuousPredictionResponse(BaseModel):
     probabilities: dict[str, float]
 
 
+class EffectiveAnnotationResponse(BaseModel):
+    start: float
+    end: float
+    label: str
+    source: Literal["model", "human"]
+    confidence: float | None = None
+    id: str | None = None
+
+
 class PredictionResponse(BaseModel):
     task: str
     kind: PredictionKind
     classes: list[str]
     predictions: list[IntervalPredictionResponse | ContinuousPredictionResponse]
+    # True if records were merged to max_points, keeping each class's highest probability.
+    downsampled: bool = False
     # Only for event tasks: the intervals merged into events.
     events: list[ModelEventResponse] | None = None
+    # Only with ?effective=true: model output with the active corrections applied.
+    effective: list[EffectiveAnnotationResponse] | None = None
+
+
+class TaskContextResponse(BaseModel):
+    prediction: str
+    confidence: float
+    probabilities: dict[str, float]
+
+
+class ContextResponse(BaseModel):
+    time: float
+    # None if the task has no prediction at this time.
+    tasks: dict[str, TaskContextResponse | None]
 
 
 class AnnotationRequest(BaseModel):

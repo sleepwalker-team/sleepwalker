@@ -47,7 +47,8 @@ All paths start with `/api/v1`, except `/health`.
 | `DELETE /sessions/{id}` | Cancel its jobs and delete all its data | 204 |
 | `POST /sessions/{id}/inference` | Start models: `{"models": ["id"], "channel_map": {...}}` | 202 job |
 | `GET /sessions/{id}/tasks` | Tasks that have predictions | 200 |
-| `GET /sessions/{id}/predictions/{task}?start=&end=` | Predictions in a time range | 200 |
+| `GET /sessions/{id}/predictions/{task}?start=&end=&max_points=` | Predictions in a time range | 200 |
+| `GET /sessions/{id}/context?time=` | Every task's prediction at one time | 200 |
 | `GET /sessions/{id}/signals` | List signals | 200 |
 | `GET /sessions/{id}/signals/{signal}?start=&end=&max_points=` | Reduced signal data | 200 |
 | `GET /sessions/{id}/annotations` | Edit history and current corrections | 200 |
@@ -169,6 +170,11 @@ and other signals that would also match are renamed `unused N`. The mapping is
 stored with the model's provenance and exported with the workspace. Different
 derivations are a clinical decision; the API only applies what the client chose.
 
+`GET .../predictions/{task}` returns at most `max_points` records (2–100,000, default
+2000). Beyond that, consecutive records are merged into equal groups that keep each
+class's highest probability, so short peaks stay visible, and `downsampled` is true.
+`events` and `effective` are never reduced.
+
 Prediction kinds are `epoch`, `continuous` and `event`. Today's packages produce
 only `epoch`, and a manifest has no way yet to declare another kind; viewing,
 correcting and exporting already handle all three.
@@ -198,6 +204,12 @@ Corrections never change model output; they are appended as edits.
 - `add_event` and `delete_event` apply to `continuous` and `event` tasks.
 - `revert` undoes any edit except another `revert`.
 
+`GET .../predictions/{task}?effective=true` and the JSON export (with `annotations`) also return
+`effective`: the model output with all active edits applied. For `epoch` tasks one
+entry per epoch, for the other kinds the remaining model events plus human events.
+Each entry has `start`, `end`, `label` and `source` (`model` or `human`), plus
+`confidence` for model entries and `id` for events.
+
 ## Signals
 
 There are two independent ways to read signals:
@@ -206,8 +218,9 @@ There are two independent ways to read signals:
   returns the first and last sample plus the strongest value per bucket. `max_points`
   is 2–100,000. Memory stays bounded, but a whole night still takes disk and CPU time.
 - **Plotly** (`app.state.plotly_service`, used by the Dash UI, no HTTP endpoint of its
-  own) keeps the selected signals in RAM at full resolution, about 16 bytes per sample
-  per view, until the view or session is closed. It must run in the same process as the API.
+  own) keeps the selected signals in RAM at full resolution, about 12 bytes per sample
+  per view (`float32` values, `float64` times shared by signals with the same rate),
+  until the view or session is closed. It must run in the same process as the API.
 
 ## Exports and workspaces
 
@@ -215,6 +228,8 @@ There are two independent ways to read signals:
 
 - `{"format": "json", "mode": "results", "include": {...}}` writes a result document.
   `include` selects `predictions`, `probabilities`, `annotations` and `metadata`.
+  `metadata` also adds `models`: the models behind the predictions, with `version`
+  (SHA-256 of the weights) and any channel map. `GET /sessions/{id}` returns the same list.
 - `{"format": "sleepwalker", "mode": "workspace"}` writes `<id>.sleepwalker.zip`,
   which `POST /sessions/import` can restore:
 

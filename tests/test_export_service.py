@@ -164,6 +164,7 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
         assert task["model_id"] == "sleep-model"
         assert task["predictions"][0]["probabilities"] == {"wake": 0.8, "n1": 0.2}
         assert "events" not in task
+        assert "effective" not in task
         edits = json.loads(archive.read("annotations/edits.json"))
         assert [item["id"] for item in edits] == [edit.id, reverted.id]
         assert edits[1]["reverted_edit_id"] == edit.id
@@ -174,6 +175,10 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
         assert models == manifest["models"]
         assert "package_path" not in models[0]
     assert ("events" in service.build_payload(session)["tasks"][0]) == (kind == PredictionKind.EVENT)
+    assert "effective" in service.build_payload(session)["tasks"][0]
+    assert "effective" not in service.build_payload(session, ResultExportOptions(annotations=False))["tasks"][0]
+    assert service.build_payload(session)["models"] == session.model_provenance
+    assert "models" not in service.build_payload(session, ResultExportOptions(metadata=False))
 
 
 def test_workspace_cancel_during_copy_removes_partial_archive(tmp_path, monkeypatch) -> None:

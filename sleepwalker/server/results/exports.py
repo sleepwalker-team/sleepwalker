@@ -12,7 +12,7 @@ from uuid import uuid4
 from ..core.jobs import CancellationCheck, Job, JobExecutionError, JobPhase, JobState, ProgressCallback
 from ..core.sessions import Session, utc_now
 from ..core.storage import TemporaryStorage
-from .annotations import AnnotationEdit, AnnotationService
+from .annotations import AnnotationEdit, AnnotationService, effective_annotations
 from .predictions import IntervalPrediction, PredictionKind, PredictionResult, PredictionStore, map_predictions, model_events
 
 
@@ -123,11 +123,16 @@ class ExportService:
 
         if options.metadata:
             payload["session"] = _session_metadata(session)
+            payload["models"] = session.model_provenance
         if options.predictions:
-            payload["tasks"] = [
-                _prediction_task(result, session, options.probabilities)
-                for result in self.prediction_store.list_for_session(session.id)
-            ]
+            snapshot = self.annotation_service.snapshot(session.id)
+            payload["tasks"] = []
+            for result in self.prediction_store.list_for_session(session.id):
+                task = _prediction_task(result, session, options.probabilities)
+                if options.annotations:
+                    effective = effective_annotations(result, *self.prediction_store.mapped(result, session.recording_start), snapshot)
+                    task["effective"] = [{key: value for key, value in vars(item).items() if value is not None} for item in effective]
+                payload["tasks"].append(task)
         if options.annotations:
             payload["annotations"] = [_annotation_edit(edit) for edit in self.annotation_service.list_edits(session.id)]
 
@@ -155,8 +160,9 @@ class ExportService:
             "provenance/models.json": models,
         }
         for task in tasks:
-            # Events are derived from the intervals again on import.
+            # Events and the effective annotation are derived again on import.
             task.pop("events", None)
+            task.pop("effective", None)
             documents[prediction_files[task["task"]]] = task
 
         return documents, sources

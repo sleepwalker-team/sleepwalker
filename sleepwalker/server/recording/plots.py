@@ -57,7 +57,7 @@ class EdfPlotSignalReader:
                     times = np.arange(count, dtype=np.float64)
                     times /= sample_rate
                     axes[key] = times
-                values = np.empty(count, dtype=np.float64)
+                values = np.empty(count, dtype=np.float32)
                 for start, chunk in read_chunks(reader, index, 0, count):
                     values[start:start + len(chunk)] = chunk
                 loaded.append(HighFrequencySignal(signal.id, axes[key], values))

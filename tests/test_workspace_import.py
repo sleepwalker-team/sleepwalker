@@ -100,6 +100,11 @@ def _prepare_import(tmp_path, bundle):
     return app, session, job, path
 
 
+def without_human_ids(tasks):
+    """Human event IDs are reassigned on import."""
+    return [{**task, "effective": [{k: v for k, v in e.items() if k != "id" or e["source"] == "model"} for e in task["effective"]]} for task in tasks]
+
+
 def _run_import(app, session, job, path):
     def operation(report_progress, check_cancelled):
         app.state.workspace_import_service.run(session, path, report_progress, check_cancelled)
@@ -126,7 +131,7 @@ def test_workspace_round_trip_restores_results_and_remaps_annotation_references(
     assert session.source_files[0].read_bytes() == original.source_files[0].read_bytes()
     assert not path.exists()
     restored = app.state.export_service.build_payload(session)
-    assert restored["tasks"] == payload["tasks"]
+    assert without_human_ids(restored["tasks"]) == without_human_ids(payload["tasks"])
     original_ids = {edit["id"] for edit in payload["annotations"]}
     new_edits = restored["annotations"]
     assert original_ids.isdisjoint(edit["id"] for edit in new_edits)
@@ -181,7 +186,7 @@ def test_workspace_round_trip_preserves_shifted_epoch_edits(tmp_path, start, res
     _run_import(app, session, job, path)
     assert job.state == JobState.SUCCEEDED, job.error
     restored = app.state.export_service.build_payload(session)
-    assert restored["tasks"] == payload["tasks"]
+    assert without_human_ids(restored["tasks"]) == without_human_ids(payload["tasks"])
     assert [edit["start"] for edit in restored["annotations"] if edit["operation"] == "set_label"] == [start]
     assert app.state.annotation_service.snapshot(session.id).labels == []
 

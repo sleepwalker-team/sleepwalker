@@ -79,7 +79,7 @@ def test_get_job_returns_structured_failure() -> None:
 
 def test_cancel_job_requests_cancellation_and_is_idempotent() -> None:
     service = JobService()
-    job = service.create("sess-test", "inference", {"model_ids": ["demo-model"]})
+    job = service.create("sess-test", "inference")
     app = create_app(job_service=service)
 
     with TestClient(app) as client:
@@ -116,7 +116,7 @@ def test_cancel_unknown_job_returns_not_found() -> None:
 )
 def test_cancel_terminal_job_returns_conflict(terminal_state: JobState) -> None:
     service = JobService()
-    job = service.create("sess-test", "inference", {"model_ids": ["demo-model"]})
+    job = service.create("sess-test", "inference")
 
     if terminal_state == JobState.CANCELLED:
         service.request_cancel(job.id)

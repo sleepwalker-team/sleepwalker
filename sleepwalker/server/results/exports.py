@@ -147,17 +147,14 @@ class ExportService:
         documents = {
             "manifest.json": {
                 "format": "sleepwalker",
-                "format_version": 1,
+                "format_version": 2,
                 "created_at": payload["exported_at"],
                 "created_with": _created_with(),
-                "study": {"duration": session.duration, "source_files": list(sources)},
-                "tasks": [task["task"] for task in tasks],
+                "source_files": list(sources),
                 "prediction_files": prediction_files,
                 "models": models,
             },
-            "study/metadata.json": payload["session"],
             "annotations/edits.json": payload["annotations"],
-            "provenance/models.json": models,
         }
         for task in tasks:
             # Events and the effective annotation are derived again on import.

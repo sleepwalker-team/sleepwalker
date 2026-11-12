@@ -1,14 +1,14 @@
-import {isNegativeClass, labelColor, labelTextColor} from "./colors.js?v=20261026-theme-1";
+import {labelColor, labelTextColor, taskLabelColor} from "./colors.js?v=20261111-background";
 export {labelColor};
 // Background classes get no row of their own, so only tasks with several real classes expand.
-const realClasses=task=>task.classes.filter(label=>!isNegativeClass(label));
+const realClasses=task=>task.classes.filter(label=>label!==task.background_class);
 const expandable=task=>realClasses(task).length>1;
 // Display-only alternative to the server's events: a block belongs to an event when its most
 // likely non-background class reaches the threshold. IDs follow the server's form.
 export function thresholdEvents(task, items, threshold) {
   const events = [];
   for (const p of items) {
-    const [label, value] = Object.entries(p.probabilities).filter(([name]) => !isNegativeClass(name)).sort((a, b) => b[1] - a[1])[0] || [];
+    const [label, value] = Object.entries(p.probabilities).filter(([name]) => name !== task.background_class).sort((a, b) => b[1] - a[1])[0] || [];
     if (!(value >= threshold)) continue;
     const last = events.at(-1);
     if (last?.label === label && Math.abs(last.end - p.start) < 1e-6) last.end = p.end;
@@ -149,11 +149,11 @@ export class Timeline {
     const cursorColor=style.getPropertyValue("--cursor").trim()||"#687074";
     // Probability in steps of ten, spread to 0.3–1 so that unlikely blocks stay visible.
     const opacity=p=>.3+.7*Math.round(p*10)/10;
-    const segment=(label,start,end,y,manual=false,alpha=1)=>{
+    const segment=(task,label,start,end,y,manual=false,alpha=1)=>{
       // Whole pixels: adjacent translucent blocks would otherwise leave light seams.
       const x=Math.round(xx(Math.max(range[0],start))),w=Math.max(1,Math.round(xx(Math.min(range[1],end)))-x);
       if(end<=range[0]||start>=range[1])return;
-      const negative=isNegativeClass(label);
+      const negative=label===task.background_class;
       if(manual)c.clearRect(x,y+5,w,22);
       if(!negative){c.fillStyle=labelColor(label);c.globalAlpha=alpha;c.fillRect(x,y+7,w,16);c.globalAlpha=1;}
       else if(manual){c.strokeStyle=track;c.lineWidth=1;c.beginPath();c.moveTo(x,y+15.5);c.lineTo(x+w,y+15.5);c.stroke();}
@@ -183,7 +183,7 @@ export class Timeline {
       if (task.kind === "continuous") {
         const labels = klass ? [klass] : realClasses(task);
         for (const cls of labels) {
-          c.strokeStyle = labelColor(cls); c.lineWidth=isNegativeClass(cls)?1:1.8;
+          c.strokeStyle = taskLabelColor(task,cls); c.lineWidth=cls===task.background_class?1:1.8;
           c.beginPath(); let prev=null;
           for (const point of items) {
             const prob=point.probabilities[cls]; if (!Number.isFinite(prob)) continue;
@@ -208,7 +208,7 @@ export class Timeline {
             label = active[next].label;
           }
           if (klass && label !== klass) continue;
-          segment(label,p.start,p.end,y,false,opacity(p.probabilities[label]));
+          segment(task,label,p.start,p.end,y,false,opacity(p.probabilities[label]));
         }
         // A thin frame shows which blocks form one model event.
         for (const e of active) {
@@ -220,11 +220,11 @@ export class Timeline {
       for (const edit of annotations.labels.filter(e => e.task===task.id)) {
         const end=edit.start+task.resolution;
         if (end<=range[0] || edit.start>=range[1] || (klass && edit.label!==klass)) continue;
-        segment(edit.label,edit.start,end,y,true);
+        segment(task,edit.label,edit.start,end,y,true);
       }
       for (const event of annotations.events.filter(e => e.task===task.id)) {
         if (event.end<=range[0] || event.start>=range[1] || (klass && event.label!==klass)) continue;
-        segment(event.label,event.start,event.end,y,true);
+        segment(task,event.label,event.start,event.end,y,true);
       }
       const marked = this.drag && !this.drag.pan && this.drag.row.task.id === task.id && Math.abs(this.drag.current-this.drag.x)>5
         ? {start:this.timeAt(Math.min(this.drag.x,this.drag.current)), end:this.timeAt(Math.max(this.drag.x,this.drag.current)),kind:"interval"}
@@ -245,5 +245,5 @@ export class Timeline {
     c.textAlign="left";
   }
 }
-import {activeModelEvents, selectionAt} from "./corrections.js?v=20261026-theme-1";
+import {activeModelEvents, selectionAt} from "./corrections.js?v=20261111-background";
 

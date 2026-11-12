@@ -26,9 +26,8 @@ def create_export(
 ) -> ExportAcceptedResponse:
     require_ready(session, "export")
 
-    parameters = {"format": payload.format.value, "mode": payload.mode.value, "include": payload.include.model_dump()}
     try:
-        job = jobs.create_if_session_idle(session.id, "export", parameters)
+        job = jobs.create_if_session_idle(session.id, "export")
     except ActiveJobExistsError as exc:
         raise job_already_running(exc) from exc
 

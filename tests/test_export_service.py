@@ -107,7 +107,6 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
             task="sleep_stage",
             classes=("wake", "n1"),
             input_channels=("eeg",),
-            capabilities=("classification",),
             output_resolution=30.0,
             output_kind=kind,
             package_path=tmp_path / "sleep-model.swmodel",
@@ -142,18 +141,15 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
     with ZipFile(export.path) as archive:
         assert set(archive.namelist()) == {
             "manifest.json",
-            "study/metadata.json",
             "study/source/record.edf",
             "predictions/0000.json",
             "annotations/edits.json",
-            "provenance/models.json",
         }
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["format"] == "sleepwalker"
-        assert manifest["format_version"] == 1
-        assert manifest["study"]["source_files"] == ["study/source/record.edf"]
+        assert manifest["format_version"] == 2
+        assert manifest["source_files"] == ["study/source/record.edf"]
         assert manifest["prediction_files"] == {"sleep_stage": "predictions/0000.json"}
-        assert manifest["tasks"] == ["sleep_stage"]
         assert set(manifest["checksums"]) == set(archive.namelist()) - {"manifest.json"}
         for name, checksum in manifest["checksums"].items():
             assert hashlib.sha256(archive.read(name)).hexdigest() == checksum
@@ -168,11 +164,10 @@ def test_workspace_contains_sources_results_history_and_checksums(tmp_path, kind
         edits = json.loads(archive.read("annotations/edits.json"))
         assert [item["id"] for item in edits] == [edit.id, reverted.id]
         assert edits[1]["reverted_edit_id"] == edit.id
-        models = json.loads(archive.read("provenance/models.json"))
+        models = manifest["models"]
         assert models[0]["id"] == "sleep-model"
         assert models[0]["name"] == "Sleep Stage Model"
         assert models[0]["input_channels"] == ["eeg"]
-        assert models == manifest["models"]
         assert "package_path" not in models[0]
     assert ("events" in service.build_payload(session)["tasks"][0]) == (kind == PredictionKind.EVENT)
     assert "effective" in service.build_payload(session)["tasks"][0]

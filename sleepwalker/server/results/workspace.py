@@ -7,11 +7,10 @@ import re
 import stat
 import zlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
-from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 import pandas as pd
@@ -20,9 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.jobs import CancellationCheck, Job, JobExecutionError, JobPhase, JobState, ProgressCallback
 from ..core.sessions import Session, SessionService, SessionState
 from ..core.storage import DEFAULT_MAX_FILE_SIZE_BYTES, TemporaryStorage
-from ..recording.study import InvalidStudyError, StudyFormat, UnsupportedStudyFormatError, validate_study
-from .annotations import AnnotationEdit, AnnotationOperation, AnnotationService
-from .predictions import PredictionKind, PredictionResult, PredictionStore, epoch_starts, map_predictions, model_events, resolve_epoch_start
+from ..recording.study import InvalidStudyError, StudyInfo, UnsupportedStudyFormatError, validate_study
+from .annotations import AnnotationEdit, AnnotationEditNotFoundError, AnnotationOperation, AnnotationService
+from .predictions import PredictionKind, PredictionResult, PredictionStore, map_predictions, model_events
 
 Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 PositiveNumber = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
@@ -49,11 +48,6 @@ class WorkspaceDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class WorkspaceStudy(WorkspaceDocument):
-    duration: PositiveNumber
-    source_files: list[Text] = Field(min_length=1)
-
-
 class WorkspaceModel(WorkspaceDocument):
     id: Text
     task: Text
@@ -63,38 +57,18 @@ class WorkspaceModel(WorkspaceDocument):
     name: Text | None = None
     version: Text | None = None
     input_channels: list[Text] | None = None
-    capabilities: list[Text] | None = None
     channel_map: dict[Text, Text] | None = None
 
 
 class WorkspaceManifest(WorkspaceDocument):
     format: Literal["sleepwalker"]
-    format_version: Literal[1]
+    format_version: Literal[2]
     created_at: datetime
     created_with: Text
-    study: WorkspaceStudy
-    tasks: list[Text]
+    source_files: list[Text] = Field(min_length=1)
     prediction_files: dict[Text, Text]
     models: list[WorkspaceModel]
     checksums: dict[Text, Text]
-
-
-class WorkspaceSignal(WorkspaceDocument):
-    id: Text
-    label: Text
-    unit: str
-    sample_rate: PositiveNumber
-
-
-class WorkspaceMetadata(WorkspaceDocument):
-    id: Text
-    created_at: datetime
-    expires_at: datetime
-    format: StudyFormat
-    duration: PositiveNumber
-    recording_start: datetime
-    signals: list[WorkspaceSignal] = Field(min_length=1)
-    patient: dict[Text, int | str] = {}
 
 
 class WorkspaceTask(WorkspaceDocument):
@@ -134,7 +108,6 @@ class WorkspaceEdit(WorkspaceDocument):
 @dataclass
 class LoadedWorkspace:
     manifest: WorkspaceManifest
-    metadata: WorkspaceMetadata
     tasks: list[WorkspaceTask]
     edits: list[WorkspaceEdit]
     sources: list[Path]
@@ -186,16 +159,11 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
     version = raw.get("format_version")
     if type(version) is not int:
         raise InvalidWorkspaceError("Workspace format version is invalid.")
-    if version != 1:
+    if version != 2:
         raise UnsupportedWorkspaceVersionError("Workspace format version is not supported.")
 
     manifest = WorkspaceManifest.model_validate(raw)
-    if len(manifest.tasks) != len(set(manifest.tasks)):
-        raise InvalidWorkspaceError("Workspace contains duplicate tasks.")
-    if set(manifest.prediction_files) != set(manifest.tasks):
-        raise InvalidWorkspaceError("Workspace prediction mapping does not match its tasks.")
-
-    sources = manifest.study.source_files
+    sources = manifest.source_files
     if len(sources) != len(set(sources)) or any(
         not name.startswith("study/source/") or len(name.split("/")) != 3
         for name in sources
@@ -209,10 +177,7 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
     ):
         raise InvalidWorkspaceError("Workspace prediction file mapping is invalid.")
 
-    expected = {
-        "study/metadata.json", "annotations/edits.json", "provenance/models.json",
-        *sources, *predictions,
-    }
+    expected = {"annotations/edits.json", *sources, *predictions}
     if set(names) != expected | {"manifest.json"} or set(manifest.checksums) != expected:
         raise InvalidWorkspaceError("Workspace required files or checksums do not match.")
     if any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in manifest.checksums.values()):
@@ -242,7 +207,7 @@ def load_workspace(
                 checksum = hashlib.sha256()
                 data = bytearray()
                 source_path = source_directory / PurePosixPath(name).name
-                is_source = name in manifest.study.source_files
+                is_source = name in manifest.source_files
                 with archive.open(name) as entry:
                     if is_source:
                         with source_path.open("xb") as target:
@@ -263,20 +228,13 @@ def load_workspace(
                 else:
                     documents[name] = _read_json(data)
 
-            metadata = WorkspaceMetadata.model_validate(documents["study/metadata.json"])
-            tasks = [
-                WorkspaceTask.model_validate(documents[manifest.prediction_files[task]])
-                for task in manifest.tasks
-            ]
+            tasks = [WorkspaceTask.model_validate(documents[name]) for name in manifest.prediction_files.values()]
             raw_edits = documents["annotations/edits.json"]
             if not isinstance(raw_edits, list):
                 raise InvalidWorkspaceError("Workspace annotation history must be a list.")
             edits = [WorkspaceEdit.model_validate(edit) for edit in raw_edits]
-            models = documents["provenance/models.json"]
-            if models != [model.model_dump(mode="json", exclude_none=True) for model in manifest.models]:
-                raise InvalidWorkspaceError("Workspace model provenance does not match its manifest.")
 
-            return LoadedWorkspace(manifest, metadata, tasks, edits, sources)
+            return LoadedWorkspace(manifest, tasks, edits, sources)
     except (
         BadZipFile, UnicodeError, ValueError, KeyError,
         NotImplementedError, RecursionError, zlib.error,
@@ -321,24 +279,12 @@ class WorkspaceImportService:
             )
             check_cancelled()
             study = validate_study(workspace.sources)
-            metadata = workspace.metadata
-            if (
-                study.format != metadata.format
-                or not math.isclose(study.duration, metadata.duration)
-                or not math.isclose(study.duration, workspace.manifest.study.duration)
-                or study.recording_start != metadata.recording_start
-                or [vars(signal) for signal in study.signals or []]
-                != [signal.model_dump() for signal in metadata.signals]
-            ):
-                raise InvalidWorkspaceError("Workspace metadata does not match the source recording.")
-
             results = [_restore_prediction(task, session.id, check_cancelled) for task in workspace.tasks]
-            _validate_task_metadata(workspace)
             for result in results:
                 check_cancelled()
                 map_predictions(result, study.recording_start)
 
-            edits = _restore_edits(workspace, results, session.id, check_cancelled)
+            edits = _restore_edits(workspace, results, session.id, study, check_cancelled)
             check_cancelled()
             report_progress(JobPhase.IMPORTING, 0.8, "Restoring workspace data")
             self.prediction_store.add_many(results)
@@ -358,7 +304,7 @@ class WorkspaceImportService:
             report_progress(JobPhase.IMPORTING, 1.0, "Workspace restored")
         except UnsupportedWorkspaceVersionError as exc:
             raise JobExecutionError("UNSUPPORTED_FORMAT_VERSION", str(exc)) from exc
-        except (InvalidWorkspaceError, InvalidStudyError, UnsupportedStudyFormatError, ValueError) as exc:
+        except (InvalidWorkspaceError, InvalidStudyError, UnsupportedStudyFormatError, ValueError, LookupError, AnnotationEditNotFoundError) as exc:
             raise JobExecutionError("INVALID_BUNDLE", "Workspace data is invalid or inconsistent.") from exc
 
     def finalize(self, session: Session, job: Job) -> None:
@@ -424,96 +370,31 @@ def _restore_prediction(
     )
 
 
-def _validate_task_metadata(workspace: LoadedWorkspace) -> None:
-    tasks = workspace.tasks
-    if [task.task for task in tasks] != workspace.manifest.tasks:
-        raise InvalidWorkspaceError("Workspace task files do not match its manifest.")
-    models = {model.id: model for model in workspace.manifest.models}
-    if len(models) != len(workspace.manifest.models) or set(models) != {task.model_id for task in tasks}:
-        raise InvalidWorkspaceError("Workspace model provenance is invalid.")
-    for task in tasks:
-        model = models[task.model_id]
-        if (
-            model.task != task.task or model.classes != task.classes
-            or model.output_kind != task.kind or model.output_resolution != task.resolution
-        ):
-            raise InvalidWorkspaceError("Workspace model provenance does not match its results.")
-
-
 def _restore_edits(
-    workspace: LoadedWorkspace,
-    results: list[PredictionResult],
-    session_id: str,
-    check_cancelled: CancellationCheck,
+    workspace: LoadedWorkspace, results: list[PredictionResult], session_id: str, study: StudyInfo, check_cancelled: CancellationCheck,
 ) -> list[AnnotationEdit]:
-    tasks = {task.task: task for task in workspace.tasks}
-    starts_by_task = {
-        result.task: epoch_starts(result, workspace.metadata.recording_start)
-        for result in results if result.kind == PredictionKind.EPOCH
-    }
-    model_event_ids = {
-        (result.task, event.id) for result in results for event in model_events(result, workspace.metadata.recording_start)
-    }
-    old_edits = {}
-    event_ids = {}
-    edit_ids = {}
-    temporary_service = AnnotationService()
-    restored = []
+    """Replay the edit history through the same rules as the API; IDs are new, timestamps are kept."""
+    if len({edit.id for edit in workspace.edits}) != len(workspace.edits):
+        raise InvalidWorkspaceError("Workspace contains duplicate annotation edits.")
+    tasks = {result.task: result for result in results}
+    model_event_ids = {result.task: {event.id for event in model_events(result, study.recording_start)} for result in results}
+    replay = AnnotationService()
+    edit_ids, event_ids, created = {}, {}, {}
     for edit in workspace.edits:
         check_cancelled()
-        if (
-            edit.id in old_edits or edit.session_id != workspace.metadata.id
-            or edit.created_at.tzinfo is None
-        ):
-            raise InvalidWorkspaceError("Workspace annotation identity is invalid.")
-        values = edit.model_dump()
-        values["id"] = f"edit_{uuid4()}"
-        values["session_id"] = session_id
-        operation = edit.operation
-        task = tasks.get(edit.task)
-        if operation in {AnnotationOperation.SET_LABEL, AnnotationOperation.ADD_EVENT}:
-            if task is None or edit.start is None or edit.label not in task.classes:
-                raise InvalidWorkspaceError("Workspace annotation refers to an invalid task or label.")
-            if edit.start < 0 or edit.start >= workspace.metadata.duration or edit.reverted_edit_id is not None:
-                raise InvalidWorkspaceError("Workspace annotation range is invalid.")
-            if operation == AnnotationOperation.SET_LABEL:
-                if task.kind != PredictionKind.EPOCH or edit.end is not None or edit.event_id is not None:
-                    raise InvalidWorkspaceError("Workspace label edit is invalid.")
-                values["start"] = resolve_epoch_start(edit.start, workspace.metadata.duration, task.resolution, starts_by_task[task.task])
-            else:
-                if (
-                    task.kind == PredictionKind.EPOCH or edit.end is None
-                    or not edit.start < edit.end <= workspace.metadata.duration
-                    or edit.event_id is None or edit.event_id in event_ids
-                ):
-                    raise InvalidWorkspaceError("Workspace event edit is invalid.")
-                event_ids[edit.event_id] = f"evt_{uuid4()}"
-                values["event_id"] = event_ids[edit.event_id]
-        elif operation == AnnotationOperation.DELETE_EVENT:
-            if any(value is not None for value in (edit.start, edit.end, edit.label, edit.reverted_edit_id)):
-                raise InvalidWorkspaceError("Workspace event deletion is invalid.")
-            # Human event IDs are replaced on import; model event IDs follow from the restored results.
-            event_id = event_ids.get(edit.event_id, edit.event_id)
-            snapshot = temporary_service.snapshot(session_id)
-            active = {(event.task, event.event_id) for event in snapshot.events}
-            active |= model_event_ids - {(event.task, event.event_id) for event in snapshot.deleted_events}
-            if (edit.task, event_id) not in active:
-                raise InvalidWorkspaceError("Workspace event deletion refers to an inactive event.")
-            values["event_id"] = event_id
+        if edit.operation == AnnotationOperation.REVERT:
+            restored = replay.revert(session_id, edit_ids.get(edit.reverted_edit_id))
         else:
-            if edit.reverted_edit_id not in old_edits or any(
-                value is not None for value in (edit.task, edit.start, edit.end, edit.label, edit.event_id)
-            ):
-                raise InvalidWorkspaceError("Workspace annotation revert is invalid.")
-            # Like AnnotationService.revert: only an edit that is active at this point can be reverted.
-            if edit_ids[edit.reverted_edit_id] in AnnotationService._reverted_ids(restored):
-                raise InvalidWorkspaceError("Workspace annotation revert refers to an invalid edit.")
-            values["reverted_edit_id"] = edit_ids[edit.reverted_edit_id]
-
-        restored_edit = AnnotationEdit(**values)
-        temporary_service.add(restored_edit)
-        restored.append(restored_edit)
-        old_edits[edit.id] = edit
-        edit_ids[edit.id] = restored_edit.id
-
-    return restored
+            task = tasks.get(edit.task)
+            if task is None:
+                raise InvalidWorkspaceError("Workspace annotation refers to an unknown task.")
+            restored = replay.record(
+                session_id, edit.operation, task, duration=study.duration, recording_start=study.recording_start,
+                model_event_ids=model_event_ids[task.task], start=edit.start, end=edit.end, label=edit.label,
+                event_id=event_ids.get(edit.event_id, edit.event_id),
+            )
+            if edit.operation == AnnotationOperation.ADD_EVENT:
+                event_ids[edit.event_id] = restored.event_id
+        edit_ids[edit.id] = restored.id
+        created[restored.id] = edit.created_at
+    return [replace(edit, created_at=created[edit.id]) for edit in replay.list_edits(session_id)]

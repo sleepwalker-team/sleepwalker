@@ -55,11 +55,11 @@ def test_api(root):
         ("desaturation", ("desaturation", "no desaturation"), 1, PredictionKind.CONTINUOUS),
     ]
     models = [ModelInfo(id=f"test-{task}", name=f"TEST · {task}", task=task, classes=classes,
-                        input_channels=("EEG",), capabilities=("classification",), output_resolution=resolution,
+                        input_channels=("EEG",), output_resolution=resolution,
                         package_path=Path("test-only"), output_kind=kind) for task, classes, resolution, kind in specs]
     models.append(ModelInfo(id="test-unmatched", name="TEST · unmatched inputs", task="unmatched",
                             classes=("artifact",), input_channels=("C3-M2", "E1-M2", "Chin EMG", "ECG"),
-                            capabilities=("classification",), output_resolution=1, package_path=Path("test-only")))
+                            output_resolution=1, package_path=Path("test-only")))
     store = PredictionStore()
     return create_app(model_catalog=ModelCatalog(models=models), prediction_store=store,
                       inference_runner=TestRunner(store), temporary_storage=TemporaryStorage(root))

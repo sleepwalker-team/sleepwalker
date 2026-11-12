@@ -79,7 +79,7 @@ def start_inference(
         raise APIError(status.HTTP_503_SERVICE_UNAVAILABLE, "COMPUTE_UNAVAILABLE", "Inference execution is not available.")
 
     try:
-        job = jobs.create_if_session_idle(session.id, "inference", {"models": payload.models})
+        job = jobs.create_if_session_idle(session.id, "inference")
     except ActiveJobExistsError as exc:
         raise job_already_running(exc) from exc
 

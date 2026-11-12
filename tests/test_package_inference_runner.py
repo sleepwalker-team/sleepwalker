@@ -20,7 +20,7 @@ def create_session(path):
 
 
 def create_model(path):
-    return ModelInfo(id="sleep-model", name="Sleep model", task="sleep", classes=("wake", "n1"), input_channels=("eeg",), capabilities=("classification",), output_resolution=30, package_path=path)
+    return ModelInfo(id="sleep-model", name="Sleep model", task="sleep", classes=("wake", "n1"), input_channels=("eeg",), output_resolution=30, package_path=path)
 
 
 def prediction_frame():

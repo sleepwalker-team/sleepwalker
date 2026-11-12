@@ -1,7 +1,6 @@
 """Available models: whatever valid packages currently lie in the model directory.
 
-Models are retrained daily, so nothing is registered. Each lookup reads the
-directory again, which makes a new package usable without a restart. Only
+ Each lookup reads the directory, which makes a new package usable without a restart. Only
 manifest JSON is read here; weights are never deserialized in the API process.
 """
 
@@ -34,12 +33,11 @@ class UnsupportedModelPackageError(InvalidModelPackageError):
 
 @dataclass(frozen=True)
 class ModelInfo:
-    id: str
-    name: str
+    id: str #from manifest.json
+    name: str #name for user/UI
     task: str
     classes: tuple[str, ...]
     input_channels: tuple[str, ...]
-    capabilities: tuple[str, ...]
     output_resolution: float
     package_path: Path
     output_kind: PredictionKind = PredictionKind.EPOCH
@@ -56,7 +54,6 @@ class ModelInfo:
             "output_kind": self.output_kind.value,
             "output_resolution": self.output_resolution,
             "input_channels": list(self.input_channels),
-            "capabilities": list(self.capabilities),
         }
         if self.payload_sha256 is not None:
             metadata["version"] = f"sha256:{self.payload_sha256}"
@@ -84,16 +81,15 @@ class _Contract(BaseModel):
     _unique = field_validator("classes")(_require_unique)
 
 
-class _Manifest(BaseModel):
-    name: Annotated[str, Field(strict=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")]
+class _Manifest(BaseModel): #describes model output
+    name: Annotated[str, Field(strict=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")] #prevent escapings
     task: Text
     input_channels: list[Text] = Field(min_length=1)
-    capabilities: list[Text] = Field(min_length=1)
     payload: Text
     sha256: Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
     classification: _Contract
 
-    _unique = field_validator("input_channels", "capabilities")(_require_unique)
+    _unique = field_validator("input_channels")(_require_unique)
 
 
 def read_model_manifest(package_path: Path) -> ModelInfo:
@@ -114,8 +110,6 @@ def read_model_manifest(package_path: Path) -> ModelInfo:
         aliases = {channel.logical_name: tuple(channel.physical_names) for channel in channels}
         if list(aliases) != manifest.input_channels:
             raise ValueError("Channel configuration must match logical input channels in order.")
-        if "classification" not in manifest.capabilities:
-            raise ValueError("Package does not declare classification capability.")
 
         contract = manifest.classification
         resolution = pd.to_timedelta(contract.target_resolution).total_seconds() / contract.sequence_len
@@ -130,7 +124,7 @@ def read_model_manifest(package_path: Path) -> ModelInfo:
         return ModelInfo(
             id=manifest.name, name=manifest.name, task=manifest.task,
             classes=tuple(contract.classes), input_channels=tuple(manifest.input_channels),
-            capabilities=tuple(manifest.capabilities), output_resolution=resolution,
+            output_resolution=resolution,
             package_path=package_path, channel_aliases=aliases, payload_sha256=manifest.sha256,
             output_kind=PredictionKind.EVENT if background_class(contract.classes) else PredictionKind.EPOCH,
         )
@@ -146,7 +140,7 @@ class ModelCatalog:
             raise ValueError(f"Model directory does not exist: {directory}")
         self.directory = directory
         self._fixed = {model.id: model for model in models}
-        self._reported: set[Path] = set()
+        self._reported: set[Path] = set() #paths from models with warnings (just for log hygiene)
 
     def get(self, model_id: str) -> ModelInfo | None:
         return self._models().get(model_id)

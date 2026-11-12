@@ -37,7 +37,6 @@ class PredictionResult:
 @dataclass(frozen=True)
 class IntervalPrediction:
     """One fixed interval of an epoch or event task."""
-
     start: float
     end: float
     label: str
@@ -47,7 +46,6 @@ class IntervalPrediction:
 @dataclass(frozen=True)
 class PointPrediction:
     """One sample of a continuous prediction."""
-
     time: float
     probabilities: dict[str, float]
 
@@ -55,16 +53,14 @@ class PointPrediction:
 @dataclass(frozen=True)
 class ModelEvent:
     """Consecutive intervals whose most likely class is the same non-background class."""
-
     id: str
     start: float
     end: float
     label: str
     confidence: float
 
-
 def background_class(classes: Sequence[str]) -> str | None:
-    """The single "nothing happens" class of an event task; same rule as `isNegativeClass` in the UI."""
+    """The single "nothing happens" class of an event task."""
     background = [label for label in classes if re.match(r"(no(?:[ _-]|$)|kein|regular breathing$|none$)", label, re.IGNORECASE)]
     return background[0] if len(background) == 1 else None
 

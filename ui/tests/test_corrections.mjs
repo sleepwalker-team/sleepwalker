@@ -93,7 +93,7 @@ test("model events are selectable and deletable until deleted",()=>{
 
 test("a lower threshold reveals more model events in the event's class",async()=>{
   const {thresholdEvents}=await import(new URL("../assets/timeline.js",import.meta.url));
-  const task={id:"breathing",classes:["apnea","hypopnea","regular breathing"]};
+  const task={id:"breathing",classes:["apnea","hypopnea","regular breathing"],background_class:"regular breathing"};
   const items=[[.1,.1,.8],[.3,.2,.5],[.6,.3,.1],[.2,.35,.45]].map((p,i)=>({start:i,end:i+1,probabilities:{apnea:p[0],hypopnea:p[1],"regular breathing":p[2]}}));
   assert.deepEqual(thresholdEvents(task,items,.5).map(e=>[e.id,e.start,e.end,e.label]),[["model:breathing:2000",2,3,"apnea"]]);
   assert.deepEqual(thresholdEvents(task,items,.3).map(e=>[e.start,e.end,e.label]),[[1,3,"apnea"],[3,4,"hypopnea"]]);

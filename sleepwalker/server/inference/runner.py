@@ -31,6 +31,7 @@ WORKER_ERRORS = {
 
 
 class InferenceRunner(Protocol):
+    """what the API needs from a runner, so compute can move elsewhere (cluster job, remote GPU) without API changes"""
     def run(
         self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,
         channel_map: dict[str, dict[str, str]] | None = None,
@@ -39,7 +40,7 @@ class InferenceRunner(Protocol):
 
 
 def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start: datetime, duration: float | None) -> pd.DataFrame:
-    """Adapt official interval-start timestamps once to the API's center convention."""
+    """checks workers output and calculates timestamps into API format"""
     if frame.empty or model.output_kind == PredictionKind.CONTINUOUS:
         raise ValueError("Expected nonempty interval-classification predictions.")
     if "task" not in frame or not frame["task"].eq(model.task).all():
@@ -68,7 +69,7 @@ def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start
 
 
 def stop_worker(process: subprocess.Popen) -> None:
-    """Let the worker clean up its framework cache, then kill whatever is left."""
+    """let the worker clean up its framework cache, then kill whatever is left."""
     try:
         # Only the worker: its cache manager child must stay alive for the cleanup.
         process.terminate()
@@ -106,7 +107,7 @@ class SubprocessInferenceClient:
                     )
                 except OSError as exc:
                     raise JobExecutionError("COMPUTE_UNAVAILABLE", "Inference Python executable could not be started.") from exc
-                try:
+                try: #api waits at worker but is still stopable
                     while process.poll() is None:
                         check_cancelled()
                         try:
@@ -119,7 +120,7 @@ class SubprocessInferenceClient:
                 return _read_worker_result(root, model, process.returncode, log)
 
 
-def _worker_environment() -> dict[str, str]:
+def _worker_environment() -> dict[str, str]: #TODO nochmal angucken ob wir wirklich zwei versch venvs brauchen und ob das nötig ist
     environment = dict(os.environ)
     # The older API checkout must not shadow the worker's framework. Cluster or
     # container overrides could otherwise load a system libtorch instead of the
@@ -154,7 +155,7 @@ def _read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> p
         raise JobExecutionError("COMPUTE_UNAVAILABLE", "Inference worker did not return a valid response.", {"model_id": model.id}) from exc
 
 
-class PackageInferenceRunner:
+class PackageInferenceRunner:#TODO machts sonst sinn die results zu publishen wenn die fertig sind? worauf wartet man sonst?
     """Runs the selected models one after another and publishes all results or none."""
 
     def __init__(

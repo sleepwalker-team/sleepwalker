@@ -156,7 +156,7 @@ def test_workspace_download_and_session_delete(tmp_path) -> None:
         assert download.headers["content-type"] == "application/zip"
         assert ".sleepwalker.zip" in download.headers["content-disposition"]
         with ZipFile(BytesIO(download.content)) as archive:
-            assert json.loads(archive.read("manifest.json"))["format_version"] == 1
+            assert json.loads(archive.read("manifest.json"))["format_version"] == 2
             assert archive.read("study/source/record.edf") == b"test recording"
 
         deleted = client.delete(f"/api/v1/sessions/{session.id}")

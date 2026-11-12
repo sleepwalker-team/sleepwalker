@@ -8,23 +8,18 @@ from sleepwalker.server.core.jobs import JobService
 from sleepwalker.server.core.jobs import JobError, JobPhase, JobState
 
 
-def test_subscription_preserves_initial_state_and_update_snapshots() -> None:
+def test_subscription_delivers_initial_then_latest_state_as_snapshots() -> None:
     async def scenario():
         service = JobService()
         job = service.create("sess-test", "inference")
         subscription = service.subscribe(job.id)
+        assert (await subscription.get()).state == JobState.QUEUED
+
         service.mark_running(job.id, JobPhase.LOADING, "Loading model")
         service.update_progress(job.id, phase=JobPhase.INFERENCE, progress=0.42, message="Running")
-        service.mark_succeeded(job.id)
-
-        snapshots = [await subscription.get() for _ in range(4)]
-        assert [snapshot.state for snapshot in snapshots] == [
-            JobState.QUEUED, JobState.RUNNING, JobState.RUNNING, JobState.SUCCEEDED,
-        ]
-        assert snapshots[1].phase == JobPhase.LOADING
-        assert snapshots[2].progress == 0.42
-        assert snapshots[0].state == JobState.QUEUED
-        assert snapshots[-1] is not job
+        snapshot = await subscription.get()
+        assert (snapshot.state, snapshot.progress) == (JobState.RUNNING, 0.42)
+        assert snapshot is not job
         service.unsubscribe(job.id, subscription)
 
     asyncio.run(scenario())
@@ -80,7 +75,7 @@ def test_multiple_clients_and_jobs_have_independent_subscriptions() -> None:
     asyncio.run(scenario())
 
 
-def test_slow_client_buffer_is_bounded_and_preserves_terminal_state() -> None:
+def test_slow_client_gets_only_the_terminal_state() -> None:
     async def scenario():
         service = JobService()
         job = service.create("sess-test", "inference")
@@ -90,16 +85,10 @@ def test_slow_client_buffer_is_bounded_and_preserves_terminal_state() -> None:
             service.update_progress(job.id, phase=JobPhase.INFERENCE, progress=step / 1000, message="Running")
         service.mark_succeeded(job.id)
 
-        updates = []
-        while True:
-            update = await asyncio.wait_for(subscription.get(), timeout=1.0)
-            updates.append(update)
-            if update.state == JobState.SUCCEEDED:
-                break
-
-        assert len(updates) == 65  # Initial snapshot plus at most 64 pending updates.
-        assert updates[0].state == JobState.QUEUED
-        assert updates[-1].progress == 1.0
+        update = await asyncio.wait_for(subscription.get(), timeout=1.0)
+        assert (update.state, update.progress) == (JobState.SUCCEEDED, 1.0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(subscription.get(), timeout=0.01)
         service.unsubscribe(job.id, subscription)
 
     asyncio.run(scenario())
@@ -113,8 +102,8 @@ def test_cancellation_is_published_once_and_failure_details_are_copied() -> None
         await subscription.get()
         service.request_cancel(cancelled.id)
         service.request_cancel(cancelled.id)
-        service.mark_cancelled(cancelled.id)
         assert (await subscription.get()).state == JobState.CANCELLING
+        service.mark_cancelled(cancelled.id)
         assert (await subscription.get()).state == JobState.CANCELLED
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(subscription.get(), timeout=0.01)
@@ -126,8 +115,6 @@ def test_cancellation_is_published_once_and_failure_details_are_copied() -> None
         error = JobError("INVALID_BUNDLE", "Invalid workspace", {"filename": "original.zip"})
         service.mark_failed(failed.id, error)
         error.details["filename"] = "changed.zip"
-        await subscription.get()
-        await subscription.get()
         snapshot = await subscription.get()
         assert snapshot.error.details == {"filename": "original.zip"}
         service.unsubscribe(failed.id, subscription)

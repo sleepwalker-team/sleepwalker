@@ -2,10 +2,9 @@
 
 import asyncio
 import logging
-from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock, RLock
@@ -57,7 +56,6 @@ class Job:
     progress: float | None = None
     message: str | None = None
     error: JobError | None = None
-    parameters: dict[str, Any] = field(default_factory=dict)
 
 
 ProgressCallback = Callable[[JobPhase, float | None, str], None]
@@ -86,60 +84,42 @@ class ActiveJobExistsError(Exception):
 
 
 class JobSubscription:
-    """Bounded mailbox between job worker threads and one async consumer."""
+    """Latest job state for one async consumer; None once the job is gone.
+
+    Intermediate states may be skipped, but a terminal state is final and always delivered.
+    """
 
     def __init__(self, initial: Job) -> None:
         self._loop = asyncio.get_running_loop()
-        self._initial: Job | None = initial
-        self._updates: deque[Job | None] = deque(maxlen=64)
+        self._latest: Job | None = initial
+        self._pending = True
+        self._closed = initial.state in TERMINAL_STATES
         self._wakeup = asyncio.Event()
         self._lock = Lock()
-        self._notification_pending = False
-        self._closed = False
 
     def publish(self, job: Job | None) -> None:
         with self._lock:
             if self._closed:
                 return
-
-            self._updates.append(job)
-            if self._notification_pending:
-                return
-            self._notification_pending = True
-
+            self._latest, self._pending = job, True
+            self._closed = job is None or job.state in TERMINAL_STATES
         try:
             self._loop.call_soon_threadsafe(self._wakeup.set)
         except RuntimeError:
             # The consumer's event loop has already shut down.
-            self.close()
+            pass
 
     async def get(self) -> Job | None:
         while True:
+            self._wakeup.clear()
             with self._lock:
-                if self._initial is not None:
-                    initial = self._initial
-                    self._initial = None
-                    return initial
-                if self._updates:
-                    return self._updates.popleft()
-                if self._closed:
-                    return None
-
-                self._wakeup.clear()
-                self._notification_pending = False
-
+                if self._pending:
+                    self._pending = False
+                    return self._latest
             await self._wakeup.wait()
 
     def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            self._initial = None
-            self._updates.clear()
-
-        try:
-            self._loop.call_soon_threadsafe(self._wakeup.set)
-        except RuntimeError:
-            pass
+        self.publish(None)
 
 
 class JobService:
@@ -149,32 +129,22 @@ class JobService:
         self._subscriptions: dict[str, set[JobSubscription]] = {}
         self._lock = RLock()
 
-    def create(self, session_id: str, job_type: str, parameters: dict[str, Any] | None = None) -> Job:
-        job = self._new_job(session_id, job_type, parameters)
+    def create(self, session_id: str, job_type: str) -> Job:
+        now = datetime.now(timezone.utc)
+        job = Job(
+            id=f"job_{uuid4()}", session_id=session_id, type=job_type, state=JobState.QUEUED,
+            created_at=now, updated_at=now, message="Waiting for execution",
+        )
         with self._lock:
             self._jobs[job.id] = job
         return job
 
-    def create_if_session_idle(self, session_id: str, job_type: str, parameters: dict[str, Any] | None = None) -> Job:
+    def create_if_session_idle(self, session_id: str, job_type: str) -> Job:
         with self._lock:
             active = self.list_active_jobs(session_id)
             if active:
                 raise ActiveJobExistsError(active[0])
-            return self.create(session_id, job_type, parameters)
-
-    @staticmethod
-    def _new_job(session_id: str, job_type: str, parameters: dict[str, Any] | None) -> Job:
-        now = datetime.now(timezone.utc)
-        return Job(
-            id=f"job_{uuid4()}",
-            session_id=session_id,
-            type=job_type,
-            state=JobState.QUEUED,
-            created_at=now,
-            updated_at=now,
-            message="Waiting for execution",
-            parameters=deepcopy(parameters) if parameters is not None else {},
-        )
+            return self.create(session_id, job_type)
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:

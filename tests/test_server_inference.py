@@ -44,7 +44,6 @@ def create_model() -> ModelInfo:
         task="sleep_stage",
         classes=("wake", "n1", "n2", "n3", "rem"),
         input_channels=("eeg",),
-        capabilities=("classification",),
         output_resolution=30.0,
         package_path=Path("/models/sleep-model.swmodel"),
     )
@@ -76,7 +75,6 @@ def test_start_inference_creates_queued_job() -> None:
     assert job is not None
     assert job.session_id == session.id
     assert job.type == "inference"
-    assert job.parameters == {"models": [model.id]}
     assert job.state == JobState.SUCCEEDED
     assert runner.session_id == session.id
     assert runner.model_ids == [model.id]

@@ -331,6 +331,7 @@ def test_get_session_includes_prediction_tasks(tmp_path) -> None:
             "name": "Sleep stage",
             "kind": "epoch",
             "classes": ["wake", "n1"],
+            "background_class": None,
             "resolution": 30.0,
         }
     ]

@@ -20,7 +20,7 @@ def make_model_package(tmp_path):
             "format_version": "sleepwalker-packaged-model-v1", "name": name, "task": task,
             "payload": "model.pt", "sha256": hashlib.sha256(payload).hexdigest(),
             "classification": {"type": "single-head-multiclass", "classes": ["wake", "n1"], "sequence_len": sequence_len, "target_resolution": target_resolution},
-            "input_channels": ["eeg"], "capabilities": ["classification"],
+            "input_channels": ["eeg"],
             "config": {"data": {"channels": [{"logical_name": "eeg", "physical_names": ["C3-M2", "C4-M1"]}]}},
         }
         (path / "manifest.json").write_text(json.dumps(metadata), encoding="utf-8")

@@ -10,7 +10,7 @@ from sleepwalker.server.results.predictions import PredictionKind
 
 
 def make_model(model_id):
-    return ModelInfo(id=model_id, name=model_id, task="sleep", classes=("wake", "n1"), input_channels=("eeg",), capabilities=("classification",), output_resolution=30, package_path=Path("/models") / model_id)
+    return ModelInfo(id=model_id, name=model_id, task="sleep", classes=("wake", "n1"), input_channels=("eeg",), output_resolution=30, package_path=Path("/models") / model_id)
 
 
 def save_manifest(path, metadata):
@@ -51,7 +51,7 @@ def test_manifest_uses_resolution_per_output_step(make_model_package, sequence_l
     assert read_model_manifest(path).output_resolution == expected
 
 
-@pytest.mark.parametrize(("field", "value"), [("name", ""), ("name", "../escape"), ("task", None), ("input_channels", "eeg"), ("capabilities", []), ("capabilities", ["embeddings"]), ("sha256", "bad"), ("payload", "../weights.pt"), ("payload", "/tmp/weights.pt"), ("config", None)])
+@pytest.mark.parametrize(("field", "value"), [("name", ""), ("name", "../escape"), ("task", None), ("input_channels", "eeg"), ("sha256", "bad"), ("payload", "../weights.pt"), ("payload", "/tmp/weights.pt"), ("config", None)])
 def test_manifest_rejects_invalid_metadata(make_model_package, field, value):
     path, metadata = make_model_package()
     metadata[field] = value

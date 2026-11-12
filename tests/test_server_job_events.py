@@ -22,7 +22,7 @@ def _events(text):
 @pytest.mark.parametrize("state", [JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED])
 def test_terminal_job_sends_one_event_with_public_job_schema_and_closes(state) -> None:
     service = JobService()
-    job = service.create("sess-test", "inference", {"secret": "private parameters"})
+    job = service.create("sess-test", "inference")
     if state == JobState.CANCELLED:
         service.request_cancel(job.id)
         service.mark_cancelled(job.id)
@@ -42,7 +42,6 @@ def test_terminal_job_sends_one_event_with_public_job_schema_and_closes(state) -
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
     assert _events(response.text) == [("job_update", status.json())]
-    assert "private parameters" not in response.text
     assert service._subscriptions == {}
 
 
@@ -92,8 +91,8 @@ def test_open_stream_delivers_running_progress_and_completion() -> None:
                 service.mark_succeeded(job.id)
 
         events = await _request_stream(create_app(job_service=service), job.id, update)
-        assert [data["state"] for _, data in events] == ["queued", "running", "running", "succeeded"]
-        assert events[2][1]["progress"] == 0.5
+        states = [data["state"] for _, data in events]
+        assert states[:2] == ["queued", "running"] and states[-1] == "succeeded"
         assert service._subscriptions == {}
 
     asyncio.run(scenario())

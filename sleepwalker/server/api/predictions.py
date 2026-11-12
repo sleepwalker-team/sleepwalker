@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from ..core.sessions import Session, SessionState
 from ..recording.signals import MAX_POINTS_LIMIT, MIN_POINTS
 from ..results.annotations import effective_annotations
-from ..results.predictions import IntervalPrediction, PointPrediction, PredictionKind, PredictionResult, downsample
+from ..results.predictions import IntervalPrediction, PointPrediction, PredictionKind, PredictionResult, background_class, downsample
 from .deps import Annotations, Predictions, SessionDep
 from .errors import bad_request, conflict, not_found
 from .schemas import (
@@ -24,6 +24,7 @@ def to_task_response(result: PredictionResult) -> TaskResponse:
         name=result.task.replace("_", " ").capitalize(),
         kind=result.kind,
         classes=list(result.classes),
+        background_class=background_class(result.classes),
         resolution=result.resolution,
     )
 

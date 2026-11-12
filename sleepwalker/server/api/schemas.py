@@ -29,6 +29,7 @@ class TaskResponse(BaseModel):
     name: str
     kind: PredictionKind
     classes: list[str]
+    background_class: str | None
     resolution: float
 
 
@@ -199,7 +200,6 @@ class ModelResponse(BaseModel):
     input_channels: list[str]
     # Per input channel, the EDF signal names its package accepts.
     channel_aliases: dict[str, list[str]]
-    capabilities: list[str]
     output_kind: PredictionKind
     output_resolution: float
 

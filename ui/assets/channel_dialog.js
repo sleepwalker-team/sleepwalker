@@ -1,7 +1,7 @@
 /* Dialog that connects model inputs (left) to EDF signals (right) with lines. */
-import {t} from "./i18n.js?v=20261026-theme-1";
-import {palette} from "./colors.js?v=20261026-theme-1";
-import {canStart, duplicateInputs, inferenceRequest, initialMapping, isManual, openInputs} from "./channels.js?v=20261026-theme-1";
+import {t} from "./i18n.js?v=20261111-background";
+import {palette} from "./colors.js?v=20261111-background";
+import {canStart, duplicateInputs, inferenceRequest, initialMapping, isManual, openInputs} from "./channels.js?v=20261111-background";
 
 const SVG = "http://www.w3.org/2000/svg";
 const $ = id => document.getElementById(id);

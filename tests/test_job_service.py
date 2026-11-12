@@ -38,16 +38,6 @@ def test_job_service_gets_existing_job() -> None:
     assert service.get("unknown-job") is None
 
 
-def test_job_service_copies_parameters() -> None:
-    service = JobService()
-    parameters = {"models": ["model-a"]}
-
-    job = service.create(session_id="sess-test", job_type="inference", parameters=parameters)
-    parameters["models"].append("model-b")
-
-    assert job.parameters == {"models": ["model-a"]}
-
-
 def test_job_service_rejects_second_active_job_for_session() -> None:
     service = JobService()
     first_job = service.create_if_session_idle(

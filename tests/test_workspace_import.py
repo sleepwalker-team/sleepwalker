@@ -218,7 +218,7 @@ def test_workspace_canonicalizes_roundoff_in_epoch_edits(tmp_path):
 
 
 @pytest.mark.parametrize("mutation", [
-    "checksum", "source-metadata", "probabilities", "revert-reference", "foreign-session",
+    "checksum", "probabilities", "revert-reference",
 ])
 def test_invalid_workspace_data_fails_job_and_removes_restored_data(tmp_path, mutation):
     bundle, _, _ = _bundle(tmp_path)
@@ -226,22 +226,15 @@ def test_invalid_workspace_data_fails_job_and_removes_restored_data(tmp_path, mu
     def change(contents):
         if mutation == "checksum":
             contents["study/source/signals_01.edf"] = b"corrupt recording"
-        elif mutation == "source-metadata":
-            _edit_json(contents, "study/metadata.json", lambda data: data.update(duration=12.0))
         elif mutation == "probabilities":
             _edit_json(
                 contents, "predictions/0000.json",
                 lambda data: data["predictions"][0]["probabilities"].pop("positive"),
             )
-        elif mutation == "revert-reference":
-            _edit_json(
-                contents, "annotations/edits.json",
-                lambda data: data[-1].update(reverted_edit_id="edit-missing"),
-            )
         else:
             _edit_json(
                 contents, "annotations/edits.json",
-                lambda data: data[0].update(session_id="sess-other"),
+                lambda data: data[-1].update(reverted_edit_id="edit-missing"),
             )
 
     altered = _alter_bundle(bundle, tmp_path / "altered.zip", change, mutation != "checksum")
@@ -340,9 +333,8 @@ def test_empty_workspace_restores_study_without_models_or_annotations(tmp_path):
     def change(contents):
         contents.pop("predictions/0000.json")
         contents["annotations/edits.json"] = b"[]"
-        contents["provenance/models.json"] = b"[]"
         _edit_json(
-            contents, "manifest.json", lambda data: data.update(tasks=[], models=[], prediction_files={}),
+            contents, "manifest.json", lambda data: data.update(models=[], prediction_files={}),
         )
 
     empty = _alter_bundle(bundle, tmp_path / "empty.zip", change)
@@ -360,10 +352,6 @@ def test_import_preserves_original_model_provenance_for_reexport(tmp_path):
 
     def change(contents):
         _edit_json(
-            contents, "provenance/models.json",
-            lambda models: models[0].update(name="Original model", version="v1"),
-        )
-        _edit_json(
             contents, "manifest.json",
             lambda manifest: manifest["models"][0].update(name="Original model", version="v1"),
         )
@@ -373,8 +361,8 @@ def test_import_preserves_original_model_provenance_for_reexport(tmp_path):
     _run_import(app, session, job, path)
     assert job.state == JobState.SUCCEEDED
     documents, _ = app.state.export_service.build_workspace_documents(session)
-    assert documents["provenance/models.json"][0]["name"] == "Original model"
-    assert documents["provenance/models.json"][0]["version"] == "v1"
+    assert documents["manifest.json"]["models"][0]["name"] == "Original model"
+    assert documents["manifest.json"]["models"][0]["version"] == "v1"
 
 
 def test_long_import_renews_expiry_before_job_completion(tmp_path, monkeypatch):
@@ -452,7 +440,7 @@ def test_import_http_rejects_unsupported_version(tmp_path):
     bundle, _, _ = _bundle(tmp_path)
     altered = _alter_bundle(
         bundle, tmp_path / "new-version.zip",
-        lambda contents: _edit_json(contents, "manifest.json", lambda data: data.update(format_version=2)),
+        lambda contents: _edit_json(contents, "manifest.json", lambda data: data.update(format_version=3)),
     )
     app = create_app(temporary_storage=TemporaryStorage(tmp_path / "uploads"))
     with TestClient(app) as client, altered.open("rb") as source:

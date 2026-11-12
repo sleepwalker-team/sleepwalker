@@ -1,12 +1,12 @@
-import {t, language, locale, setLanguage, applyTranslations, translationFor, renderTranslation} from "./i18n.js?v=20261026-theme-1";
-import {isNegativeClass, labelColor} from "./colors.js?v=20261026-theme-1";
-import {Timeline, currentPrediction, formatTime, thresholdEvents} from "./timeline.js?v=20261026-theme-1";
-import {submitCompatibleModels} from "./inference.js?v=20261026-theme-1";
-import {isMatched} from "./channels.js?v=20261026-theme-1";
-import {openChannelDialog} from "./channel_dialog.js?v=20261026-theme-1";
-import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261026-theme-1";
+import {t, language, locale, setLanguage, applyTranslations, translationFor, renderTranslation} from "./i18n.js?v=20261111-background";
+import {taskLabelColor} from "./colors.js?v=20261111-background";
+import {Timeline, currentPrediction, formatTime, thresholdEvents} from "./timeline.js?v=20261111-background";
+import {submitCompatibleModels} from "./inference.js?v=20261111-background";
+import {isMatched} from "./channels.js?v=20261111-background";
+import {openChannelDialog} from "./channel_dialog.js?v=20261111-background";
+import {correctionRange, saveCorrection, selectionAt, selectedCorrections} from "./corrections.js?v=20261111-background";
 
-import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261026-theme-1";
+import {knownSessions, sessionSnapshot, rememberKnownSession, sessionURL} from "./sessions.js?v=20261111-background";
 
 const $ = id => document.getElementById(id);
 const localizedText = new Map();
@@ -397,8 +397,8 @@ function renderTimelineLegend() {
   for(const task of state.tasks){
     const group=element("div",undefined,"legend-task");group.append(element("span",taskName(task),"legend-task-name"));
     for(const label of task.classes){
-      const item=element("span",undefined,"legend-class"),swatch=element("span",undefined,isNegativeClass(label)?"legend-line":"legend-swatch");
-      swatch.style.setProperty("--class-color",labelColor(label));swatch.setAttribute("aria-hidden","true");
+      const item=element("span",undefined,"legend-class"),swatch=element("span",undefined,label===task.background_class?"legend-line":"legend-swatch");
+      swatch.style.setProperty("--class-color",taskLabelColor(task,label));swatch.setAttribute("aria-hidden","true");
       item.append(swatch,element("span",className(label)));group.append(item);
     }
     legend.append(group);
@@ -430,7 +430,7 @@ function taskSummary(task,time) {
   const hit=selectionAt(task,items,state.annotations,time,null,displayedEvents(task.id));
   const manual=hit?.kind==="label"||hit?.kind==="event"&&hit.source!=="model";
   // Outside an event, an event track shows nothing: the background class.
-  const label=task.kind==="event"&&hit?.kind==="prediction"?task.classes.find(isNegativeClass):hit?.label??prediction?.label;
+  const label=task.kind==="event"&&hit?.kind==="prediction"?task.background_class:hit?.label??prediction?.label;
   return {label,manual,value:prediction?.probabilities?.[label]};
 }
 function renderTaskRows() {
@@ -439,8 +439,8 @@ function renderTaskRows() {
   for(const task of state.tasks) {
     const {label,manual,value}=taskSummary(task,state.time),row=element("button",undefined,"task-row");
     row.dataset.task=task.id;row.setAttribute("aria-pressed",String(task.id===state.taskId));
-    const swatch=element("span",undefined,label&&!isNegativeClass(label)?"legend-swatch":"legend-line");
-    swatch.style.setProperty("--class-color",label?labelColor(label):"transparent");
+    const swatch=element("span",undefined,label&&label!==task.background_class?"legend-swatch":"legend-line");
+    swatch.style.setProperty("--class-color",label?taskLabelColor(task,label):"transparent");
     row.append(swatch,element("span",taskName(task)),element("span",label?className(label):"—"),element("span",manual?"M":Number.isFinite(value)?`${Math.round(value*100)} %`:"","mono small"));
     rows.append(row);
     if(task.id===focused)row.focus();

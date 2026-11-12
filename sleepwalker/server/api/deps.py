@@ -10,7 +10,6 @@ from ..core.sessions import Session, SessionService, SessionState
 from ..core.storage import TemporaryStorage
 from ..inference.catalog import ModelCatalog
 from ..inference.runner import InferenceRunner
-from ..recording.plots import PlotlyService
 from ..recording.signals import EdfSignalReader
 from ..results.annotations import AnnotationService
 from ..results.exports import ExportService
@@ -34,7 +33,6 @@ Exports = Annotated[ExportService, _from_state("export_service")]
 Importer = Annotated[WorkspaceImportService, _from_state("workspace_import_service")]
 Inference = Annotated[InferenceRunner | None, _from_state("inference_runner")]
 Jobs = Annotated[JobService, _from_state("job_service")]
-Plots = Annotated[PlotlyService, _from_state("plotly_service")]
 Predictions = Annotated[PredictionStore, _from_state("prediction_store")]
 Sessions = Annotated[SessionService, _from_state("session_service")]
 SignalReader = Annotated[EdfSignalReader, _from_state("signal_reader")]

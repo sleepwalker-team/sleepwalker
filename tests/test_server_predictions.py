@@ -63,6 +63,7 @@ def test_list_tasks_returns_available_prediction_tasks() -> None:
                 "name": "Sleep stage",
                 "kind": "epoch",
                 "classes": ["wake", "n1"],
+                "background_class": None,
                 "resolution": 30.0,
             }
         ]
@@ -139,6 +140,7 @@ def test_get_continuous_predictions_returns_probability_samples() -> None:
 
     assert tasks_response.status_code == 200
     assert tasks_response.json()["tasks"][0]["kind"] == "continuous"
+    assert tasks_response.json()["tasks"][0]["background_class"] == "no_arousal"
     assert response.status_code == 200
     assert response.json() == {
         "task": "arousal",

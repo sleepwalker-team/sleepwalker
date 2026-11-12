@@ -7,7 +7,7 @@ from operator import attrgetter
 from threading import RLock
 from uuid import uuid4
 
-from .predictions import IntervalPrediction, ModelEvent, PredictionKind, PredictionResult
+from .predictions import IntervalPrediction, ModelEvent, PredictionKind, PredictionResult, epoch_starts, resolve_epoch_start
 
 
 class AnnotationOperation(str, Enum):
@@ -35,6 +35,16 @@ class AnnotationEditNotFoundError(Exception):
     pass
 
 
+class AnnotationEventNotFoundError(LookupError):
+    pass
+
+
+class InvalidAnnotationError(ValueError):
+    def __init__(self, message: str, details: dict | None = None) -> None:
+        super().__init__(message)
+        self.details = details
+
+
 @dataclass(frozen=True)
 class AnnotationSnapshot:
     edits: list[AnnotationEdit]
@@ -57,6 +67,33 @@ class AnnotationService:
     def delete_event(self, session_id: str, task: str, event_id: str) -> AnnotationEdit:
         """Delete a human or model event; callers check that it exists and is still active."""
         return self._add_edit(session_id, AnnotationOperation.DELETE_EVENT, task=task, event_id=event_id)
+
+    def record(
+        self, session_id: str, operation: AnnotationOperation, task: PredictionResult, *, duration: float, recording_start: datetime,
+        model_event_ids: set[str], start: float | None = None, end: float | None = None, label: str | None = None, event_id: str | None = None,
+    ) -> AnnotationEdit:
+        """Check a set_label, add_event or delete_event against the task and current state, then store it."""
+        allowed_kinds = {PredictionKind.EPOCH} if operation == AnnotationOperation.SET_LABEL else {PredictionKind.CONTINUOUS, PredictionKind.EVENT}
+        if task.kind not in allowed_kinds:
+            raise InvalidAnnotationError("Annotation operation is incompatible with the task kind.", {"operation": operation.value, "task_kind": task.kind.value})
+        if operation == AnnotationOperation.DELETE_EVENT:
+            snapshot = self.snapshot(session_id)
+            active = {edit.event_id for edit in snapshot.events if edit.task == task.task}
+            active |= model_event_ids - {edit.event_id for edit in snapshot.deleted_events}
+            if event_id not in active:
+                raise AnnotationEventNotFoundError(event_id)
+            return self.delete_event(session_id, task.task, event_id)
+        if label not in task.classes:
+            raise InvalidAnnotationError("Label is not valid for this task.", {"label": label, "classes": list(task.classes)})
+        if operation == AnnotationOperation.SET_LABEL:
+            try:
+                start = resolve_epoch_start(start, duration, task.resolution, epoch_starts(task, recording_start))
+            except (TypeError, ValueError) as exc:
+                raise InvalidAnnotationError(str(exc)) from exc
+            return self.set_label(session_id, task.task, start, label)
+        if start is None or end is None or not 0.0 <= start < end <= duration:
+            raise InvalidAnnotationError("Annotation event range is invalid.")
+        return self.add_event(session_id, task.task, start, end, label)
 
     def revert(self, session_id: str, edit_id: str) -> AnnotationEdit:
         with self._lock:

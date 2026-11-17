@@ -59,8 +59,10 @@ class ModelEvent:
     label: str
     confidence: float
 
-def background_class(classes: Sequence[str]) -> str | None:
-    """The single "nothing happens" class of an event task."""
+def background_class(classes: Sequence[str]) -> str | None: #(TODO) bisschen hardcoded. alternativ beim server start abfragen was hintergrundklasse sein soll?
+    """Guess the single "nothing happens" class of an event task from its name.
+    Packages do not declare it, so this also decides whether a model is an event model.
+    """
     background = [label for label in classes if re.match(r"(no(?:[ _-]|$)|kein|regular breathing$|none$)", label, re.IGNORECASE)]
     return background[0] if len(background) == 1 else None
 

@@ -34,7 +34,7 @@ class HighFrequencySignal:
 
 
 class EdfPlotSignalReader:
-    """Load selected full-resolution signals into NumPy, not Python lists."""
+    """Load selected full-resolution signals into NumPy"""
 
     def read(self, source_path: Path, signals: Sequence[SignalInfo]) -> list[HighFrequencySignal]:
         reader = pyedflib.EdfReader(str(source_path))
@@ -129,7 +129,7 @@ class PlotlyService:
         except KeyError as exc:
             raise SignalNotFoundError(exc.args[0]) from exc
 
-        key, ticket = (session_id, view_id), object()
+        key, ticket = (session_id, view_id), object() # only the newest request for this view stores its figure
         with self._lock:
             self._pending[key] = ticket
         try:

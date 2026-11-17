@@ -111,7 +111,7 @@ class JobSubscription:
 
     async def get(self) -> Job | None:
         while True:
-            self._wakeup.clear()
+            self._wakeup.clear() # wakeup may belong to an update already returned; only _pending counts
             with self._lock:
                 if self._pending:
                     self._pending = False

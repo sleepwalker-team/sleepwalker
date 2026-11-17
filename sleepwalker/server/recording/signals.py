@@ -85,6 +85,7 @@ def read_chunks(reader, signal_index: int, start: int, end: int):
 
 
 def _stream_extrema(reader, signal_index: int, start: int, end: int, max_points: int):
+    """First and last samples are kept. for each bucket inbetween we keep the highest absolute value for preserving peaks."""
     interior_count = end - start - 2
     bucket_count = max_points - 2
     indices = [start] * max_points

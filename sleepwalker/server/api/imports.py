@@ -33,7 +33,7 @@ async def import_workspace(
         paths = await storage.save_files(session.id, [bundle])
         await run_in_threadpool(importer.inspect, paths[0])
         job = jobs.create(session.id, "import")
-    except BaseException as exc:
+    except BaseException as exc: # cleanup also through cancelation of client
         cleanup.delete_session(session.id)
         if isinstance(exc, FileTooLargeError):
             raise APIError(

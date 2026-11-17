@@ -125,6 +125,7 @@ def inspect_workspace(path: Path, limits: WorkspaceLimits) -> WorkspaceManifest:
 
 
 def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceManifest:
+    """checks structure and limits before unpacking zip"""
     members = archive.infolist()
     if not members or len(members) > limits.max_members:
         raise InvalidWorkspaceError("Workspace archive contains too many or no files.")
@@ -138,12 +139,12 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
 
     for member in members:
         name = member.filename
-        mode = member.external_attr >> 16
+        mode = member.external_attr >> 16 #unix file type sits in upper 16 bits; 0 == no recording
         if (
             not name or "\\" in name or "\x00" in member.orig_filename or ":" in name
             or PurePosixPath(name).is_absolute()
             or any(part in {"", ".", ".."} for part in name.split("/"))
-            or member.is_dir() or member.flag_bits & 1
+            or member.is_dir() or member.flag_bits & 1 # flag_bits & 1 == encrypted
             or (stat.S_IFMT(mode) not in {0, stat.S_IFREG})
         ):
             raise InvalidWorkspaceError("Workspace archive contains an unsafe file entry.")

@@ -45,7 +45,7 @@ async def stream_job_events(job_id: str, jobs: JobService, subscription: JobSubs
             try:
                 job = await asyncio.wait_for(subscription.get(), timeout=heartbeat_seconds)
             except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
+                yield ": keep-alive\n\n" #so that proxys do not close empty connection
                 continue
 
             if job is None:

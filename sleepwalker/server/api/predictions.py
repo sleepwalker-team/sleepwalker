@@ -54,7 +54,7 @@ def get_predictions(
     mapped, model_events = predictions.mapped(result, session.recording_start)
     if result.kind == PredictionKind.CONTINUOUS:
         time = attrgetter("time")
-        visible = mapped[bisect_left(mapped, start, key=time):bisect_left(mapped, range_end, key=time)]
+        visible = mapped[bisect_left(mapped, start, key=time):bisect_left(mapped, range_end, key=time)] #bisect searches in sorted list with binary search the correct index
         record_type = ContinuousPredictionResponse
     else:
         visible = mapped[bisect_right(mapped, start, key=attrgetter("end")):bisect_left(mapped, range_end, key=attrgetter("start"))]

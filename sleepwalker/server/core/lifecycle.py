@@ -53,6 +53,7 @@ class SessionCleanupService:
         return deleted_session_ids
 
     def delete_session(self, session_id: str) -> bool:
+        """Deletes directly. Callers should ensure that no job is running."""
         with self._lock:
             if self.session_service.delete(session_id) is None:
                 return False

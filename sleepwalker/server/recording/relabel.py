@@ -3,6 +3,7 @@
 import shutil
 from pathlib import Path
 
+# EDF header: 256 fixed bytes, then per-signal fields, starting with each signal's 16-byte
 LABEL_SIZE = 16
 SIGNAL_COUNT = slice(252, 256)
 FIXED_HEADER_SIZE = 256

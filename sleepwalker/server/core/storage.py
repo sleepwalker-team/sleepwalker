@@ -40,6 +40,8 @@ class TemporaryStorage:
 
     @contextmanager
     def exclusive_access(self):
+        """Lock storage root for this server; a second server on the same root fails.
+        Orphan cleanup requires this, since it deletes every unknown session directory."""
         import fcntl
 
         lock_path = self.root / ".server.lock"
@@ -124,6 +126,7 @@ class TemporaryStorage:
         shutil.rmtree(session_dir, ignore_errors=True)
 
     def write_json_export(self, session_id: str, export_id: str, payload: dict) -> Path:
+        #we create a tempfile and rame it after writing, so that a download never sees an unfinished file
         export_directory = self.root / session_id / "exports"
         export_directory.mkdir(parents=True, exist_ok=True)
         destination = export_directory / f"{export_id}.json"
@@ -140,6 +143,7 @@ class TemporaryStorage:
             raise
 
     def write_workspace_export(self, session_id: str, export_id: str, documents: dict, sources: dict[str, Path], check_cancelled: Callable[[], None]) -> Path:
+        #we create a tempfile and rame it after writing, so that a download never sees an unfinished file
         export_directory = self.root / session_id / "exports"
         export_directory.mkdir(parents=True, exist_ok=True)
         destination = export_directory / f"{export_id}.sleepwalker.zip"

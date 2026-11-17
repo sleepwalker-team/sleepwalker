@@ -121,6 +121,7 @@ def _check_tasks_available(models: list[ModelInfo], session: Session, prediction
 
 
 def _check_channel_map(channel_map: dict[str, dict[str, str]], models: list[ModelInfo], session: Session) -> None:
+    """Check user's explicit mapping: each model gets every input assigned to an existing signal"""
     by_id = {model.id: model for model in models}
     signals = {signal.id for signal in session.signals or []}
     for model_id, mapping in channel_map.items():
@@ -138,6 +139,7 @@ def _check_channel_map(channel_map: dict[str, dict[str, str]], models: list[Mode
 
 
 def _check_channels(models: list[ModelInfo], session: Session) -> None:
+    """For models without a channel map: each input must match a signal by one of its package names"""
     available = {name.strip().casefold() for signal in session.signals or [] for name in (signal.id, signal.label)}
     for model in models:
         missing = [

@@ -64,7 +64,7 @@ def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start
     if duration is not None and (seconds + model.output_resolution > duration + 1e-6).any():
         raise ValueError("Prediction interval exceeds the recording.")
     normalized = frame.copy()
-    normalized["time"] = seconds + model.output_resolution / 2
+    normalized["time"] = seconds + model.output_resolution / 2 #framework sends starts of interval, but API saves interval mids
     return normalized
 
 
@@ -103,7 +103,7 @@ class SubprocessInferenceClient:
                 try:
                     process = subprocess.Popen(
                         [str(self.python_executable), str(WORKER_PATH), str(request_path)], cwd=root, env=_worker_environment(),
-                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, # worker gets own processgroup, so that 'killpg' also kills the childprocesses
                     )
                 except OSError as exc:
                     raise JobExecutionError("COMPUTE_UNAVAILABLE", "Inference Python executable could not be started.") from exc
@@ -120,11 +120,10 @@ class SubprocessInferenceClient:
                 return _read_worker_result(root, model, process.returncode, log)
 
 
-def _worker_environment() -> dict[str, str]: #TODO nochmal angucken ob wir wirklich zwei versch venvs brauchen und ob das nötig ist
+def _worker_environment() -> dict[str, str]:
+    # The worker runs in its own venv because model packages need a newer framework
+    # than this checkout; both are named "sleepwalker", so they cannot share one venv.
     environment = dict(os.environ)
-    # The older API checkout must not shadow the worker's framework. Cluster or
-    # container overrides could otherwise load a system libtorch instead of the
-    # native libraries bundled with the worker venv's Torch.
     for name in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD"):
         environment.pop(name, None)
     environment["PYTHONNOUSERSITE"] = "1"
@@ -170,7 +169,7 @@ class PackageInferenceRunner:#TODO machts sonst sinn die results zu publishen we
         self.device = device
         self.batch_size = batch_size
         self.prediction_client = prediction_client if prediction_client is not None else SubprocessInferenceClient(inference_python)
-        self._slots = Semaphore(max_parallel_jobs)
+        self._slots = Semaphore(max_parallel_jobs) # limits all workers over all jobs because of memory
 
     def run(
         self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,

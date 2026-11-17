@@ -1,14 +1,13 @@
 import numpy as np
 import pytest
 
-pytest.importorskip("plotly_resampler", reason="Install sleepwalker/server/requirements-plotly.txt for Plotly integration tests")
-
 from dash import Dash, dcc, html, no_update
 
 from sleepwalker.server.recording.plots import HighFrequencySignal, PlotlyService
 from sleepwalker.server.core.sessions import SessionService
 from sleepwalker.server.core.sessions import SessionState
 from sleepwalker.server.recording.study import SignalInfo, StudyFormat
+from pathlib import Path
 
 
 class ArrayReader:
@@ -69,7 +68,6 @@ def test_pan_reset_and_irrelevant_events_use_resampler_without_edf_reads():
 
 
 def test_real_edf_plotting_keeps_original_resolution():
-    from pathlib import Path
     sessions = SessionService()
     path = Path(__file__).parent / "data" / "signals_01.edf"
     session = sessions.create([path])

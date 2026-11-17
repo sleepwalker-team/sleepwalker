@@ -9,6 +9,9 @@ from sleepwalker.server.core.storage import TemporaryStorage
 from sleepwalker.server.core.jobs import JobService
 from sleepwalker.server.core.jobs import JobState
 from sleepwalker.server.results.predictions import PredictionResult, PredictionStore
+from datetime import datetime
+import numpy as np
+from pyedflib import highlevel
 
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -338,11 +341,6 @@ def test_get_session_includes_prediction_tasks(tmp_path) -> None:
 
 
 def test_session_reports_patient_fields_only_as_stated_in_the_edf(session_api, tmp_path):
-    from datetime import datetime
-
-    import numpy as np
-    from pyedflib import highlevel
-
     client, _, _ = session_api
     path = tmp_path / "patient.edf"
     header = highlevel.make_header(startdate=datetime(2025, 3, 1, 22, 0), sex="F", birthdate="15 jun 1971")

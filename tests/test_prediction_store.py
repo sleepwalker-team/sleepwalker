@@ -2,6 +2,9 @@ import pandas as pd
 import pytest
 
 from sleepwalker.server.results.predictions import PredictionResult, PredictionStore
+from dataclasses import replace
+from datetime import datetime
+from sleepwalker.server.results.predictions import PredictionKind
 
 
 def create_result(
@@ -68,11 +71,6 @@ def test_prediction_store_rejects_duplicate_task_for_session() -> None:
 
 
 def test_mapped_records_are_cached_until_the_result_is_replaced() -> None:
-    from dataclasses import replace
-    from datetime import datetime
-
-    from sleepwalker.server.results.predictions import PredictionKind
-
     store = PredictionStore()
     frame = pd.DataFrame({"time": [0.5, 1.5], "prob__no_arousal": [0.2, 0.9], "prob__arousal": [0.8, 0.1]})
     store.add(PredictionResult("sess-test", "model", "arousal", ("no_arousal", "arousal"), 1.0, frame, PredictionKind.EVENT))

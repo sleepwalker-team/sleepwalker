@@ -1,4 +1,4 @@
-"""Optional, session-scoped Plotly transport, independent of REST signals."""
+"""Session-scoped Plotly transport, independent of REST signals."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -8,14 +8,12 @@ from typing import Any
 
 import numpy as np
 import pyedflib
+from plotly.subplots import make_subplots
+from plotly_resampler import FigureResampler
 
 from ..core.sessions import Session, SessionService, SessionState
 from .signals import SignalNotFoundError, read_chunks
 from .study import SignalInfo, StudyFormat
-
-
-class PlotlyUnavailableError(RuntimeError):
-    pass
 
 
 class PlotSessionNotFoundError(LookupError):
@@ -66,18 +64,8 @@ class EdfPlotSignalReader:
             reader.close()
 
 
-def _create_resampler(signals: Sequence[SignalInfo], max_points: int):
-    try:
-        from plotly.subplots import make_subplots
-        from plotly_resampler import FigureResampler
-    except ImportError as exc:
-        raise PlotlyUnavailableError(
-            "Install optional plot dependencies: pip install -r src/sleepwalker/server/requirements-plotly.txt"
-        ) from exc
-    figure = FigureResampler(
-        make_subplots(rows=len(signals), cols=1, shared_xaxes=True, subplot_titles=[signal.label for signal in signals]),
-        default_n_shown_samples=max_points,
-    )
+def create_resampler(signals: Sequence[SignalInfo], max_points: int):
+    figure = FigureResampler(make_subplots(rows=len(signals), cols=1, shared_xaxes=True, subplot_titles=[signal.label for signal in signals]), default_n_shown_samples=max_points)
     for row, signal in enumerate(signals, start=1):
         figure.update_yaxes(title_text=signal.unit, row=row, col=1)
     figure.update_xaxes(title_text="Time (s)", row=len(signals), col=1)
@@ -91,10 +79,7 @@ class PlotView:
 
 
 class PlotlyService:
-    def __init__(
-        self, session_service: SessionService, *, signal_reader: EdfPlotSignalReader | None = None,
-        figure_factory: Callable = _create_resampler,
-    ):
+    def __init__(self, session_service: SessionService, *, signal_reader: EdfPlotSignalReader | None = None, figure_factory: Callable = create_resampler):
         self.session_service = session_service
         self.signal_reader = signal_reader if signal_reader is not None else EdfPlotSignalReader()
         self.figure_factory = figure_factory
@@ -102,16 +87,14 @@ class PlotlyService:
         self._pending: dict[tuple[str, str], object] = {}
         self._lock = RLock()
 
-    def _get_session(self, session_id: str) -> Session:
+    def get_session(self, session_id: str) -> Session:
         session = self.session_service.get(session_id)
         if session is None:
             self.delete_session(session_id)
             raise PlotSessionNotFoundError(session_id)
         return session
 
-    def create_figure(
-        self, session_id: str, signal_ids: Sequence[str], *, view_id: str = "main", max_points: int = 2000,
-    ) -> dict:
+    def create_figure(self, session_id: str, signal_ids: Sequence[str], *, view_id: str = "main", max_points: int = 2000) -> dict:
         if not isinstance(view_id, str) or not view_id.strip():
             raise ValueError("view_id must be a non-empty string.")
         if type(max_points) is not int or not 3 <= max_points <= 100_000:
@@ -120,7 +103,7 @@ class PlotlyService:
             raise ValueError("Select one or more signal IDs.")
         if len(set(signal_ids)) != len(signal_ids):
             raise ValueError("Signal IDs must be unique.")
-        session = self._get_session(session_id)
+        session = self.get_session(session_id)
         if session.state != SessionState.READY or session.format != StudyFormat.EDF or len(session.source_files) != 1:
             raise ValueError("Plotting requires a ready, single-EDF session.")
         available = {signal.id: signal for signal in session.signals or []}
@@ -141,14 +124,11 @@ class PlotlyService:
             for row, (signal, samples) in enumerate(zip(signals, data), start=1):
                 if samples.signal_id != signal.id or len(samples.times) != len(samples.values) or not len(samples.times):
                     raise ValueError("Plot reader returned inconsistent signal data.")
-                figure.add_trace(
-                    {"type": "scattergl", "name": signal.label, "mode": "lines"},
-                    hf_x=samples.times, hf_y=samples.values, row=row, col=1,
-                )
+                figure.add_trace({"type": "scattergl", "name": signal.label, "mode": "lines"}, hf_x=samples.times, hf_y=samples.values, row=row, col=1)
             initial = figure.to_plotly_json()
             with self._lock:
                 # DELETE/close or a newer selection must not resurrect an old figure.
-                if self._get_session(session_id) is not session:
+                if self.get_session(session_id) is not session:
                     raise PlotSessionNotFoundError(session_id)
                 if self._pending.get(key) is not ticket:
                     raise PlotFigureNotFoundError(key)
@@ -160,7 +140,7 @@ class PlotlyService:
                     del self._pending[key]
 
     def update_figure(self, session_id: str, relayout_data: dict | None, *, view_id: str = "main"):
-        session = self._get_session(session_id)
+        session = self.get_session(session_id)
         if relayout_data is not None and not isinstance(relayout_data, dict):
             raise ValueError("relayout_data must be a dictionary or None.")
         with self._lock:

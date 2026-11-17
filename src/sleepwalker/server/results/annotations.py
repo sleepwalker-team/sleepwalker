@@ -59,19 +59,16 @@ class AnnotationService:
         self._lock = RLock()
 
     def set_label(self, session_id: str, task: str, start: float, label: str) -> AnnotationEdit:
-        return self._add_edit(session_id, AnnotationOperation.SET_LABEL, task=task, start=start, label=label)
+        return self.add_edit(session_id, AnnotationOperation.SET_LABEL, task=task, start=start, label=label)
 
     def add_event(self, session_id: str, task: str, start: float, end: float, label: str) -> AnnotationEdit:
-        return self._add_edit(session_id, AnnotationOperation.ADD_EVENT, task=task, start=start, end=end, label=label, event_id=f"evt_{uuid4()}")
+        return self.add_edit(session_id, AnnotationOperation.ADD_EVENT, task=task, start=start, end=end, label=label, event_id=f"evt_{uuid4()}")
 
     def delete_event(self, session_id: str, task: str, event_id: str) -> AnnotationEdit:
         """Delete a human or model event; callers check that it exists and is still active."""
-        return self._add_edit(session_id, AnnotationOperation.DELETE_EVENT, task=task, event_id=event_id)
+        return self.add_edit(session_id, AnnotationOperation.DELETE_EVENT, task=task, event_id=event_id)
 
-    def record(
-        self, session_id: str, operation: AnnotationOperation, task: PredictionResult, *, duration: float, recording_start: datetime,
-        model_event_ids: set[str], start: float | None = None, end: float | None = None, label: str | None = None, event_id: str | None = None,
-    ) -> AnnotationEdit:
+    def record(self, session_id: str, operation: AnnotationOperation, task: PredictionResult, *, duration: float, recording_start: datetime, model_event_ids: set[str], start: float | None = None, end: float | None = None, label: str | None = None, event_id: str | None = None) -> AnnotationEdit:
         """Check a set_label, add_event or delete_event against the task and current state, then store it."""
         allowed_kinds = {PredictionKind.EPOCH} if operation == AnnotationOperation.SET_LABEL else {PredictionKind.CONTINUOUS, PredictionKind.EVENT}
         if task.kind not in allowed_kinds:
@@ -98,17 +95,13 @@ class AnnotationService:
     def revert(self, session_id: str, edit_id: str) -> AnnotationEdit:
         with self._lock:
             edit = self._edits.get(edit_id)
-        if (
-            edit is None
-            or edit.session_id != session_id
-            or edit.id in self._reverted_ids(self.list_edits(session_id))
-        ):
+        if edit is None or edit.session_id != session_id or edit.id in self.reverted_ids(self.list_edits(session_id)):
             raise AnnotationEditNotFoundError(edit_id)
-        return self._add_edit(session_id, AnnotationOperation.REVERT, reverted_edit_id=edit_id)
+        return self.add_edit(session_id, AnnotationOperation.REVERT, reverted_edit_id=edit_id)
 
     def snapshot(self, session_id: str) -> AnnotationSnapshot:
         edits = self.list_edits(session_id)
-        reverted = self._reverted_ids(edits)
+        reverted = self.reverted_ids(edits)
         active = [edit for edit in edits if edit.id not in reverted]
         deletions = [edit for edit in active if edit.operation == AnnotationOperation.DELETE_EVENT]
         deleted_ids = {edit.event_id for edit in deletions}
@@ -133,7 +126,7 @@ class AnnotationService:
             return len(edit_ids)
 
     @staticmethod
-    def _reverted_ids(edits: list[AnnotationEdit]) -> set[str]:
+    def reverted_ids(edits: list[AnnotationEdit]) -> set[str]:
         """Targets of active reverts. Reverting a revert restores its target (redo).
 
         A revert always targets an earlier edit, so one pass from the end decides which reverts are active.
@@ -144,7 +137,7 @@ class AnnotationService:
                 reverted.add(edit.reverted_edit_id)
         return reverted
 
-    def _add_edit(self, session_id: str, operation: AnnotationOperation, **values) -> AnnotationEdit:
+    def add_edit(self, session_id: str, operation: AnnotationOperation, **values) -> AnnotationEdit:
         edit = AnnotationEdit(id=f"edit_{uuid4()}", session_id=session_id, operation=operation, created_at=datetime.now(timezone.utc), **values)
         self.add(edit)
         return edit
@@ -162,17 +155,11 @@ class EffectiveAnnotation:
     id: str | None = None
 
 
-def effective_annotations(
-    result: PredictionResult, records: list[IntervalPrediction], events: list[ModelEvent], snapshot: AnnotationSnapshot,
-) -> list[EffectiveAnnotation]:
+def effective_annotations(result: PredictionResult, records: list[IntervalPrediction], events: list[ModelEvent], snapshot: AnnotationSnapshot) -> list[EffectiveAnnotation]:
     if result.kind == PredictionKind.EPOCH:
         # Rounded to the 1 µs tolerance with which set_label matched the epoch.
         labels = {round(edit.start, 6): edit.label for edit in snapshot.labels if edit.task == result.task}
-        return [
-            EffectiveAnnotation(r.start, r.end, labels[round(r.start, 6)], "human") if round(r.start, 6) in labels
-            else EffectiveAnnotation(r.start, r.end, r.label, "model", r.probabilities[r.label])
-            for r in records
-        ]
+        return [EffectiveAnnotation(r.start, r.end, labels[round(r.start, 6)], "human") if round(r.start, 6) in labels else EffectiveAnnotation(r.start, r.end, r.label, "model", r.probabilities[r.label]) for r in records]
     deleted = {edit.event_id for edit in snapshot.deleted_events}
     model = [EffectiveAnnotation(e.start, e.end, e.label, "model", e.confidence, e.id) for e in events if e.id not in deleted]
     human = [EffectiveAnnotation(e.start, e.end, e.label, "human", id=e.event_id) for e in snapshot.events if e.task == result.task]

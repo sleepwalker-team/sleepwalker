@@ -53,15 +53,7 @@ def create_ui_app(api):
     async def config(request):
         return JSONResponse({"ui": "sleepwalker", "version": 1, "plot": "/ui/plot/"})
 
-    app = Starlette(routes=[
-        Route("/", lambda request: RedirectResponse("/ui/")),
-        Route("/ui", lambda request: RedirectResponse("/ui/")),
-        Route("/ui/", index),
-        Route("/ui/config", config),
-        Mount("/ui/assets", app=RevalidatingStaticFiles(directory=HERE / "assets")),
-        Mount("/ui/plot", app=WSGIMiddleware(dash_app.server)),
-        Mount("/", app=api),
-    ], lifespan=lifespan)
+    app = Starlette(routes=[Route("/", lambda request: RedirectResponse("/ui/")), Route("/ui", lambda request: RedirectResponse("/ui/")), Route("/ui/", index), Route("/ui/config", config), Mount("/ui/assets", app=RevalidatingStaticFiles(directory=HERE / "assets")), Mount("/ui/plot", app=WSGIMiddleware(dash_app.server)), Mount("/", app=api)], lifespan=lifespan)
     app.state.api = api
     app.state.plots = plots
     app.state.dash = dash_app

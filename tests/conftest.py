@@ -1,5 +1,6 @@
 import hashlib
 import json
+import tempfile
 
 import pytest
 
@@ -35,12 +36,7 @@ def isolate_default_server_storage(request, monkeypatch):
     }:
         return
 
-    from sleepwalker.server.core.storage import TemporaryStorage
-
+    # TemporaryStorage defaults to <tempdir>/sleepwalker; point that at this test's own folder.
     isolated_root = request.getfixturevalue("tmp_path") / "default-server-storage"
-    original_init = TemporaryStorage.__init__
-
-    def isolated_init(self, root=None, **kwargs):
-        original_init(self, isolated_root if root is None else root, **kwargs)
-
-    monkeypatch.setattr(TemporaryStorage, "__init__", isolated_init)
+    isolated_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(isolated_root))

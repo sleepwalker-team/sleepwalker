@@ -34,29 +34,27 @@ def unprocessable(code: str, message: str, details: dict[str, Any] | None = None
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    app.add_exception_handler(RequestValidationError, _request_validation_handler)
-    app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
-    app.add_exception_handler(Exception, _internal_error_handler)
+    app.add_exception_handler(RequestValidationError, request_validation_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(Exception, internal_error_handler)
 
 
-async def _request_validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+async def request_validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     details = {"errors": jsonable_encoder(exc.errors(), custom_encoder={Exception: str})}
-    return _error_response(status.HTTP_400_BAD_REQUEST, "INVALID_REQUEST", "Request validation failed.", details)
+    return error_response(status.HTTP_400_BAD_REQUEST, "INVALID_REQUEST", "Request validation failed.", details)
 
 
-async def _http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
     # Plain HTTP errors (e.g. an unknown route) get the same envelope as APIError.
     detail = exc.detail if isinstance(exc.detail, dict) else {"code": "HTTP_ERROR", "message": str(exc.detail)}
-    return _error_response(exc.status_code, detail["code"], detail["message"], detail.get("details"), exc.headers)
+    return error_response(exc.status_code, detail["code"], detail["message"], detail.get("details"), exc.headers)
 
 
-async def _internal_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+async def internal_error_handler(_request: Request, exc: Exception) -> JSONResponse:
     logger.error("Unhandled server exception", exc_info=exc)
-    return _error_response(status.HTTP_500_INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An unexpected server error occurred.")
+    return error_response(status.HTTP_500_INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An unexpected server error occurred.")
 
 
-def _error_response(
-    status_code: int, code: str, message: str, details: dict[str, Any] | None = None, headers: dict[str, str] | None = None,
-) -> JSONResponse:
+def error_response(status_code: int, code: str, message: str, details: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> JSONResponse:
     content = {"error": {"code": code, "message": message, "details": details}}
     return JSONResponse(status_code=status_code, content=jsonable_encoder(content), headers=headers)

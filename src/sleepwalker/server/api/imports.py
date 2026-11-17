@@ -15,16 +15,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["imports"])
 
 
 @router.post("/import", response_model=ImportAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
-async def import_workspace(
-    background_tasks: BackgroundTasks,
-    sessions: Sessions,
-    storage: Storage,
-    jobs: Jobs,
-    executor: Executor,
-    importer: Importer,
-    cleanup: Cleanup,
-    bundle: UploadFile = File(...),
-) -> ImportAcceptedResponse:
+async def import_workspace(background_tasks: BackgroundTasks, sessions: Sessions, storage: Storage, jobs: Jobs, executor: Executor, importer: Importer, cleanup: Cleanup, bundle: UploadFile = File(...)) -> ImportAcceptedResponse:
     session = sessions.create(source_files=[])
     session.state = SessionState.PROCESSING
     try:
@@ -36,18 +27,12 @@ async def import_workspace(
     except BaseException as exc: # cleanup also through cancelation of client
         cleanup.delete_session(session.id)
         if isinstance(exc, FileTooLargeError):
-            raise APIError(
-                status.HTTP_413_CONTENT_TOO_LARGE, "FILE_TOO_LARGE", "Uploaded workspace exceeds the maximum allowed size.",
-                {"max_size_bytes": exc.max_size_bytes},
-            ) from exc
+            raise APIError(status.HTTP_413_CONTENT_TOO_LARGE, "FILE_TOO_LARGE", "Uploaded workspace exceeds the maximum allowed size.", {"max_size_bytes": exc.max_size_bytes}) from exc
         if isinstance(exc, UnsupportedWorkspaceVersionError):
             raise unprocessable("UNSUPPORTED_FORMAT_VERSION", str(exc)) from exc
         if isinstance(exc, (InvalidWorkspaceError, ValueError)):
             raise bad_request("Workspace archive or manifest is invalid.", code="INVALID_BUNDLE") from exc
         raise
 
-    background_tasks.add_task(
-        run_session_job, job.id, session.id, partial(importer.run, session, paths[0]), executor, cleanup,
-        success_message="Import completed", on_finished=partial(importer.finalize, session),
-    )
+    background_tasks.add_task(run_session_job, job.id, session.id, partial(importer.run, session, paths[0]), executor, cleanup, success_message="Import completed", on_finished=partial(importer.finalize, session))
     return ImportAcceptedResponse(session_id=session.id, job_id=job.id, state=session.state)

@@ -116,15 +116,12 @@ class LoadedWorkspace:
 def inspect_workspace(path: Path, limits: WorkspaceLimits) -> WorkspaceManifest:
     try:
         with ZipFile(path) as archive:
-            return _inspect_archive(archive, limits)
-    except (
-        BadZipFile, UnicodeError, ValueError, KeyError,
-        NotImplementedError, RecursionError, zlib.error,
-    ) as exc:
+            return inspect_archive(archive, limits)
+    except (BadZipFile, UnicodeError, ValueError, KeyError, NotImplementedError, RecursionError, zlib.error) as exc:
         raise InvalidWorkspaceError("Workspace archive or manifest is invalid.") from exc
 
 
-def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceManifest:
+def inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceManifest:
     """checks structure and limits before unpacking zip"""
     members = archive.infolist()
     if not members or len(members) > limits.max_members:
@@ -140,13 +137,8 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
     for member in members:
         name = member.filename
         mode = member.external_attr >> 16 #unix file type sits in upper 16 bits; 0 == no recording
-        if (
-            not name or "\\" in name or "\x00" in member.orig_filename or ":" in name
-            or PurePosixPath(name).is_absolute()
-            or any(part in {"", ".", ".."} for part in name.split("/"))
-            or member.is_dir() or member.flag_bits & 1 # flag_bits & 1 == encrypted
-            or (stat.S_IFMT(mode) not in {0, stat.S_IFREG})
-        ):
+        # flag_bits & 1 marks an encrypted entry.
+        if not name or "\\" in name or "\x00" in member.orig_filename or ":" in name or PurePosixPath(name).is_absolute() or any(part in {"", ".", ".."} for part in name.split("/")) or member.is_dir() or member.flag_bits & 1 or (stat.S_IFMT(mode) not in {0, stat.S_IFREG}):
             raise InvalidWorkspaceError("Workspace archive contains an unsafe file entry.")
 
     if "manifest.json" not in names:
@@ -154,7 +146,7 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
     if archive.getinfo("manifest.json").file_size > limits.max_manifest_bytes:
         raise InvalidWorkspaceError("Workspace manifest exceeds the size limit.")
 
-    raw = _read_json(archive.read("manifest.json"))
+    raw = read_json(archive.read("manifest.json"))
     if not isinstance(raw, dict) or raw.get("format") != "sleepwalker":
         raise InvalidWorkspaceError("Unsupported workspace format.")
     version = raw.get("format_version")
@@ -165,17 +157,11 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
 
     manifest = WorkspaceManifest.model_validate(raw)
     sources = manifest.source_files
-    if len(sources) != len(set(sources)) or any(
-        not name.startswith("study/source/") or len(name.split("/")) != 3
-        for name in sources
-    ):
+    if len(sources) != len(set(sources)) or any(not name.startswith("study/source/") or len(name.split("/")) != 3 for name in sources):
         raise InvalidWorkspaceError("Workspace source file mapping is invalid.")
 
     predictions = list(manifest.prediction_files.values())
-    if len(predictions) != len(set(predictions)) or any(
-        not name.startswith("predictions/") or not name.endswith(".json")
-        or len(name.split("/")) != 2 for name in predictions
-    ):
+    if len(predictions) != len(set(predictions)) or any(not name.startswith("predictions/") or not name.endswith(".json") or len(name.split("/")) != 2 for name in predictions):
         raise InvalidWorkspaceError("Workspace prediction file mapping is invalid.")
 
     expected = {"annotations/edits.json", *sources, *predictions}
@@ -191,15 +177,10 @@ def _inspect_archive(archive: ZipFile, limits: WorkspaceLimits) -> WorkspaceMani
     return manifest
 
 
-def load_workspace(
-    path: Path,
-    source_directory: Path,
-    limits: WorkspaceLimits,
-    check_cancelled: Callable[[], None],
-) -> LoadedWorkspace:
+def load_workspace(path: Path, source_directory: Path, limits: WorkspaceLimits, check_cancelled: Callable[[], None]) -> LoadedWorkspace:
     try:
         with ZipFile(path) as archive:
-            manifest = _inspect_archive(archive, limits)
+            manifest = inspect_archive(archive, limits)
             source_directory.mkdir(parents=True, exist_ok=False)
             sources = []
             documents = {}
@@ -227,7 +208,7 @@ def load_workspace(
                 if is_source:
                     sources.append(source_path)
                 else:
-                    documents[name] = _read_json(data)
+                    documents[name] = read_json(data)
 
             tasks = [WorkspaceTask.model_validate(documents[name]) for name in manifest.prediction_files.values()]
             raw_edits = documents["annotations/edits.json"]
@@ -236,14 +217,11 @@ def load_workspace(
             edits = [WorkspaceEdit.model_validate(edit) for edit in raw_edits]
 
             return LoadedWorkspace(manifest, tasks, edits, sources)
-    except (
-        BadZipFile, UnicodeError, ValueError, KeyError,
-        NotImplementedError, RecursionError, zlib.error,
-    ) as exc:
+    except (BadZipFile, UnicodeError, ValueError, KeyError, NotImplementedError, RecursionError, zlib.error) as exc:
         raise InvalidWorkspaceError("Workspace archive data is invalid.") from exc
 
 
-def _read_json(data: bytes | bytearray):
+def read_json(data: bytes | bytearray):
     def unique_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -266,26 +244,18 @@ class WorkspaceImportService:
     def inspect(self, path: Path) -> None:
         inspect_workspace(path, self.limits)
 
-    def run(
-        self,
-        session: Session,
-        bundle_path: Path,
-        report_progress: ProgressCallback,
-        check_cancelled: CancellationCheck,
-    ) -> None:
+    def run(self, session: Session, bundle_path: Path, report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> None:
         report_progress(JobPhase.IMPORTING, 0.0, "Validating workspace")
         try:
-            workspace = load_workspace(
-                bundle_path, self.storage.root / session.id / "source", self.limits, check_cancelled,
-            )
+            workspace = load_workspace(bundle_path, self.storage.root / session.id / "source", self.limits, check_cancelled)
             check_cancelled()
             study = validate_study(workspace.sources)
-            results = [_restore_prediction(task, session.id, check_cancelled) for task in workspace.tasks]
+            results = [restore_prediction(task, session.id, check_cancelled) for task in workspace.tasks]
             for result in results:
                 check_cancelled()
                 map_predictions(result, study.recording_start)
 
-            edits = _restore_edits(workspace, results, session.id, study, check_cancelled)
+            edits = restore_edits(workspace, results, session.id, study, check_cancelled)
             check_cancelled()
             report_progress(JobPhase.IMPORTING, 0.8, "Restoring workspace data")
             self.prediction_store.add_many(results)
@@ -293,9 +263,7 @@ class WorkspaceImportService:
                 self.annotation_service.add(edit)
 
             session.apply_study(study)
-            session.model_provenance = [
-                model.model_dump(mode="json", exclude_none=True) for model in workspace.manifest.models
-            ]
+            session.model_provenance = [model.model_dump(mode="json", exclude_none=True) for model in workspace.manifest.models]
             bundle_path.unlink()
             # Renew before the job becomes terminal, so expiry cleanup cannot
             # discard an import that took longer than the original session TTL.
@@ -327,11 +295,7 @@ class WorkspaceImportService:
             session.state = SessionState.FAILED
 
 
-def _restore_prediction(
-    task: WorkspaceTask,
-    session_id: str,
-    check_cancelled: CancellationCheck,
-) -> PredictionResult:
+def restore_prediction(task: WorkspaceTask, session_id: str, check_cancelled: CancellationCheck) -> PredictionResult:
     if len(task.classes) != len(set(task.classes)):
         raise InvalidWorkspaceError("Workspace task contains duplicate classes.")
     rows = []
@@ -360,20 +324,10 @@ def _restore_prediction(
         rows.append(row)
 
     columns = ["time", *(f"prob__{label}" for label in task.classes)]
-    return PredictionResult(
-        session_id=session_id,
-        model_id=task.model_id,
-        task=task.task,
-        classes=tuple(task.classes),
-        resolution=task.resolution,
-        kind=task.kind,
-        frame=pd.DataFrame(rows, columns=columns),
-    )
+    return PredictionResult(session_id=session_id, model_id=task.model_id, task=task.task, classes=tuple(task.classes), resolution=task.resolution, kind=task.kind, frame=pd.DataFrame(rows, columns=columns))
 
 
-def _restore_edits(
-    workspace: LoadedWorkspace, results: list[PredictionResult], session_id: str, study: StudyInfo, check_cancelled: CancellationCheck,
-) -> list[AnnotationEdit]:
+def restore_edits(workspace: LoadedWorkspace, results: list[PredictionResult], session_id: str, study: StudyInfo, check_cancelled: CancellationCheck) -> list[AnnotationEdit]:
     """Replay the edit history through the same rules as the API; IDs are new, timestamps are kept."""
     if len({edit.id for edit in workspace.edits}) != len(workspace.edits):
         raise InvalidWorkspaceError("Workspace contains duplicate annotation edits.")
@@ -389,11 +343,7 @@ def _restore_edits(
             task = tasks.get(edit.task)
             if task is None:
                 raise InvalidWorkspaceError("Workspace annotation refers to an unknown task.")
-            restored = replay.record(
-                session_id, edit.operation, task, duration=study.duration, recording_start=study.recording_start,
-                model_event_ids=model_event_ids[task.task], start=edit.start, end=edit.end, label=edit.label,
-                event_id=event_ids.get(edit.event_id, edit.event_id),
-            )
+            restored = replay.record(session_id, edit.operation, task, duration=study.duration, recording_start=study.recording_start, model_event_ids=model_event_ids[task.task], start=edit.start, end=edit.end, label=edit.label, event_id=event_ids.get(edit.event_id, edit.event_id))
             if edit.operation == AnnotationOperation.ADD_EVENT:
                 event_ids[edit.event_id] = restored.event_id
         edit_ids[edit.id] = restored.id

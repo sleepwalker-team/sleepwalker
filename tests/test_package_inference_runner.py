@@ -12,6 +12,9 @@ from sleepwalker.server.core.jobs import JobPhase
 from sleepwalker.server.results.predictions import map_predictions, PredictionKind, PredictionStore
 from sleepwalker.server.core.sessions import Session, SessionState
 from sleepwalker.server.recording.study import StudyFormat
+import numpy as np
+from pyedflib import highlevel
+from sleepwalker.server.recording.relabel import read_edf_labels
 
 
 def create_session(path):
@@ -159,10 +162,6 @@ def test_waiting_for_a_busy_inference_slot_can_be_cancelled(tmp_path):
 
 
 def test_runner_gives_the_worker_a_relabeled_copy_and_records_the_mapping(tmp_path):
-    import numpy as np
-    from pyedflib import highlevel
-    from sleepwalker.server.recording.relabel import read_edf_labels
-
     edf = tmp_path / "session" / "recording.edf"
     edf.parent.mkdir()
     headers = highlevel.make_signal_headers(["EEG Fpz-Cz", "C4-M1"], dimension="uV", sample_frequency=100, physical_min=-2, physical_max=2)

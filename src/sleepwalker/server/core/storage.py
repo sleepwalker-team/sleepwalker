@@ -1,5 +1,6 @@
 """Temporary files of one server: uploads, restored sources and exports."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -16,9 +17,7 @@ from fastapi import UploadFile
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024**3
-SESSION_DIRECTORY_PATTERN = re.compile(
-    r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
+SESSION_DIRECTORY_PATTERN = re.compile(r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 class FileTooLargeError(Exception):
@@ -42,8 +41,6 @@ class TemporaryStorage:
     def exclusive_access(self):
         """Lock storage root for this server; a second server on the same root fails.
         Orphan cleanup requires this, since it deletes every unknown session directory."""
-        import fcntl
-
         lock_path = self.root / ".server.lock"
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags, 0o600)
@@ -68,11 +65,7 @@ class TemporaryStorage:
 
         deleted = []
         for directory in self.root.iterdir():
-            if (
-                SESSION_DIRECTORY_PATTERN.fullmatch(directory.name) is not None
-                and directory.name not in known_session_ids
-                and not directory.is_symlink() and directory.is_dir()
-            ):
+            if SESSION_DIRECTORY_PATTERN.fullmatch(directory.name) is not None and directory.name not in known_session_ids and not directory.is_symlink() and directory.is_dir():
                 shutil.rmtree(directory)
                 deleted.append(directory.name)
 
@@ -102,10 +95,7 @@ class TemporaryStorage:
                         file_size += len(chunk)
 
                         if file_size > self.max_file_size_bytes:
-                            raise FileTooLargeError(
-                                filename,
-                                self.max_file_size_bytes,
-                            )
+                            raise FileTooLargeError(filename, self.max_file_size_bytes)
 
                         target.write(chunk)
 
@@ -173,10 +163,7 @@ class TemporaryStorage:
                     checksums[name] = checksum.hexdigest()
 
                 manifest = {**documents["manifest.json"], "checksums": checksums}
-                archive.writestr(
-                    "manifest.json",
-                    json.dumps(manifest, ensure_ascii=False, allow_nan=False).encode("utf-8"),
-                )
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, allow_nan=False).encode("utf-8"))
 
             check_cancelled()
             temporary_path.replace(destination)

@@ -54,23 +54,15 @@ class EdfSignalReader:
                 values = []
                 for _, chunk in read_chunks(reader, signal_index, start_index, end_index):
                     values.extend(chunk.tolist())
-                return SignalSamples(
-                    times=[index / sample_rate for index in range(start_index, end_index)],
-                    values=values, sample_count=count,
-                )
+                return SignalSamples(times=[index / sample_rate for index in range(start_index, end_index)], values=values, sample_count=count)
 
             if max_points == 2:
                 first = float(reader.readSignal(signal_index, start=start_index, n=1)[0])
                 last = float(reader.readSignal(signal_index, start=end_index - 1, n=1)[0])
-                return SignalSamples(
-                    times=[start_index / sample_rate, (end_index - 1) / sample_rate],
-                    values=[first, last], sample_count=count,
-                )
+                return SignalSamples(times=[start_index / sample_rate, (end_index - 1) / sample_rate], values=[first, last], sample_count=count)
 
-            indices, values = _stream_extrema(reader, signal_index, start_index, end_index, max_points)
-            return SignalSamples(
-                times=[index / sample_rate for index in indices], values=values, sample_count=count,
-            )
+            indices, values = stream_extrema(reader, signal_index, start_index, end_index, max_points)
+            return SignalSamples(times=[index / sample_rate for index in indices], values=values, sample_count=count)
         finally:
             reader.close()
 
@@ -84,7 +76,7 @@ def read_chunks(reader, signal_index: int, start: int, end: int):
         yield index, np.asarray(values)
 
 
-def _stream_extrema(reader, signal_index: int, start: int, end: int, max_points: int):
+def stream_extrema(reader, signal_index: int, start: int, end: int, max_points: int):
     """First and last samples are kept. for each bucket inbetween we keep the highest absolute value for preserving peaks."""
     interior_count = end - start - 2
     bucket_count = max_points - 2

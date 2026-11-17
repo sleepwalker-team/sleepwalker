@@ -41,28 +41,17 @@ class TestRunner:
                 winner = "n2" if "n2" in model.classes else model.classes[0]
                 values = {f"prob__{label}": np.full(len(times), 1 - .04 * (len(model.classes) - 1) if label == winner else .04) for label in model.classes}
                 frame = pd.DataFrame({"time": times, **values})
-            results.append(PredictionResult(session_id=session.id, model_id=model.id, task=model.task,
-                                            classes=model.classes, resolution=model.output_resolution,
-                                            frame=frame, kind=model.output_kind))
+            results.append(PredictionResult(session_id=session.id, model_id=model.id, task=model.task, classes=model.classes, resolution=model.output_resolution, frame=frame, kind=model.output_kind))
         check_cancelled()
         self.store.add_many(results)
 
 
 def test_api(root):
-    specs = [
-        ("sleep", ("wake", "n1", "n2", "n3", "rem"), 30, PredictionKind.EPOCH),
-        ("arousal", ("arousal", "no_arousal"), 1, PredictionKind.EVENT),
-        ("desaturation", ("desaturation", "no desaturation"), 1, PredictionKind.CONTINUOUS),
-    ]
-    models = [ModelInfo(id=f"test-{task}", name=f"TEST · {task}", task=task, classes=classes,
-                        input_channels=("EEG",), output_resolution=resolution,
-                        package_path=Path("test-only"), output_kind=kind) for task, classes, resolution, kind in specs]
-    models.append(ModelInfo(id="test-unmatched", name="TEST · unmatched inputs", task="unmatched",
-                            classes=("artifact",), input_channels=("C3-M2", "E1-M2", "Chin EMG", "ECG"),
-                            output_resolution=1, package_path=Path("test-only")))
+    specs = [("sleep", ("wake", "n1", "n2", "n3", "rem"), 30, PredictionKind.EPOCH), ("arousal", ("arousal", "no_arousal"), 1, PredictionKind.EVENT), ("desaturation", ("desaturation", "no desaturation"), 1, PredictionKind.CONTINUOUS)]
+    models = [ModelInfo(id=f"test-{task}", name=f"TEST · {task}", task=task, classes=classes, input_channels=("EEG",), output_resolution=resolution, package_path=Path("test-only"), output_kind=kind) for task, classes, resolution, kind in specs]
+    models.append(ModelInfo(id="test-unmatched", name="TEST · unmatched inputs", task="unmatched", classes=("artifact",), input_channels=("C3-M2", "E1-M2", "Chin EMG", "ECG"), output_resolution=1, package_path=Path("test-only")))
     store = PredictionStore()
-    return create_app(model_catalog=ModelCatalog(models=models), prediction_store=store,
-                      inference_runner=TestRunner(store), temporary_storage=TemporaryStorage(root))
+    return create_app(model_catalog=ModelCatalog(models=models), prediction_store=store, inference_runner=TestRunner(store), temporary_storage=TemporaryStorage(root))
 
 
 def main():

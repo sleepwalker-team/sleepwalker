@@ -51,13 +51,7 @@ class Session:
 
 
 class SessionService:
-    def __init__(
-        self,
-        *,
-        ttl: timedelta = DEFAULT_SESSION_TTL,
-        clock: Callable[[], datetime] = utc_now,
-        active_job_check: Callable[[str], bool] | None = None,
-    ) -> None:
+    def __init__(self, *, ttl: timedelta = DEFAULT_SESSION_TTL, clock: Callable[[], datetime] = utc_now, active_job_check: Callable[[str], bool] | None = None) -> None:
         if ttl <= timedelta(0):
             raise ValueError("Session TTL must be positive.")
 
@@ -69,14 +63,7 @@ class SessionService:
 
     def create(self, source_files: list[Path]) -> Session:
         now = self.clock()
-        session = Session(
-            id=f"sess_{uuid4()}",
-            created_at=now,
-            expires_at=now + self.ttl,
-            last_accessed_at=now,
-            source_files=source_files,
-            state=SessionState.CREATED,
-        )
+        session = Session(id=f"sess_{uuid4()}", created_at=now, expires_at=now + self.ttl, last_accessed_at=now, source_files=source_files, state=SessionState.CREATED)
         with self._lock:
             self._sessions[session.id] = session
         return session

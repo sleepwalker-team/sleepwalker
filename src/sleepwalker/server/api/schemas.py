@@ -232,10 +232,7 @@ class ExportRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_format_and_mode(self) -> "ExportRequest":
-        supported = {
-            (ExportFormat.JSON, ExportMode.RESULTS),
-            (ExportFormat.SLEEPWALKER, ExportMode.WORKSPACE),
-        }
+        supported = {(ExportFormat.JSON, ExportMode.RESULTS), (ExportFormat.SLEEPWALKER, ExportMode.WORKSPACE)}
         if (self.format, self.mode) not in supported:
             raise ValueError("Supported exports are json/results and sleepwalker/workspace.")
 

@@ -131,10 +131,7 @@ class JobService:
 
     def create(self, session_id: str, job_type: str) -> Job:
         now = datetime.now(timezone.utc)
-        job = Job(
-            id=f"job_{uuid4()}", session_id=session_id, type=job_type, state=JobState.QUEUED,
-            created_at=now, updated_at=now, message="Waiting for execution",
-        )
+        job = Job(id=f"job_{uuid4()}", session_id=session_id, type=job_type, state=JobState.QUEUED, created_at=now, updated_at=now, message="Waiting for execution")
         with self._lock:
             self._jobs[job.id] = job
         return job
@@ -163,7 +160,7 @@ class JobService:
 
     def subscribe(self, job_id: str) -> JobSubscription:
         with self._lock:
-            subscription = JobSubscription(deepcopy(self._require(job_id)))
+            subscription = JobSubscription(deepcopy(self.require(job_id)))
             self._subscriptions.setdefault(job_id, set()).add(subscription)
             return subscription
 
@@ -178,36 +175,36 @@ class JobService:
             subscription.close()
 
     def mark_running(self, job_id: str, phase: JobPhase, message: str) -> Job:
-        return self._transition(job_id, {JobState.QUEUED}, JobState.RUNNING, phase=phase, message=message)
+        return self.transition(job_id, {JobState.QUEUED}, JobState.RUNNING, phase=phase, message=message)
 
     def update_progress(self, job_id: str, *, phase: JobPhase, progress: float | None, message: str) -> Job:
         with self._lock:
-            job = self._require(job_id)
+            job = self.require(job_id)
             if job.state != JobState.RUNNING:
                 raise ValueError(f"Cannot update progress for {job.state.value} job {job.id}.")
             if progress is not None and not 0.0 <= progress <= 1.0:
                 raise ValueError("Job progress must be between 0.0 and 1.0.")
-            return self._apply(job, phase=phase, progress=progress, message=message)
+            return self.apply(job, phase=phase, progress=progress, message=message)
 
     def mark_succeeded(self, job_id: str, message: str = "Inference completed") -> Job:
-        return self._transition(job_id, {JobState.RUNNING}, JobState.SUCCEEDED, phase=None, progress=1.0, message=message)
+        return self.transition(job_id, {JobState.RUNNING}, JobState.SUCCEEDED, phase=None, progress=1.0, message=message)
 
     def mark_failed(self, job_id: str, error: JobError) -> Job:
-        return self._transition(job_id, {JobState.RUNNING}, JobState.FAILED, message=error.message, error=error)
+        return self.transition(job_id, {JobState.RUNNING}, JobState.FAILED, message=error.message, error=error)
 
     def mark_cancelled(self, job_id: str) -> Job:
-        return self._transition(job_id, {JobState.CANCELLING}, JobState.CANCELLED, phase=None, progress=None, message="Cancelled")
+        return self.transition(job_id, {JobState.CANCELLING}, JobState.CANCELLED, phase=None, progress=None, message="Cancelled")
 
     def request_cancel(self, job_id: str) -> Job:
         with self._lock:
-            job = self._require(job_id)
+            job = self.require(job_id)
             if job.state == JobState.CANCELLING:
                 return job
-            return self._transition(job_id, {JobState.QUEUED, JobState.RUNNING}, JobState.CANCELLING, message="Cancellation requested")
+            return self.transition(job_id, {JobState.QUEUED, JobState.RUNNING}, JobState.CANCELLING, message="Cancellation requested")
 
     def is_cancellation_requested(self, job_id: str) -> bool:
         with self._lock:
-            return self._require(job_id).state == JobState.CANCELLING
+            return self.require(job_id).state == JobState.CANCELLING
 
     def delete_session(self, session_id: str) -> int:
         with self._lock:
@@ -218,24 +215,24 @@ class JobService:
                     subscription.publish(None)
             return len(job_ids)
 
-    def _require(self, job_id: str) -> Job:
+    def require(self, job_id: str) -> Job:
         job = self._jobs.get(job_id)
         if job is None:
             raise KeyError(f"Unknown job ID: {job_id}")
         return job
 
-    def _transition(self, job_id: str, allowed: set[JobState], target: JobState, **changes: Any) -> Job:
+    def transition(self, job_id: str, allowed: set[JobState], target: JobState, **changes: Any) -> Job:
         with self._lock:
-            job = self._require(job_id)
+            job = self.require(job_id)
             if job.state not in allowed:
                 raise ValueError(f"Job {job.id} cannot transition from {job.state.value} to {target.value}.")
             # Renew the session before the job becomes terminal, so expiry
             # cleanup cannot remove its results in between.
             if target in TERMINAL_STATES and self.on_completion is not None:
                 self.on_completion(job.session_id)
-            return self._apply(job, state=target, **changes)
+            return self.apply(job, state=target, **changes)
 
-    def _apply(self, job: Job, **changes: Any) -> Job:
+    def apply(self, job: Job, **changes: Any) -> Job:
         for name, value in changes.items():
             setattr(job, name, value)
         job.updated_at = datetime.now(timezone.utc)
@@ -273,10 +270,10 @@ class JobExecutor:
             # A cancellation wins over whatever failure it may have provoked.
             if jobs.is_cancellation_requested(job_id):
                 return jobs.mark_cancelled(job_id)
-            return jobs.mark_failed(job_id, _to_job_error(job_id, exc))
+            return jobs.mark_failed(job_id, to_job_error(job_id, exc))
 
 
-def _to_job_error(job_id: str, exc: Exception) -> JobError:
+def to_job_error(job_id: str, exc: Exception) -> JobError:
     if isinstance(exc, JobExecutionError):
         return JobError(code=exc.code, message=exc.message, details=exc.details)
     if isinstance(exc, MemoryError):

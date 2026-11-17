@@ -202,14 +202,6 @@ def test_idle_cleanup_releases_arrays_but_keeps_session(api):
     assert api.state.plotly_service.has_figure(session.id, view_id="tab-1")
 
 
-@pytest.mark.parametrize("data,expected", [
-    ({"xaxis3.range[0]": 5, "xaxis3.range[1]": 7}, [5, 7]),
-    ({"xaxis.range": [-2, 8]}, [0, 10]),
-    ({"xaxis.autorange": True}, [0, 100]),
-    ({"xaxis.range": [95, 105]}, [90, 100]),
-    ({"shapes[0].x0": 10}, None),
-    ({"xaxis.range": [float("nan"), 1]}, None),
-    ({"xaxis.range": [8, 4]}, None),
-])
+@pytest.mark.parametrize("data,expected", [({"xaxis3.range[0]": 5, "xaxis3.range[1]": 7}, [5, 7]), ({"xaxis.range": [-2, 8]}, [0, 10]), ({"xaxis.autorange": True}, [0, 100]), ({"xaxis.range": [95, 105]}, [90, 100]), ({"shapes[0].x0": 10}, None), ({"xaxis.range": [float("nan"), 1]}, None), ({"xaxis.range": [8, 4]}, None)])
 def test_time_range_normalizes_subplots_and_rejects_non_navigation(data, expected):
     assert time_range(data, 100) == expected

@@ -47,10 +47,7 @@ class ResultExportOptions:
 
 
 class ExportService:
-    def __init__(
-        self, storage: TemporaryStorage, prediction_store: PredictionStore, annotation_service: AnnotationService,
-        clock: Callable[[], datetime] = utc_now,
-    ) -> None:
+    def __init__(self, storage: TemporaryStorage, prediction_store: PredictionStore, annotation_service: AnnotationService, clock: Callable[[], datetime] = utc_now) -> None:
         self.storage = storage
         self.prediction_store = prediction_store
         self.annotation_service = annotation_service
@@ -59,16 +56,7 @@ class ExportService:
         self._lock = RLock()
 
     def create(self, session: Session, job_id: str, *, format: str = "json", mode: str = "results") -> Export:
-        export = Export(
-            id=f"export_{uuid4()}",
-            session_id=session.id,
-            job_id=job_id,
-            state=ExportState.QUEUED,
-            format=format,
-            mode=mode,
-            created_at=self.clock(),
-            expires_at=session.expires_at,
-        )
+        export = Export(id=f"export_{uuid4()}", session_id=session.id, job_id=job_id, state=ExportState.QUEUED, format=format, mode=mode, created_at=self.clock(), expires_at=session.expires_at)
         self.add(export)
         return export
 
@@ -119,43 +107,32 @@ class ExportService:
 
     def build_payload(self, session: Session, options: ResultExportOptions | None = None) -> dict:
         options = options or ResultExportOptions()
-        payload = {"format": "sleepwalker-results", "version": 1, "exported_at": _format_datetime(self.clock())}
+        payload = {"format": "sleepwalker-results", "version": 1, "exported_at": format_datetime(self.clock())}
 
         if options.metadata:
-            payload["session"] = _session_metadata(session)
+            payload["session"] = session_metadata(session)
             payload["models"] = session.model_provenance
         if options.predictions:
             snapshot = self.annotation_service.snapshot(session.id)
             payload["tasks"] = []
             for result in self.prediction_store.list_for_session(session.id):
-                task = _prediction_task(result, session, options.probabilities)
+                task = prediction_task(result, session, options.probabilities)
                 if options.annotations:
                     effective = effective_annotations(result, *self.prediction_store.mapped(result, session.recording_start), snapshot)
                     task["effective"] = [{key: value for key, value in vars(item).items() if value is not None} for item in effective]
                 payload["tasks"].append(task)
         if options.annotations:
-            payload["annotations"] = [_annotation_edit(edit) for edit in self.annotation_service.list_edits(session.id)]
+            payload["annotations"] = [annotation_edit(edit) for edit in self.annotation_service.list_edits(session.id)]
 
         return payload
 
     def build_workspace_documents(self, session: Session) -> tuple[dict, dict[str, Path]]:
-        sources = _source_files(session)
+        sources = archive_sources(session)
         payload = self.build_payload(session)
         tasks = payload["tasks"]
-        models = [_model_metadata(task, session) for task in tasks]
+        models = [model_metadata(task, session) for task in tasks]
         prediction_files = {task["task"]: f"predictions/{index:04d}.json" for index, task in enumerate(tasks)}
-        documents = {
-            "manifest.json": {
-                "format": "sleepwalker",
-                "format_version": 2,
-                "created_at": payload["exported_at"],
-                "created_with": _created_with(),
-                "source_files": list(sources),
-                "prediction_files": prediction_files,
-                "models": models,
-            },
-            "annotations/edits.json": payload["annotations"],
-        }
+        documents = {"manifest.json": {"format": "sleepwalker", "format_version": 2, "created_at": payload["exported_at"], "created_with": created_with(), "source_files": list(sources), "prediction_files": prediction_files, "models": models}, "annotations/edits.json": payload["annotations"]}
         for task in tasks:
             # Events and the effective annotation are derived again on import.
             task.pop("events", None)
@@ -165,23 +142,11 @@ class ExportService:
         return documents, sources
 
 
-def _session_metadata(session: Session) -> dict:
-    return {
-        "id": session.id,
-        "created_at": _format_datetime(session.created_at),
-        "expires_at": _format_datetime(session.expires_at),
-        "format": session.format.value if session.format is not None else None,
-        "duration": session.duration,
-        "recording_start": _format_datetime(session.recording_start) if session.recording_start is not None else None,
-        "patient": session.patient,
-        "signals": [
-            {"id": signal.id, "label": signal.label, "unit": signal.unit, "sample_rate": signal.sample_rate}
-            for signal in session.signals or []
-        ],
-    }
+def session_metadata(session: Session) -> dict:
+    return {"id": session.id, "created_at": format_datetime(session.created_at), "expires_at": format_datetime(session.expires_at), "format": session.format.value if session.format is not None else None, "duration": session.duration, "recording_start": format_datetime(session.recording_start) if session.recording_start is not None else None, "patient": session.patient, "signals": [{"id": signal.id, "label": signal.label, "unit": signal.unit, "sample_rate": signal.sample_rate} for signal in session.signals or []]}
 
 
-def _prediction_task(result: PredictionResult, session: Session, include_probabilities: bool) -> dict:
+def prediction_task(result: PredictionResult, session: Session, include_probabilities: bool) -> dict:
     if session.recording_start is None:
         raise ValueError("Cannot export predictions without a recording start time.")
 
@@ -197,36 +162,18 @@ def _prediction_task(result: PredictionResult, session: Session, include_probabi
             record["probabilities"] = prediction.probabilities
         records.append(record)
 
-    task = {
-        "model_id": result.model_id,
-        "task": result.task,
-        "kind": result.kind.value,
-        "classes": list(result.classes),
-        "resolution": result.resolution,
-        "predictions": records,
-    }
+    task = {"model_id": result.model_id, "task": result.task, "kind": result.kind.value, "classes": list(result.classes), "resolution": result.resolution, "predictions": records}
     if result.kind == PredictionKind.EVENT:
         task["events"] = [vars(event) for event in model_events(result, session.recording_start)]
     return task
 
 
-def _annotation_edit(edit: AnnotationEdit) -> dict:
-    values = {
-        "id": edit.id,
-        "session_id": edit.session_id,
-        "operation": edit.operation.value,
-        "created_at": _format_datetime(edit.created_at),
-        "task": edit.task,
-        "start": edit.start,
-        "end": edit.end,
-        "label": edit.label,
-        "event_id": edit.event_id,
-        "reverted_edit_id": edit.reverted_edit_id,
-    }
+def annotation_edit(edit: AnnotationEdit) -> dict:
+    values = {"id": edit.id, "session_id": edit.session_id, "operation": edit.operation.value, "created_at": format_datetime(edit.created_at), "task": edit.task, "start": edit.start, "end": edit.end, "label": edit.label, "event_id": edit.event_id, "reverted_edit_id": edit.reverted_edit_id}
     return {key: value for key, value in values.items() if value is not None}
 
 
-def _source_files(session: Session) -> dict[str, Path]:
+def archive_sources(session: Session) -> dict[str, Path]:
     if not session.source_files:
         raise JobExecutionError("EXPORT_FAILED", "Study source files are missing.")
 
@@ -247,26 +194,20 @@ def _source_files(session: Session) -> dict[str, Path]:
     return sources
 
 
-def _model_metadata(task: dict, session: Session) -> dict:
+def model_metadata(task: dict, session: Session) -> dict:
     recorded = next((model for model in session.model_provenance if model["id"] == task["model_id"]), None)
     if recorded is not None:
         return dict(recorded)
-    return {
-        "id": task["model_id"],
-        "task": task["task"],
-        "classes": task["classes"],
-        "output_kind": task["kind"],
-        "output_resolution": task["resolution"],
-    }
+    return {"id": task["model_id"], "task": task["task"], "classes": task["classes"], "output_kind": task["kind"], "output_resolution": task["resolution"]}
 
 
-def _created_with() -> str:
+def created_with() -> str:
     try:
         return f"sleepwalker {version('sleepwalker')}"
     except PackageNotFoundError:
         return "sleepwalker (version unknown)"
 
 
-def _format_datetime(value: datetime) -> str:
+def format_datetime(value: datetime) -> str:
     text = value.isoformat()
     return f"{text[:-6]}Z" if text.endswith("+00:00") else text

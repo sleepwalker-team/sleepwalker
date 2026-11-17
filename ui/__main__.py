@@ -19,10 +19,7 @@ def main():
     args = parser.parse_args()
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
-    api = (
-        create_local_app(args.models, device=args.device, batch_size=args.batch_size)
-        if args.models else create_app()
-    )
+    api = create_local_app(args.models, device=args.device, batch_size=args.batch_size) if args.models else create_app()
     if args.storage:
         # Configure the existing shared storage object; every API service retains it.
         storage = api.state.temporary_storage

@@ -15,19 +15,10 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 def to_job_response(job: Job) -> JobResponse:
     error = ErrorDetail(code=job.error.code, message=job.error.message, details=job.error.details) if job.error is not None else None
-    return JobResponse(
-        id=job.id,
-        type=job.type,
-        state=job.state,
-        phase=job.phase,
-        progress=job.progress,
-        message=job.message,
-        updated_at=job.updated_at,
-        error=error,
-    )
+    return JobResponse(id=job.id, type=job.type, state=job.state, phase=job.phase, progress=job.progress, message=job.message, updated_at=job.updated_at, error=error)
 
 
-def _job_not_found():
+def job_not_found():
     return not_found("JOB_NOT_FOUND", "Job not found.")
 
 
@@ -35,7 +26,7 @@ def _job_not_found():
 def get_job(job_id: str, jobs: Jobs) -> JobResponse:
     job = jobs.snapshot(job_id)
     if job is None:
-        raise _job_not_found()
+        raise job_not_found()
     return to_job_response(job)
 
 
@@ -60,27 +51,15 @@ async def stream_job_events(job_id: str, jobs: JobService, subscription: JobSubs
         jobs.unsubscribe(job_id, subscription)
 
 
-@router.get(
-    "/{job_id}/events",
-    response_class=StreamingResponse,
-    responses={
-        200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}},
-        404: {"model": ErrorResponse},
-    },
-)
+@router.get("/{job_id}/events", response_class=StreamingResponse, responses={200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}, 404: {"model": ErrorResponse}})
 async def get_job_events(job_id: str, jobs: Jobs) -> StreamingResponse:
     try:
         subscription = jobs.subscribe(job_id)
     except KeyError as exc:
-        raise _job_not_found() from exc
+        raise job_not_found() from exc
 
-    return StreamingResponse(
-        stream_job_events(job_id, jobs, subscription),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        # A client that disconnects before streaming starts never runs the generator's cleanup.
-        background=BackgroundTask(jobs.unsubscribe, job_id, subscription),
-    )
+    # The background task unsubscribes a client that disconnects before streaming starts, since the generator's cleanup never runs then.
+    return StreamingResponse(stream_job_events(job_id, jobs, subscription), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}, background=BackgroundTask(jobs.unsubscribe, job_id, subscription))
 
 
 @router.post("/{job_id}/cancel", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -88,7 +67,7 @@ def cancel_job(job_id: str, jobs: Jobs) -> JobResponse:
     try:
         return to_job_response(jobs.request_cancel(job_id))
     except KeyError as exc:
-        raise _job_not_found() from exc
+        raise job_not_found() from exc
     except ValueError as exc:
         job = jobs.get(job_id)
         details = {"state": job.state.value} if job is not None else None

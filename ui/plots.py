@@ -11,9 +11,7 @@ from threading import RLock
 
 from dash import Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 
-from sleepwalker.server.recording.plots import (
-    PlotFigureNotFoundError, PlotlyUnavailableError, PlotSessionNotFoundError,
-)
+from sleepwalker.server.recording.plots import (PlotFigureNotFoundError, PlotSessionNotFoundError)
 
 # Points per visible width. Data is also sent for one width on each side, so
 # panning shows signal right away instead of an empty edge until mouse release.
@@ -53,35 +51,15 @@ def with_buffer(bounds, duration):
 def style_figure(figure, signals, bounds, revision, duration):
     figure = copy.deepcopy(figure)
     layout = figure.setdefault("layout", {})
-    layout.update({
-        "template": {}, "paper_bgcolor": "#fcfcfb", "plot_bgcolor": "#fcfcfb",
-        "font": {"family": "Arial, sans-serif", "size": 11, "color": "#343c40"},
-        "margin": {"l": 126, "r": 22, "t": 16, "b": 12},
-        "height": max(230, len(signals) * 100), "showlegend": False,
-        "dragmode": "pan", "hovermode": "closest", "uirevision": revision,
-        "annotations": [],
-    })
+    layout.update({"template": {}, "paper_bgcolor": "#fcfcfb", "plot_bgcolor": "#fcfcfb", "font": {"family": "Arial, sans-serif", "size": 11, "color": "#343c40"}, "margin": {"l": 126, "r": 22, "t": 16, "b": 12}, "height": max(230, len(signals) * 100), "showlegend": False, "dragmode": "pan", "hovermode": "closest", "uirevision": revision, "annotations": []})
     for index, signal in enumerate(signals):
         axis = "" if index == 0 else str(index + 1)
-        layout["xaxis" + axis].update({
-            "range": bounds, "autorange": False, "title": None,
-            "showticklabels": False, "showgrid": True, "gridcolor": "#e9eae8",
-            "zeroline": False, "fixedrange": False,
-            "minallowed": 0, "maxallowed": duration,
-        })
+        layout["xaxis" + axis].update({"range": bounds, "autorange": False, "title": None, "showticklabels": False, "showgrid": True, "gridcolor": "#e9eae8", "zeroline": False, "fixedrange": False, "minallowed": 0, "maxallowed": duration})
         yaxis = layout["yaxis" + axis]
         yaxis.update({"title": None, "gridcolor": "#eff0ed", "zeroline": False, "nticks": 3, "fixedrange": True})
         domain = yaxis.get("domain", [0, 1])
-        layout["annotations"].append({
-            "text": escape(signal["label"]), "x": -.02, "xref": "paper", "y": sum(domain) / 2,
-            "yref": "paper", "showarrow": False, "xanchor": "right", "yanchor": "bottom",
-            "font": {"size": 11, "color": "#262a2c"},
-        })
-        layout["annotations"].append({
-            "text": escape(signal.get("unit", "")), "x": -.02, "xref": "paper", "y": sum(domain) / 2,
-            "yref": "paper", "showarrow": False, "xanchor": "right", "yanchor": "top",
-            "font": {"size": 10, "color": "#6e7476"},
-        })
+        layout["annotations"].append({"text": escape(signal["label"]), "x": -.02, "xref": "paper", "y": sum(domain) / 2, "yref": "paper", "showarrow": False, "xanchor": "right", "yanchor": "bottom", "font": {"size": 11, "color": "#262a2c"}})
+        layout["annotations"].append({"text": escape(signal.get("unit", "")), "x": -.02, "xref": "paper", "y": sum(domain) / 2, "yref": "paper", "showarrow": False, "xanchor": "right", "yanchor": "top", "font": {"size": 10, "color": "#6e7476"}})
         figure["data"][index].update({"line": {"color": "#343c40", "width": 1}, "name": signal["label"]})
     return figure
 
@@ -191,7 +169,7 @@ class PlotController:
                 return result, {"session": session_id, "view": view_id, "range": bounds, "revision": revision, "height": max(230, len(channels) * 100)}
             except (PlotSessionNotFoundError, PlotFigureNotFoundError):
                 return no_update, no_update
-            except (ValueError, PlotlyUnavailableError) as exc:
+            except ValueError as exc:
                 return no_update, {"error": str(exc), "session": session_id, "view": view_id}
         finally:
             view.lock.release()
@@ -218,21 +196,12 @@ class PlotController:
 
 
 def create_dash_app(controller):
-    app = Dash(__name__, requests_pathname_prefix="/ui/plot/", routes_pathname_prefix="/",
-               assets_folder=str(Path(__file__).parent / "plot_assets"), title="Sleepwalker · Signale",
-               update_title=None, external_scripts=[], external_stylesheets=[])
-    app.layout = html.Div([
-        dcc.Store(id="plot-request"), dcc.Store(id="plot-status"), html.Div(id="bridge-output", hidden=True),
-        dcc.Graph(id="signals", figure={"data": [], "layout": {"paper_bgcolor": "#fcfcfb", "plot_bgcolor": "#fcfcfb"}},
-                  config={"displaylogo": False, "displayModeBar": False, "scrollZoom": True, "responsive": True},
-                  # The iframe gets its height from the channel count. A percentage
-                  # here collapses to zero when Graph's responsive React update
-                  # removes layout.height and its auto-height parents collapse.
-                  style={"width": "100%", "height": "100vh"}),
-    ])
+    app = Dash(__name__, requests_pathname_prefix="/ui/plot/", routes_pathname_prefix="/", assets_folder=str(Path(__file__).parent / "plot_assets"), title="Sleepwalker · Signale", update_title=None, external_scripts=[], external_stylesheets=[])
+    # The iframe gets its height from the channel count. A percentage height collapses to zero
+    # when Graph's responsive React update removes layout.height and its auto-height parents collapse.
+    app.layout = html.Div([dcc.Store(id="plot-request"), dcc.Store(id="plot-status"), html.Div(id="bridge-output", hidden=True), dcc.Graph(id="signals", figure={"data": [], "layout": {"paper_bgcolor": "#fcfcfb", "plot_bgcolor": "#fcfcfb"}}, config={"displaylogo": False, "displayModeBar": False, "scrollZoom": True, "responsive": True}, style={"width": "100%", "height": "100vh"})])
 
-    @app.callback(Output("signals", "figure"), Output("plot-status", "data"),
-                  Input("plot-request", "data"), prevent_initial_call=True)
+    @app.callback(Output("signals", "figure"), Output("plot-status", "data"), Input("plot-request", "data"), prevent_initial_call=True)
     def render(request):
         return controller.render(request)
 

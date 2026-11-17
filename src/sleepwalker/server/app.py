@@ -37,7 +37,7 @@ async def run_in_thread(function, *args):
         raise
 
 
-def _cleanup_expired_sessions(app: FastAPI) -> None:
+def cleanup_expired_sessions(app: FastAPI) -> None:
     try:
         deleted = app.state.session_cleanup_service.cleanup_expired()
         if deleted:
@@ -46,14 +46,14 @@ def _cleanup_expired_sessions(app: FastAPI) -> None:
         logger.exception("Failed to clean up expired sessions.")
 
 
-async def _cleanup_periodically(app: FastAPI) -> None:
+async def cleanup_periodically(app: FastAPI) -> None:
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-        await run_in_thread(_cleanup_expired_sessions, app)
+        await run_in_thread(cleanup_expired_sessions, app)
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     storage = app.state.temporary_storage
     with storage.exclusive_access():
         known_ids = {session.id for session in app.state.session_service.list()}
@@ -61,8 +61,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if orphan_ids:
             logger.info("Deleted %d orphan temporary sessions from an earlier server run.", len(orphan_ids))
 
-        await run_in_thread(_cleanup_expired_sessions, app)
-        cleanup_task = asyncio.create_task(_cleanup_periodically(app))
+        await run_in_thread(cleanup_expired_sessions, app)
+        cleanup_task = asyncio.create_task(cleanup_periodically(app))
         try:
             yield
         finally:
@@ -72,19 +72,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.plotly_service.clear()
 
 
-def create_app(
-    *,
-    model_catalog: ModelCatalog | None = None,
-    inference_runner: InferenceRunner | None = None,
-    prediction_store: PredictionStore | None = None,
-    temporary_storage: TemporaryStorage | None = None,
-    session_service: SessionService | None = None,
-    job_service: JobService | None = None,
-    annotation_service: AnnotationService | None = None,
-    signal_reader: EdfSignalReader | None = None,
-) -> FastAPI:
+def create_app(*, model_catalog: ModelCatalog | None = None, inference_runner: InferenceRunner | None = None, prediction_store: PredictionStore | None = None, temporary_storage: TemporaryStorage | None = None, session_service: SessionService | None = None, job_service: JobService | None = None, annotation_service: AnnotationService | None = None, signal_reader: EdfSignalReader | None = None) -> FastAPI:
     """Build the API. Without a catalog and runner it serves everything but inference."""
-    app = FastAPI(title="Sleepwalker API", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(title="Sleepwalker API", version="0.1.0", lifespan=lifespan)
 
     state = app.state
     state.model_catalog = model_catalog or ModelCatalog()
@@ -103,18 +93,8 @@ def create_app(
     state.job_executor = JobExecutor(state.job_service)
     state.plotly_service = PlotlyService(state.session_service)
     state.export_service = ExportService(state.temporary_storage, state.prediction_store, state.annotation_service)
-    state.session_cleanup_service = SessionCleanupService(
-        session_service=state.session_service,
-        job_service=state.job_service,
-        storage=state.temporary_storage,
-        prediction_store=state.prediction_store,
-        annotation_service=state.annotation_service,
-        export_service=state.export_service,
-        plotly_service=state.plotly_service,
-    )
-    state.workspace_import_service = WorkspaceImportService(
-        state.session_service, state.temporary_storage, state.prediction_store, state.annotation_service,
-    )
+    state.session_cleanup_service = SessionCleanupService(session_service=state.session_service, job_service=state.job_service, storage=state.temporary_storage, prediction_store=state.prediction_store, annotation_service=state.annotation_service, export_service=state.export_service, plotly_service=state.plotly_service)
+    state.workspace_import_service = WorkspaceImportService(state.session_service, state.temporary_storage, state.prediction_store, state.annotation_service)
 
     register_exception_handlers(app)
     for module in (health, models, sessions, predictions, signals, annotations, jobs, exports, imports):
@@ -126,8 +106,4 @@ def create_app(
 def create_local_app(model_directory: Path, *, device: str = "cpu", batch_size: int = 1) -> FastAPI:
     """Build the API with inference: models from a directory, run in a worker subprocess."""
     prediction_store = PredictionStore()
-    return create_app(
-        model_catalog=ModelCatalog(model_directory),
-        prediction_store=prediction_store,
-        inference_runner=PackageInferenceRunner(prediction_store, device=device, batch_size=batch_size),
-    )
+    return create_app(model_catalog=ModelCatalog(model_directory), prediction_store=prediction_store, inference_runner=PackageInferenceRunner(prediction_store, device=device, batch_size=batch_size))

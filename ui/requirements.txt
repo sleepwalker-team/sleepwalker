@@ -1,5 +1,4 @@
 -r ../src/sleepwalker/server/requirements.txt
--r ../src/sleepwalker/server/requirements-plotly.txt
 numpy>=1.24
 pandas>=2.0
 pyedflib>=0.1.39

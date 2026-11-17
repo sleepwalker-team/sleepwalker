@@ -12,19 +12,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["signals"])
 
 @router.get("/{session_id}/signals", response_model=SignalListResponse)
 def list_signals(session: SessionDep) -> SignalListResponse:
-    return SignalListResponse(
-        signals=[
-            SignalSummaryResponse(
-                id=signal.id,
-                label=signal.label,
-                unit=signal.unit,
-                sample_rate=signal.sample_rate,
-                start=0.0,
-                end=session.duration or 0.0,
-            )
-            for signal in session.signals or []
-        ]
-    )
+    return SignalListResponse(signals=[SignalSummaryResponse(id=signal.id, label=signal.label, unit=signal.unit, sample_rate=signal.sample_rate, start=0.0, end=session.duration or 0.0) for signal in session.signals or []])
 
 
 @router.get("/{session_id}/signals/{signal_id}", response_model=SignalDataResponse)
@@ -47,10 +35,7 @@ def get_signal_data(session: SessionDep, signal_id: str, reader: SignalReader, s
     range_start = max(0.0, start)
     range_end = min(session.duration, requested_end)
     if range_start >= range_end:
-        raise APIError(
-            status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE",
-            "Signal time range does not overlap the recording.", {"start": start, "end": requested_end},
-        )
+        raise APIError(status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE", "Signal time range does not overlap the recording.", {"start": start, "end": requested_end})
 
     try:
         samples = reader.read(session.source_files[0], signal.id, range_start, range_end, max_points=max_points)
@@ -60,12 +45,4 @@ def get_signal_data(session: SessionDep, signal_id: str, reader: SignalReader, s
     if not samples.times:
         raise APIError(status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, "RANGE_NOT_SATISFIABLE", "No signal samples exist in the requested range.")
 
-    return SignalDataResponse(
-        signal=signal.id,
-        unit=signal.unit,
-        sample_rate=signal.sample_rate,
-        start=range_start,
-        end=range_end,
-        downsampled=samples.sample_count > len(samples.times),
-        points=list(zip(samples.times, samples.values)),
-    )
+    return SignalDataResponse(signal=signal.id, unit=signal.unit, sample_rate=signal.sample_rate, start=range_start, end=range_end, downsampled=samples.sample_count > len(samples.times), points=list(zip(samples.times, samples.values)))

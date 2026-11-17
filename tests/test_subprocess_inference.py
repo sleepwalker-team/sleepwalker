@@ -8,6 +8,11 @@ from sleepwalker.server.inference import runner as subprocess_inference
 from sleepwalker.server.core.jobs import JobCancelledError, JobExecutionError
 from sleepwalker.server.inference.catalog import read_model_manifest
 from sleepwalker.server.inference.runner import SubprocessInferenceClient
+from fastapi.testclient import TestClient
+from sleepwalker.server.app import create_app
+from sleepwalker.server.core.jobs import JobExecutor
+from sleepwalker.server.core.jobs import JobService
+from sleepwalker.server.core.storage import TemporaryStorage
 
 
 @pytest.fixture
@@ -77,13 +82,6 @@ def test_client_hides_worker_errors_and_cleans_files(make_model_package, tmp_pat
 
 
 def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp_path, stub_worker, worker_temporary_paths):
-    from fastapi.testclient import TestClient
-
-    from sleepwalker.server.app import create_app
-    from sleepwalker.server.core.jobs import JobExecutor
-    from sleepwalker.server.core.jobs import JobService
-    from sleepwalker.server.core.storage import TemporaryStorage
-
     path, _ = make_model_package()
     model = read_model_manifest(path)
     stub_worker(

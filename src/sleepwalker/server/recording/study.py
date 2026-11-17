@@ -78,14 +78,7 @@ def validate_edf(path: Path) -> StudyInfo:
 
             signals.append(SignalInfo(id=label, label=label, unit=reader.getPhysicalDimension(index).strip(), sample_rate=sample_rate))
 
-        return StudyInfo(
-            format=StudyFormat.EDF,
-            source_files=[path],
-            duration=duration,
-            recording_start=reader.getStartdatetime(),
-            signals=signals,
-            patient=read_patient(path, reader.getStartdatetime()),
-        )
+        return StudyInfo(format=StudyFormat.EDF, source_files=[path], duration=duration, recording_start=reader.getStartdatetime(), signals=signals, patient=read_patient(path, reader.getStartdatetime()))
     except (OSError, ValueError, RuntimeError) as exc:
         raise InvalidStudyError("File is not a valid or readable EDF file.") from exc
     finally:

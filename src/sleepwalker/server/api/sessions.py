@@ -31,10 +31,7 @@ async def create_session(sessions: Sessions, storage: Storage, files: list[Uploa
         storage.delete_session(session.id)
         sessions.delete(session.id)
         if isinstance(exc, FileTooLargeError):
-            raise APIError(
-                status.HTTP_413_CONTENT_TOO_LARGE, "FILE_TOO_LARGE", "Uploaded file exceeds the maximum allowed size.",
-                {"filename": exc.filename, "max_size_bytes": exc.max_size_bytes},
-            ) from exc
+            raise APIError(status.HTTP_413_CONTENT_TOO_LARGE, "FILE_TOO_LARGE", "Uploaded file exceeds the maximum allowed size.", {"filename": exc.filename, "max_size_bytes": exc.max_size_bytes}) from exc
         if isinstance(exc, (InvalidStudyError, UnsupportedStudyFormatError)):
             raise unprocessable("INVALID_STUDY", str(exc)) from exc
         if isinstance(exc, ValueError):
@@ -57,23 +54,13 @@ def delete_session(session_id: str, cleanup: Cleanup) -> None:
 
 
 @router.post("/{session_id}/inference", response_model=JobAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_inference(
-    session: SessionDep,
-    payload: InferenceRequest,
-    background_tasks: BackgroundTasks,
-    jobs: Jobs,
-    catalog: Catalog,
-    executor: Executor,
-    runner: Inference,
-    predictions: Predictions,
-    cleanup: Cleanup,
-) -> JobAcceptedResponse:
+def start_inference(session: SessionDep, payload: InferenceRequest, background_tasks: BackgroundTasks, jobs: Jobs, catalog: Catalog, executor: Executor, runner: Inference, predictions: Predictions, cleanup: Cleanup) -> JobAcceptedResponse:
     require_ready(session, "inference")
     # Resolved once here: this job keeps using these packages even if a newer one appears.
-    models = _resolve_models(payload.models, catalog)
-    _check_tasks_available(models, session, predictions)
-    _check_channel_map(payload.channel_map, models, session)
-    _check_channels([model for model in models if model.id not in payload.channel_map], session)
+    models = resolve_models(payload.models, catalog)
+    check_tasks_available(models, session, predictions)
+    check_channel_map(payload.channel_map, models, session)
+    check_channels([model for model in models if model.id not in payload.channel_map], session)
 
     if runner is None:
         raise APIError(status.HTTP_503_SERVICE_UNAVAILABLE, "COMPUTE_UNAVAILABLE", "Inference execution is not available.")
@@ -91,7 +78,7 @@ def job_already_running(exc: ActiveJobExistsError) -> APIError:
     return conflict("JOB_ALREADY_RUNNING", "Session already has an active job.", {"job_id": exc.job.id, "state": exc.job.state.value})
 
 
-def _resolve_models(model_ids: list[str], catalog: ModelCatalog) -> list[ModelInfo]:
+def resolve_models(model_ids: list[str], catalog: ModelCatalog) -> list[ModelInfo]:
     if not model_ids or any(not model_id.strip() for model_id in model_ids):
         raise bad_request("At least one valid model ID is required.")
     if len(model_ids) != len(set(model_ids)):
@@ -106,7 +93,7 @@ def _resolve_models(model_ids: list[str], catalog: ModelCatalog) -> list[ModelIn
     return models
 
 
-def _check_tasks_available(models: list[ModelInfo], session: Session, predictions: PredictionStore) -> None:
+def check_tasks_available(models: list[ModelInfo], session: Session, predictions: PredictionStore) -> None:
     by_task: dict[str, list[str]] = {}
     for model in models:
         by_task.setdefault(model.task, []).append(model.id)
@@ -120,7 +107,7 @@ def _check_tasks_available(models: list[ModelInfo], session: Session, prediction
             raise unprocessable("MODEL_INCOMPATIBLE", "Predictions already exist for this task.", {"task": task})
 
 
-def _check_channel_map(channel_map: dict[str, dict[str, str]], models: list[ModelInfo], session: Session) -> None:
+def check_channel_map(channel_map: dict[str, dict[str, str]], models: list[ModelInfo], session: Session) -> None:
     """Check user's explicit mapping: each model gets every input assigned to an existing signal"""
     by_id = {model.id: model for model in models}
     signals = {signal.id for signal in session.signals or []}
@@ -138,30 +125,14 @@ def _check_channel_map(channel_map: dict[str, dict[str, str]], models: list[Mode
             raise bad_request("Channel map uses a signal for more than one input of the model.", {"model_id": model_id})
 
 
-def _check_channels(models: list[ModelInfo], session: Session) -> None:
+def check_channels(models: list[ModelInfo], session: Session) -> None:
     """For models without a channel map: each input must match a signal by one of its package names"""
     available = {name.strip().casefold() for signal in session.signals or [] for name in (signal.id, signal.label)}
     for model in models:
-        missing = [
-            channel for channel in model.input_channels
-            if not any(alias.strip().casefold() in available for alias in model.channel_aliases.get(channel, (channel,)))
-        ]
+        missing = [channel for channel in model.input_channels if not any(alias.strip().casefold() in available for alias in model.channel_aliases.get(channel, (channel,)))]
         if missing:
             raise unprocessable("MISSING_REQUIRED_CHANNEL", "Required signal could not be resolved.", {"model_id": model.id, "channels": missing})
 
 
 def to_session_response(session: Session, tasks: list[TaskResponse]) -> SessionResponse:
-    return SessionResponse(
-        id=session.id,
-        state=session.state,
-        tasks=tasks,
-        created_at=session.created_at,
-        last_accessed_at=session.last_accessed_at,
-        expires_at=session.expires_at,
-        format=session.format,
-        duration=session.duration,
-        recording_start=session.recording_start,
-        signals=[SignalResponse(**vars(signal)) for signal in session.signals] if session.signals is not None else None,
-        patient=session.patient,
-        models=session.model_provenance,
-    )
+    return SessionResponse(id=session.id, state=session.state, tasks=tasks, created_at=session.created_at, last_accessed_at=session.last_accessed_at, expires_at=session.expires_at, format=session.format, duration=session.duration, recording_start=session.recording_start, signals=[SignalResponse(**vars(signal)) for signal in session.signals] if session.signals is not None else None, patient=session.patient, models=session.model_provenance)

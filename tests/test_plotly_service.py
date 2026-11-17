@@ -1,4 +1,3 @@
-import builtins
 import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -6,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sleepwalker.server.recording.plots import EdfPlotSignalReader, HighFrequencySignal, PlotFigureNotFoundError, PlotlyService, PlotlyUnavailableError, PlotSessionNotFoundError
+from sleepwalker.server.recording.plots import EdfPlotSignalReader, HighFrequencySignal, PlotFigureNotFoundError, PlotlyService, PlotSessionNotFoundError
 from sleepwalker.server.core.sessions import SessionService
 from sleepwalker.server.recording.signals import SignalNotFoundError
 from sleepwalker.server.core.sessions import SessionState
@@ -198,27 +197,6 @@ def test_unknown_signal_and_unready_session_are_rejected():
     session.state = SessionState.PROCESSING
     with pytest.raises(ValueError):
         plots.create_figure(session.id, ["eeg"])
-    assert reader.calls == []
-
-
-def test_plot_dependencies_are_optional_and_missing_dependencies_fail_before_edf_read(monkeypatch, tmp_path):
-    original = builtins.__import__
-
-    def without_plotly(name, *args, **kwargs):
-        if name.split(".")[0] in {"plotly", "plotly_resampler", "dash"}:
-            raise ImportError("Optional plotting disabled for this test")
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", without_plotly)
-    from sleepwalker.server.app import create_app
-    from sleepwalker.server.core.storage import TemporaryStorage
-    app = create_app(temporary_storage=TemporaryStorage(tmp_path / "storage"))
-    assert isinstance(app.state.plotly_service, PlotlyService)
-    session = make_session(app.state.session_service)
-    reader = FakeReader()
-    app.state.plotly_service.signal_reader = reader
-    with pytest.raises(PlotlyUnavailableError, match="requirements-plotly"):
-        app.state.plotly_service.create_figure(session.id, ["eeg"])
     assert reader.calls == []
 
 

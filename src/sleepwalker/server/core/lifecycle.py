@@ -13,17 +13,7 @@ from .storage import TemporaryStorage
 
 
 class SessionCleanupService:
-    def __init__(
-        self,
-        *,
-        session_service: SessionService,
-        job_service: JobService,
-        storage: TemporaryStorage,
-        prediction_store: PredictionStore,
-        annotation_service: AnnotationService,
-        export_service: ExportService,
-        plotly_service: PlotlyService,
-    ) -> None:
+    def __init__(self, *, session_service: SessionService, job_service: JobService, storage: TemporaryStorage, prediction_store: PredictionStore, annotation_service: AnnotationService, export_service: ExportService, plotly_service: PlotlyService) -> None:
         self.session_service = session_service
         self.job_service = job_service
         self.storage = storage
@@ -58,7 +48,7 @@ class SessionCleanupService:
             if self.session_service.delete(session_id) is None:
                 return False
 
-            self._delete_session_resources(session_id)
+            self.delete_session_resources(session_id)
             return True
 
     def request_delete(self, session_id: str) -> bool:
@@ -85,11 +75,11 @@ class SessionCleanupService:
             if session_id not in self._pending_deletions or self.job_service.has_active_job(session_id):
                 return False
 
-            self._delete_session_resources(session_id)
+            self.delete_session_resources(session_id)
             self._pending_deletions.remove(session_id)
             return True
 
-    def _delete_session_resources(self, session_id: str) -> None:
+    def delete_session_resources(self, session_id: str) -> None:
         self.plotly_service.delete_session(session_id)
         self.storage.delete_session(session_id)
         self.prediction_store.delete_session(session_id)
@@ -98,16 +88,7 @@ class SessionCleanupService:
         self.job_service.delete_session(session_id)
 
 
-def run_session_job(
-    job_id: str,
-    session_id: str,
-    operation: JobOperation,
-    executor: JobExecutor,
-    cleanup_service: SessionCleanupService,
-    *,
-    success_message: str = "Inference completed",
-    on_finished: Callable[[Job], object] | None = None,
-) -> None:
+def run_session_job(job_id: str, session_id: str, operation: JobOperation, executor: JobExecutor, cleanup_service: SessionCleanupService, *, success_message: str = "Inference completed", on_finished: Callable[[Job], object] | None = None) -> None:
     """Background task body shared by inference, export and import."""
     try:
         job = executor.execute(job_id, operation, success_message=success_message)

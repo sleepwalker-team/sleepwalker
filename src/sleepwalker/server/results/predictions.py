@@ -59,7 +59,7 @@ class ModelEvent:
     label: str
     confidence: float
 
-def background_class(classes: Sequence[str]) -> str | None: #(TODO) bisschen hardcoded. alternativ beim server start abfragen was hintergrundklasse sein soll?
+def background_class(classes: Sequence[str]) -> str | None: # hardcoded. maybe asking user for background class?
     """Guess the single "nothing happens" class of an event task from its name.
     Packages do not declare it, so this also decides whether a model is an event model.
     """
@@ -138,7 +138,7 @@ def map_predictions(result: PredictionResult, recording_start: datetime) -> list
         raise ValueError("Prediction frame contains non-finite probabilities.")
     rows = [dict(zip(result.classes, row)) for row in probabilities.tolist()]
 
-    times = _relative_seconds(frame["time"], recording_start)
+    times = relative_seconds(frame["time"], recording_start)
     if len(np.unique(times)) != len(times):
         raise ValueError("Prediction frame contains duplicate times.")
     order = np.argsort(times)
@@ -146,10 +146,7 @@ def map_predictions(result: PredictionResult, recording_start: datetime) -> list
     if result.kind == PredictionKind.CONTINUOUS:
         return [PointPrediction(float(times[i]), rows[i]) for i in order]
     half = result.resolution / 2
-    return [
-        IntervalPrediction(float(times[i] - half), float(times[i] + half), max(result.classes, key=rows[i].__getitem__), rows[i])
-        for i in order
-    ]
+    return [IntervalPrediction(float(times[i] - half), float(times[i] + half), max(result.classes, key=rows[i].__getitem__), rows[i]) for i in order]
 
 
 def model_events(result: PredictionResult, recording_start: datetime) -> list[ModelEvent]:
@@ -166,13 +163,7 @@ def model_events(result: PredictionResult, recording_start: datetime) -> list[Mo
             groups[-1].append(interval)
         else:
             groups.append([interval])
-    return [
-        ModelEvent(
-            f"model:{result.task}:{round(group[0].start * 1000)}", group[0].start, group[-1].end, group[0].label,
-            sum(interval.probabilities[interval.label] for interval in group) / len(group),
-        )
-        for group in groups
-    ]
+    return [ModelEvent(f"model:{result.task}:{round(group[0].start * 1000)}", group[0].start, group[-1].end, group[0].label, sum(interval.probabilities[interval.label] for interval in group) / len(group)) for group in groups]
 
 
 def downsample(records: list, max_points: int) -> list:
@@ -194,7 +185,7 @@ def epoch_starts(result: PredictionResult, recording_start: datetime) -> list[fl
     """Read the actual epoch timeline without mapping or changing probabilities."""
     if result.kind != PredictionKind.EPOCH:
         raise ValueError(f"Cannot map {result.kind.value} predictions as epoch.")
-    return sorted((_relative_seconds(result.frame["time"], recording_start) - result.resolution / 2).tolist())
+    return sorted((relative_seconds(result.frame["time"], recording_start) - result.resolution / 2).tolist())
 
 
 def resolve_epoch_start(start: float, duration: float, resolution: float, starts: Sequence[float]) -> float:
@@ -211,7 +202,7 @@ def resolve_epoch_start(start: float, duration: float, resolution: float, starts
     raise ValueError("Epoch start must match an existing prediction interval.")
 
 
-def _relative_seconds(values: pd.Series, recording_start: datetime) -> np.ndarray:
+def relative_seconds(values: pd.Series, recording_start: datetime) -> np.ndarray:
     if pd.api.types.is_numeric_dtype(values):
         seconds = values.to_numpy(dtype=float)
     else:

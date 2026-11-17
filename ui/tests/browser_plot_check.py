@@ -22,8 +22,7 @@ def main():
         page = context.new_page()
         errors, timings = [], []
         page.on("pageerror", lambda error: errors.append(str(error)))
-        page.on("requestfinished", lambda request: timings.append(request.timing["responseEnd"])
-                if "_dash-update-component" in request.url else None)
+        page.on("requestfinished", lambda request: timings.append(request.timing["responseEnd"]) if "_dash-update-component" in request.url else None)
         page.goto(args.url + "/ui/")
         expect(page.locator("#connection-status")).to_have_text("Verbunden")
         page.locator("#edf-file").set_input_files(EDF)
@@ -141,8 +140,7 @@ def main():
         heights = frame.evaluate("cancelAnimationFrame(window.plotSizeFrame); window.plotSizes")
         assert min(heights) >= 790, min(heights)
         assert not errors, errors
-        result = {"checks": "8 channels, repeated mouse drag/wheel, vertical lock, stale response, cursor, resize",
-                  "minimum_plot_height": min(heights), "max_callback_ms": round(max(timings), 1)}
+        result = {"checks": "8 channels, repeated mouse drag/wheel, vertical lock, stale response, cursor, resize", "minimum_plot_height": min(heights), "max_callback_ms": round(max(timings), 1)}
         (args.artifacts / "result.json").write_text(json.dumps(result, indent=2))
         saved = json.loads(page.evaluate("sessionStorage.getItem('sleepwalker.session')"))
         context.request.delete(f"{args.url}/api/v1/sessions/{saved['id']}")

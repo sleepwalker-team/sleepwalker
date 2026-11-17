@@ -46,21 +46,13 @@ class ModelInfo:
 
     def provenance(self) -> dict:
         """Describe exactly this package; the ID alone stays the same across retrainings."""
-        metadata = {
-            "id": self.id,
-            "name": self.name,
-            "task": self.task,
-            "classes": list(self.classes),
-            "output_kind": self.output_kind.value,
-            "output_resolution": self.output_resolution,
-            "input_channels": list(self.input_channels),
-        }
+        metadata = {"id": self.id, "name": self.name, "task": self.task, "classes": list(self.classes), "output_kind": self.output_kind.value, "output_resolution": self.output_resolution, "input_channels": list(self.input_channels)}
         if self.payload_sha256 is not None:
             metadata["version"] = f"sha256:{self.payload_sha256}"
         return metadata
 
 
-def _require_unique(values: list[str]) -> list[str]:
+def require_unique(values: list[str]) -> list[str]:
     if len(set(values)) != len(values):
         raise ValueError("Duplicate values are not allowed.")
     return values
@@ -70,7 +62,7 @@ class _Channel(BaseModel):
     logical_name: Text
     physical_names: list[Text] = Field(min_length=1)
 
-    _unique = field_validator("physical_names")(_require_unique)
+    _unique = field_validator("physical_names")(require_unique)
 
 
 class _Contract(BaseModel):
@@ -78,7 +70,7 @@ class _Contract(BaseModel):
     sequence_len: Annotated[int, Field(strict=True, gt=0)]
     target_resolution: Text
 
-    _unique = field_validator("classes")(_require_unique)
+    _unique = field_validator("classes")(require_unique)
 
 
 class _Manifest(BaseModel): #describes model output
@@ -89,7 +81,7 @@ class _Manifest(BaseModel): #describes model output
     sha256: Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
     classification: _Contract
 
-    _unique = field_validator("input_channels")(_require_unique)
+    _unique = field_validator("input_channels")(require_unique)
 
 
 def read_model_manifest(package_path: Path) -> ModelInfo:
@@ -121,13 +113,7 @@ def read_model_manifest(package_path: Path) -> ModelInfo:
         if Path(manifest.payload).name != manifest.payload or "\\" in manifest.payload or not inside_package or not payload_path.is_file():
             raise ValueError("Payload must be a file inside its model package.")
 
-        return ModelInfo(
-            id=manifest.name, name=manifest.name, task=manifest.task,
-            classes=tuple(contract.classes), input_channels=tuple(manifest.input_channels),
-            output_resolution=resolution,
-            package_path=package_path, channel_aliases=aliases, payload_sha256=manifest.sha256,
-            output_kind=PredictionKind.EVENT if background_class(contract.classes) else PredictionKind.EPOCH,
-        )
+        return ModelInfo(id=manifest.name, name=manifest.name, task=manifest.task, classes=tuple(contract.classes), input_channels=tuple(manifest.input_channels), output_resolution=resolution, package_path=package_path, channel_aliases=aliases, payload_sha256=manifest.sha256, output_kind=PredictionKind.EVENT if background_class(contract.classes) else PredictionKind.EPOCH)
     except (OSError, KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise InvalidModelPackageError(f"Invalid model metadata: {package_path.name}") from exc
 
@@ -143,12 +129,12 @@ class ModelCatalog:
         self._reported: set[Path] = set() #paths from models with warnings (just for log hygiene)
 
     def get(self, model_id: str) -> ModelInfo | None:
-        return self._models().get(model_id)
+        return self.load_models().get(model_id)
 
     def list(self) -> list[ModelInfo]:
-        return sorted(self._models().values(), key=lambda model: model.id)
+        return sorted(self.load_models().values(), key=lambda model: model.id)
 
-    def _models(self) -> dict[str, ModelInfo]:
+    def load_models(self) -> dict[str, ModelInfo]:
         models = dict(self._fixed)
         newest: dict[str, int] = {}
         for manifest in sorted(self.directory.glob("*/manifest.json")) if self.directory else ():
@@ -157,7 +143,7 @@ class ModelCatalog:
                 model = read_model_manifest(package)
                 modified = manifest.stat().st_mtime_ns
             except (InvalidModelPackageError, OSError) as exc:
-                self._report_once(package, exc)
+                self.report_once(package, exc)
                 continue
             self._reported.discard(package)
             # A retrained package may reuse the name of an older one: the newest wins.
@@ -166,7 +152,7 @@ class ModelCatalog:
                 models[model.id] = model
         return models
 
-    def _report_once(self, package: Path, exc: Exception) -> None:
+    def report_once(self, package: Path, exc: Exception) -> None:
         # Lookups are frequent, and a package may just be in the middle of being copied.
         if package not in self._reported:
             self._reported.add(package)

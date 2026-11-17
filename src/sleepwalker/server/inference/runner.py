@@ -24,19 +24,12 @@ from .catalog import ModelInfo
 
 logger = logging.getLogger(__name__)
 WORKER_PATH = Path(__file__).with_name("worker.py")
-WORKER_ERRORS = {
-    "MODEL_INCOMPATIBLE": "Recording or model package is incompatible.",
-    "INFERENCE_FAILED": "Model inference failed.",
-    "RESOURCE_EXHAUSTED": "Inference could not be completed because compute memory was exhausted.",
-}
+WORKER_ERRORS = {"MODEL_INCOMPATIBLE": "Recording or model package is incompatible.", "INFERENCE_FAILED": "Model inference failed.", "RESOURCE_EXHAUSTED": "Inference could not be completed because compute memory was exhausted."}
 
 
 class InferenceRunner(Protocol):
     """what the API needs from a runner, so compute can move elsewhere (cluster job, remote GPU) without API changes"""
-    def run(
-        self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,
-        channel_map: dict[str, dict[str, str]] | None = None,
-    ) -> None:
+    def run(self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck, channel_map: dict[str, dict[str, str]] | None = None) -> None:
         ...
 
 
@@ -84,16 +77,11 @@ class SubprocessInferenceClient:
         with TemporaryDirectory(prefix="sleepwalker-inference-") as directory:
             root = Path(directory)
             request_path = root / "request.json"
-            request_path.write_text(json.dumps({
-                "version": 1, "package_path": str(model.package_path.absolute()), "edf_path": str(edf_path.absolute()),
-                "device": device, "batch_size": batch_size, "sha256": model.payload_sha256,
-            }), encoding="utf-8")
+            request_path.write_text(json.dumps({"version": 1, "package_path": str(model.package_path.absolute()), "edf_path": str(edf_path.absolute()), "device": device, "batch_size": batch_size, "sha256": model.payload_sha256}), encoding="utf-8")
             with (root / "worker.log").open("w+b") as log:
                 try:
-                    process = subprocess.Popen(
-                        [sys.executable, str(WORKER_PATH), str(request_path)], cwd=root,
-                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, # worker gets own processgroup, so that 'killpg' also kills the childprocesses
-                    )
+                    # start_new_session gives the worker its own process group, so killpg also kills its children.
+                    process = subprocess.Popen([sys.executable, str(WORKER_PATH), str(request_path)], cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 except OSError as exc:
                     raise JobExecutionError("COMPUTE_UNAVAILABLE", "Inference Python executable could not be started.") from exc
                 try: #api waits at worker but is still stopable
@@ -106,10 +94,10 @@ class SubprocessInferenceClient:
                     check_cancelled()
                 finally:
                     stop_worker(process)
-                return _read_worker_result(root, model, process.returncode, log)
+                return read_worker_result(root, model, process.returncode, log)
 
 
-def _read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> pd.DataFrame:
+def read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> pd.DataFrame:
     def log_tail(reason: str) -> None:
         log.seek(max(0, log.seek(0, os.SEEK_END) - 8192))
         logger.error("%s for %s:\n%s", reason, model.id, log.read().decode("utf-8", errors="replace"))
@@ -134,10 +122,7 @@ def _read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> p
 
 class PackageInferenceRunner:
     """Runs the selected models one after another and publishes each result as soon as it is done. """
-    def __init__(
-        self, prediction_store: PredictionStore, *, device: str = "cpu", batch_size: int = 1,
-        prediction_client: SubprocessInferenceClient | None = None, max_parallel_jobs: int = 1,
-    ) -> None:
+    def __init__(self, prediction_store: PredictionStore, *, device: str = "cpu", batch_size: int = 1, prediction_client: SubprocessInferenceClient | None = None, max_parallel_jobs: int = 1) -> None:
         if batch_size <= 0:
             raise ValueError("Inference batch size must be positive.")
         self.prediction_store = prediction_store
@@ -146,10 +131,7 @@ class PackageInferenceRunner:
         self.prediction_client = prediction_client if prediction_client is not None else SubprocessInferenceClient()
         self._slots = Semaphore(max_parallel_jobs) # limits all workers over all jobs because of memory
 
-    def run(
-        self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck,
-        channel_map: dict[str, dict[str, str]] | None = None,
-    ) -> None:
+    def run(self, session: Session, models: list[ModelInfo], report_progress: ProgressCallback, check_cancelled: CancellationCheck, channel_map: dict[str, dict[str, str]] | None = None) -> None:
         channel_map = channel_map or {}
         if session.format != StudyFormat.EDF or len(session.source_files) != 1 or session.recording_start is None:
             raise JobExecutionError("MODEL_INCOMPATIBLE", "Inference requires one EDF and recording start metadata.")
@@ -163,12 +145,12 @@ class PackageInferenceRunner:
         try:
             for index, model in enumerate(models):
                 try:
-                    result = self._predict(session, model, channel_map.get(model.id), index / len(models), report_progress, check_cancelled)
+                    result = self.predict_model(session, model, channel_map.get(model.id), index / len(models), report_progress, check_cancelled)
                 except JobExecutionError as exc:
                     failures.append((model.id, exc))
                     continue
                 self.prediction_store.add(result)
-                session.model_provenance = [*session.model_provenance, _provenance(model, channel_map.get(model.id))]
+                session.model_provenance = [*session.model_provenance, model_provenance(model, channel_map.get(model.id))]
         finally:
             self._slots.release()
 
@@ -176,10 +158,7 @@ class PackageInferenceRunner:
             model_id, first = failures[0]
             raise JobExecutionError(first.code, first.message, {**(first.details or {}), "model_id": model_id, "failed_models": [model_id for model_id, _ in failures]})
 
-    def _predict(
-        self, session: Session, model: ModelInfo, mapping: dict[str, str] | None, progress: float,
-        report_progress: ProgressCallback, check_cancelled: CancellationCheck,
-    ) -> PredictionResult:
+    def predict_model(self, session: Session, model: ModelInfo, mapping: dict[str, str] | None, progress: float, report_progress: ProgressCallback, check_cancelled: CancellationCheck) -> PredictionResult:
         report_progress(JobPhase.INFERENCE, progress, f"Running model {model.id}")
         edf_path = session.source_files[0]
         # A relabeled copy sits in the session's own folder, so session cleanup also removes it.
@@ -194,18 +173,14 @@ class PackageInferenceRunner:
             frame = self.prediction_client.predict(model, edf_path, device=self.device, batch_size=self.batch_size, check_cancelled=check_cancelled)
         check_cancelled()
         try:
-            result = PredictionResult(
-                session_id=session.id, model_id=model.id, task=model.task, classes=model.classes,
-                resolution=model.output_resolution, kind=model.output_kind,
-                frame=normalize_predictions(frame, model, session.recording_start, session.duration),
-            )
+            result = PredictionResult(session_id=session.id, model_id=model.id, task=model.task, classes=model.classes, resolution=model.output_resolution, kind=model.output_kind, frame=normalize_predictions(frame, model, session.recording_start, session.duration))
             map_predictions(result, session.recording_start)
         except (KeyError, TypeError, ValueError) as exc:
             raise JobExecutionError("MODEL_INCOMPATIBLE", "Model returned predictions in an incompatible format.", {"model_id": model.id, "output_kind": model.output_kind.value}) from exc
         return result
 
 
-def _provenance(model: ModelInfo, mapping: dict[str, str] | None) -> dict:
+def model_provenance(model: ModelInfo, mapping: dict[str, str] | None) -> dict:
     """Record which signal fed which input when the user chose it."""
     provenance = model.provenance()
     if mapping:

@@ -9,6 +9,7 @@ from pyedflib import highlevel
 import pytest
 
 from sleepwalker.server.app import create_local_app
+from sleepwalker.server.recording.relabel import relabel_edf
 
 
 @pytest.fixture
@@ -147,8 +148,6 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
 
 
 def test_real_model_runs_with_a_hand_mapped_channel_and_exports_the_mapping(real_model_configuration, synthetic_model_edf, tmp_path):
-    from sleepwalker.server.recording.relabel import relabel_edf
-
     models = real_model_configuration
     renamed = tmp_path / "renamed.edf"
     relabel_edf(synthetic_model_edf, renamed, {"C3-M2": "EEG Fpz-Cz"})

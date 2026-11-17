@@ -2,7 +2,7 @@
 
 Schlichte Browseroberfläche für EDF-Aufnahmen: Server verbinden, Session öffnen,
 Modelle ausführen, Signale und Vorhersagen sichten, korrigieren und exportieren.
-Der gesamte UI-Code liegt in `ui/`; die API ist in [`sleepwalker/server/`](../sleepwalker/server/README.md) beschrieben.
+Der gesamte UI-Code liegt in `ui/`; die API ist in [`sleepwalker/server/`](../src/sleepwalker/server/README.md) beschrieben.
 
 [Vorschau des Viewers](screenshots/viewer.png) · [Einstieg](screenshots/entry.png)
 [Intervallauswahl und Rechtsklick](screenshots/correction-menu.png) ·
@@ -13,7 +13,7 @@ Der gesamte UI-Code liegt in `ui/`; die API ist in [`sleepwalker/server/`](../sl
 
 ## Start
 
-Aus dem Hauptrepository (dem Verzeichnis mit `setup.py`), mit Python 3.10 oder neuer:
+Aus dem Hauptrepository (dem Verzeichnis mit `pyproject.toml`), mit Python 3.10 oder neuer:
 
 ```bash
 python -m pip install -r ui/requirements.txt
@@ -28,7 +28,7 @@ beim bisherigen API-Start verwenden:
 
 ```bash
 python -m ui \
-  --models sleepwalker/server/models \
+  --models src/sleepwalker/server/models \
   --inference-python /absoluter/pfad/zur/inference-venv/bin/python \
   --device cpu \
   --batch-size 1
@@ -268,7 +268,7 @@ deterministische Testmodelle. Diese dienen zur Prüfung der GUI-Abläufe und sin
 keine medizinischen Modelle. Der normale UI-Start enthält keine Testmodelle.
 
 Verwendete Integrationsschnittstellen: [Dash clientside callbacks](https://dash.plotly.com/clientside-callbacks)
-und die vorhandene [Plotly-Beschreibung](../sleepwalker/server/README.md#signals).
+und die vorhandene [Plotly-Beschreibung](../src/sleepwalker/server/README.md#signals).
 
 Geprüfter Stand vom 16. Oktober 2026: 114 GUI-/API-Integrationstests bestanden,
 vollständiger Chromium-Durchlauf einschließlich Kanalwechsel, Zoom, Korrekturen,

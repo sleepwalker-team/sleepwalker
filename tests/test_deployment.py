@@ -1,234 +1,237 @@
 import json
-import os
-import tempfile
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 import torch
-from torch.utils.data import DataLoader, Dataset
 
-from sleepwalker.datasets.Basedataset import BaseDataset, ChannelConfig, batch_collate
-from sleepwalker.datasets.NumpyDataset import NumpyDataset
+from sleepwalker.datasets.normalizer import ConvertUnit
+from sleepwalker.datasets.Basedataset import ChannelConfig, EDFFile
+from sleepwalker.core.signal import unit_conversion_factor
+from sleepwalker.datasets.HSP import HSP, get_channels as get_hsp_channels, correct_hsp_saturation
+from sleepwalker.datasets.MultiDataset import MultiDataset
 from sleepwalker.datasets.UnlabelledDataset import UnlabelledDataset
-from sleepwalker.models.Basemodel import BaseModel
-from sleepwalker.trainer.Run import RunCfg, run
-from sleepwalker.trainer.MulticlassTrainer import MulticlassTrainer
-from sleepwalker.deployment import export_prediction_package, load_prediction_package
+from sleepwalker.datasets.normalizer import EEGFilterNormalizer, RecordingZScore
+from sleepwalker.deployment import PackagedModel, save_packaged_model
+from sleepwalker.deployment.predictions import format_prediction_batch
+from sleepwalker.models.BaseModel import BaseModel, ClassifierModel
+from sleepwalker.training.callbacks import map_events
+from functools import partial
 
 
-class TinyModel(BaseModel):
-    def __init__(self):
+DATA = Path(__file__).parent / "data"
+SINGLE_CONTRACT = {"type": "single-head-multiclass", "classes": ["negative", "positive"], "sequence_len": 1, "target_resolution": "60s"}
+
+
+class MeanClassifier(BaseModel, ClassifierModel):
+    def __init__(self, n_classes: int = 2):
         super().__init__()
-        self.linear = torch.nn.Linear(1, 2, bias=True)
+        self.linear = torch.nn.Linear(1, n_classes)
 
-    def _features(self, x: torch.Tensor) -> torch.Tensor:
-        return x.mean(dim=1)
+    def compute(self, x):
+        return self.linear(x.mean(dim=1)).unsqueeze(1)
 
-    def feature_dim(self) -> int:
-        return 1
-
-    def _classifier(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
+    def input_spec(self):
+        return (1, 600, 1), {"layout": "BTC", "ts_len": 600, "n_channels": 1}
 
 
-class TinyWindowDataset(Dataset):
-    def __init__(self):
-        self.items = [
-            {
-                "data": torch.tensor([[0.0], [0.0], [0.0], [0.0]], dtype=torch.float32),
-                "patient": "p1.edf",
-                "time": pd.Timestamp("2024-01-01 00:00:00"),
-            },
-            {
-                "data": torch.tensor([[1.0], [1.0], [1.0], [1.0]], dtype=torch.float32),
-                "patient": "p1.edf",
-                "time": pd.Timestamp("2024-01-01 00:00:30"),
-            },
-        ]
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, idx):
-        return self.items[idx]
-
-
-class MinimalDataset(BaseDataset):
-    def __init__(self):
-        super().__init__(
-            channels=[ChannelConfig(name="sig", normalizer=None)],
-            sample_frequency=1.0,
-            total_input="4s",
-            target_resolution="2s",
-            event_mapping=None,
-        )
-
-    def get_event_df(self, edf_path: str, start_datetime: pd.Timestamp) -> pd.DataFrame:
-        raise NotImplementedError
-
-
-class RunDataset(Dataset):
-    def __init__(self):
-        self.channels = [ChannelConfig(name="sig", normalizer=None)]
-        self.items = [{"data": torch.zeros(4, 1), "target": torch.tensor([1.0, 0.0])}]
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, idx):
-        return self.items[idx]
-
-    def get_n_patients(self):
-        return 1
-
-    def get_classes(self):
-        return ["neg", "pos"]
-
-    def get_timeseries_len(self):
-        return 4
-
-
-class StubTrainer:
-    def fit(self, model, train_loader, val_loader=None):
-        return {}
-
-    def test(self, model, test_loader):
-        return 0.0, {}
-
-
-def build_trainer():
-    return MulticlassTrainer(
-        epochs=1,
-        optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=1e-3),
-        classes=["neg", "pos"],
-        loss_function=torch.nn.functional.cross_entropy,
-        device="cpu",
-        warmup_device="cpu",
+def make_dataset(*, unit: str | None = "uV", correction=(), preprocessors=()):
+    return UnlabelledDataset(
+        channels=[ChannelConfig('EEG', ['EEG'], preprocessors=list(correction) + ([] if unit is None else [ConvertUnit(unit)]) + list(preprocessors))],
+        sample_frequency=10,
+        total_input="60s",
+        stride="60s",
     )
 
 
-def test_multiclass_predict_loader_returns_timestamped_dataframe():
-    trainer = build_trainer()
-    model = TinyModel()
+def make_package(dataset=None):
+    return PackagedModel(
+        name="tiny",
+        task="unit-test",
+        model=MeanClassifier(),
+        dataset=make_dataset() if dataset is None else dataset,
+        classification_contract=SINGLE_CONTRACT,
+        config={"seed": 7, "comment": "Synthetic round-trip test."},
+    )
+
+
+@pytest.mark.parametrize(("source", "target", "factor"), [("V", "uV", 1_000_000.0), ("mV", "uV", 1_000.0), ("µV", "uV", 1.0), ("%", "percent", 1.0)])
+def test_unit_conversion_factor(source, target, factor):
+    assert unit_conversion_factor(source, target, assume_if_missing=False) == pytest.approx(factor)
+
+
+def test_unit_conversion_rejects_missing_and_incompatible_units():
+    with pytest.raises(ValueError, match="no unit metadata"):
+        unit_conversion_factor("", "uV", assume_if_missing=False)
+    assert unit_conversion_factor("", "uV", assume_if_missing=True) == 1.0
+    with pytest.raises(ValueError, match="Incompatible"):
+        unit_conversion_factor("%", "uV", assume_if_missing=False)
+
+
+def test_online_retry_configuration_only_exposes_budget():
+    dataset = make_dataset()
+
+    assert dataset.online_max_tries == 128
+    assert "online_retry_scope" not in dataset.dataset_kwargs()
+
+
+def test_hsp_header_correction_survives_unlabelled_clone():
+    channels = get_hsp_channels(["spo2"], grouped=True, normalize=False, sample_frequency=100)
+    dataset = HSP(channels=channels, sample_frequency=100, annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
+
+    expected = [ChannelConfig('SpO2', ['SaO2', 'SpO2', 'SPO2'], preprocessors={name: [ConvertUnit('%')] for name in ['SaO2', 'SpO2', 'SPO2']})]
+
+    assert channels[0].logical_name == expected[0].logical_name
+
+    assert channels[0].physical_names == expected[0].physical_names
+    assert dataset.channels[0].preprocessors_for("SaO2")[0] is correct_hsp_saturation
+    assert UnlabelledDataset.from_dataset(dataset).channels[0].preprocessors_for("SaO2")[0] is correct_hsp_saturation
+
+
+def test_missing_unit_bypass_is_available_during_dataset_initialization(monkeypatch):
+    original = EDFFile.from_edf
+
+    def without_units(path):
+        file = original(path)
+        file.units["EEG"] = None
+        return file
+
+    monkeypatch.setattr(EDFFile, "from_edf", staticmethod(without_units))
+    path = DATA / "signals_01.edf"
+    unknown = make_dataset()
+    unknown.initialize([path], num_workers=0, strict=True)
+    assert unknown.get_item(unknown.edf_files[0], unknown.edf_files[0].start_date) is None
+    assume_uv = lambda values, *, unit, is_recording: (values, "uV" if unit is None else unit)
+    assumed_dataset = make_dataset(correction=[assume_uv])
+    assumed_dataset.initialize([path], num_workers=0, strict=True)
+    assert assumed_dataset.get_n_patients() == 1
+
+
+def test_package_roundtrip_preserves_contract_manifest_and_weights(tmp_path):
+    package = make_package()
     with torch.no_grad():
-        model.linear.weight.copy_(torch.tensor([[-1.0], [1.0]]))
-        model.linear.bias.zero_()
+        package.model.linear.weight.copy_(torch.tensor([[1.0], [-0.5]]))
+        package.model.linear.bias.copy_(torch.tensor([0.1, -0.2]))
 
-    loader = DataLoader(TinyWindowDataset(), batch_size=2, shuffle=False, collate_fn=batch_collate)
-    result = trainer.predict_loader(model, loader)
+    path = package.save(tmp_path / "package")
+    loaded = PackagedModel.load(path)
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
 
-    assert list(result["patient"]) == ["p1.edf", "p1.edf"]
-    assert list(result["prediction"]) == ["neg", "pos"]
-    assert "prob__neg" in result.columns
-    assert "prob__pos" in result.columns
-
-
-def test_prediction_package_roundtrip_preserves_trainer_and_dataset_template():
-    trainer = build_trainer()
-    model = TinyModel()
-    dataset = MinimalDataset()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        package_path = Path(tmpdir) / "test.swmodel"
-        export_prediction_package(
-            str(package_path),
-            model=model,
-            trainer=trainer,
-            dataset=dataset,
-            model_card_md="# test\n",
-            metadata={"experiment": "unit-test"},
-        )
-        assert package_path.is_file()
-        package = load_prediction_package(str(package_path), map_location="cpu")
-
-        assert package.metadata["experiment"] == "unit-test"
-        assert package.metadata["source_event_mapping"] == {}
-        assert isinstance(package.unlabelled_dataset, UnlabelledDataset)
-        assert package.unlabelled_dataset.initialized is False
-        assert package.trainer.__class__.__name__ == "MulticlassTrainer"
-        assert package.model.__class__.__name__ == "TinyModel"
+    assert manifest["format_version"] == "sleepwalker-packaged-model-v1"
+    assert manifest["input_channels"] == ["EEG"]
+    assert manifest["classification"] == SINGLE_CONTRACT
+    assert manifest["capabilities"] == ["classification"]
+    assert isinstance(loaded.dataset, UnlabelledDataset)
+    assert torch.allclose(loaded.model.linear.weight, package.model.linear.weight)
 
 
-def test_export_prediction_package_appends_swmodel_extension_when_missing():
-    trainer = build_trainer()
-    model = TinyModel()
-    dataset = MinimalDataset()
+def test_loading_legacy_package_moves_target_resolution_out_of_the_dataset(tmp_path):
+    package = make_package()
+    package.dataset.target_resolution = pd.Timedelta("20s")
+    package.dataset._init_kwargs["target_resolution"] = "20s"
+    package.classification_contract = dict(package.classification_contract)
+    package.classification_contract.pop("target_resolution")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        package_path = Path(tmpdir) / "test_package"
-        export_prediction_package(
-            str(package_path),
-            model=model,
-            trainer=trainer,
-            dataset=dataset,
-        )
-        assert (Path(tmpdir) / "test_package.swmodel").is_file()
+    loaded = PackagedModel.load(package.save(tmp_path / "legacy-package"))
 
-
-def test_run_writes_meta_data_into_run_folder():
-    model = TinyModel()
-    trainer = StubTrainer()
-    train_dataset = RunDataset()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run(
-            RunCfg(
-                experiment_name="unit-run-meta",
-                model_name="TinyModel",
-                model=model,
-                trainer=trainer,
-                train_datasets=[train_dataset],
-                val_datasets=[],
-                test_datasets=[],
-                batch_size=1,
-                n_samples=None,
-                num_workers_dataloader=0,
-                collate_fn=batch_collate,
-                log_path=tmpdir,
-                meta_data={"source": "run", "kind": "test"},
-            )
-        )
-
-        meta_path = Path(tmpdir) / "unit-run-meta" / "meta_data.yml"
-        assert result.experiment_name == "unit-run-meta"
-        assert meta_path.is_file()
-        content = meta_path.read_text(encoding="utf-8")
-        assert "source" in content
-        assert "run" in content
+    assert loaded.classification_contract["target_resolution"] == "0 days 00:00:20"
+    assert loaded.classification_contract["target_offset"] == "0 days 00:00:20"
+    assert not hasattr(loaded.dataset, "target_resolution")
+    assert "target_resolution" not in loaded.dataset.dataset_kwargs()
 
 
-def test_export_prediction_package_accepts_numpy_dataset_and_exports_unlabelled_dataset():
-    model = TinyModel()
-    trainer = build_trainer()
+def test_packaging_discards_label_pipeline(tmp_path):
+    labelled = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
+    packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=labelled)
 
-    with tempfile.TemporaryDirectory() as cache_dir, tempfile.TemporaryDirectory() as export_dir:
-        cache_path = Path(cache_dir)
-        with (cache_path / "meta.json").open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "sample_frequency": 1.0,
-                    "resample_type": "nearest",
-                    "total_input": "4s",
-                    "target_resolution": "2s",
-                    "classes": ["neg", "pos"],
-                    "input_channels": ["sig"],
-                    "all_patients": ["p1.edf"],
-                },
-                f,
-            )
-        np.save(cache_path / "data.npy", np.zeros((1, 4, 1), dtype=np.float32))
-        np.save(cache_path / "patient.npy", np.array(["p1.edf"]))
-        np.save(cache_path / "time.npy", np.array([pd.Timestamp("2024-01-01").value], dtype=np.int64))
+    assert isinstance(packaged.dataset, UnlabelledDataset)
+    assert packaged.dataset.load_annotations is False
+    assert packaged.dataset.label_classes == []
+    assert packaged.dataset.prepare_events_callback is None
 
-        dataset = NumpyDataset(cache_path, in_memory=True)
-        package_path = os.path.join(export_dir, "numpy.swmodel")
-        package = export_prediction_package(
-            package_path,
-            model=model,
-            trainer=trainer,
-            dataset=dataset,
-        )
-        assert os.path.isfile(package_path)
-        assert isinstance(package.unlabelled_dataset, UnlabelledDataset)
+
+def test_packaging_uses_first_component_of_multidataset(tmp_path):
+    first = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
+    second = HSP(channels=[ChannelConfig('EEG', ['EEG'], preprocessors=[ConvertUnit('uV')])], sample_frequency=10, total_input="60s", annotation_labels=['desaturation'], prepare_events=partial(map_events, mapping={'desaturation': 'desaturation'}, remove_unmapped=True))
+    first.initialized = True
+    second.initialized = True
+
+    packaged = save_packaged_model(tmp_path / "package", name="tiny", task="unit-test", model=MeanClassifier(), classification_contract=SINGLE_CONTRACT, dataset=MultiDataset([first, second]))
+
+    assert isinstance(packaged.dataset, UnlabelledDataset)
+    assert packaged.dataset.get_input_channels() == first.get_input_channels()
+
+
+def test_package_leaves_processor_comparability_to_the_caller():
+    package = make_package()
+    package.assert_compatible(make_dataset(unit="mV"))
+    package.assert_compatible(make_dataset(preprocessors=[RecordingZScore()]))
+
+
+def test_loaded_package_predicts_raw_edf(tmp_path):
+    loaded = PackagedModel.load(make_package().save(tmp_path / "package"))
+    predictions = loaded.predict_patient(DATA / "signals_01.edf", batch_size=64)
+
+    assert not predictions.empty
+    assert {"time", "prediction", "prob__negative", "prob__positive"}.issubset(predictions.columns)
+    assert pd.to_datetime(predictions["time"]).is_monotonic_increasing
+
+
+def test_dataset_prediction_uses_the_requested_rejection_strategy():
+    dataset = make_dataset()
+    dataset.initialize([DATA / "signals_01.edf"], num_workers=0, strict=True)
+
+    predictions = make_package().predict_dataset(dataset, rejection_strategy="patient", progress=False)
+
+    assert not predictions.empty
+    assert dataset.rejection_strategy == "patient"
+
+
+def test_dataset_prediction_reports_received_input_windows():
+    dataset = make_dataset()
+    patient = DATA / "signals_01.edf"
+    dataset.initialize([patient], num_workers=0, strict=True)
+
+    predictions, received = make_package().predict_dataset(dataset, progress=False, return_received_windows=True)
+
+    assert not predictions.empty
+    assert received == {str(patient): len(dataset)}
+
+
+def test_sequence_predictions_use_target_start_timestamps():
+    contract = {"type": "single-head-multiclass", "task": "event", "classes": ["negative", "positive"], "sequence_len": 2, "target_resolution": "20s", "target_offset": "30s"}
+    start = pd.Timestamp("2024-01-01T00:00:20")
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, torch.tensor([[[2.0, 0.0], [0.0, 2.0]]]))
+    assert frame["time"].tolist() == [start + pd.Timedelta(seconds=30), start + pd.Timedelta(seconds=40)]
+    assert frame["task"].tolist() == ["event", "event"]
+    assert frame["prediction_idx"].tolist() == [0, 1]
+    assert frame["prediction"].tolist() == ["negative", "positive"]
+
+
+def test_multitask_predictions_include_centered_task_offset():
+    contract = {
+        "type": "multitask",
+        "tasks": {
+            "sleep": {"classes": ["wake", "n2"], "n_steps": 1, "target_resolution": "30s", "target_offset": "5s"},
+            "arousal": {"classes": ["no_arousal", "arousal"], "n_steps": 40, "target_resolution": "1s", "target_offset": "0s"},
+        },
+    }
+    start = pd.Timestamp("2024-01-01T00:00:20")
+    frame = format_prediction_batch(contract, {"patient": ["patient"], "time": [start]}, {"sleep": torch.zeros(1, 1, 2), "arousal": torch.zeros(1, 40, 2)})
+    assert len(frame) == 41
+    assert set(frame["task"]) == {"sleep", "arousal"}
+    assert frame.loc[frame["task"] == "sleep", "time"].tolist() == [start + pd.Timedelta("5s")]
+    assert frame.loc[frame["task"] == "arousal", "time"].iloc[-1] == start + pd.Timedelta("39s")
+
+
+def test_conversion_rejection_survives_package_reload(monkeypatch, tmp_path):
+    original = EDFFile.from_edf
+    def conflicting_units(path):
+        file = original(path)
+        file.units["EEG"] = "%"
+        return file
+
+    monkeypatch.setattr(EDFFile, "from_edf", staticmethod(conflicting_units))
+    package = PackagedModel.load(make_package().save(tmp_path / "package"))
+    file = package.dataset.prepare_patient(DATA / "signals_01.edf", raise_errors=True)
+    assert package.dataset.get_item(file, file.start_date) is None

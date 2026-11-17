@@ -1,12 +1,12 @@
+"""LEGACY RESEARCH SCRIPT: retained for extraction or removal review; not part of the public Sleepwalker API."""
+
 import os 
 import torch
-import tqdm
 import hashlib
 
 from dotenv import load_dotenv
 from os.path import join
 from functools import partial
-from pyedflib import EdfReader
 
 from sleepwalker.models.MaskedAutoencoder import MaskedAutoencoder
 from sleepwalker.datasets.utils import get_edf_files_in_repo, random_split
@@ -18,7 +18,9 @@ from sleepwalker.datasets.normalizer.SignalFilterNormalizer import SignalFilterN
 from sleepwalker.trainer.utils.filtering import trim_event
 from sleepwalker.trainer.MaskedAutoencoderTrainer import MaskedAutoencoderTrainer
 from sleepwalker.trainer.MultiLabelTrainer import MultiLabelTrainer
-from sleepwalker.utils import logger, MlflowSink, count_parameters
+from sleepwalker.trainer.utils.targets import build_multitask_target, normalize_multitask_config
+from sleepwalker.utils import logger, WandbSink, count_parameters
+from sleepwalker.training.callbacks import prepare_sleep_events
 
 os.environ['OMP_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
@@ -39,42 +41,27 @@ SUBSAMPLE_WINDOW_PERCENT = None
 DEVICE=os.environ.get('DEVICE', 'cuda')
 
 CHANNELS = [
-    ChannelConfig(name='C4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='F4-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='O2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='C3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='F3-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='O1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EEG'),
-    ChannelConfig(name='E1-M2', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='E2-M1', normalizer=EEGFilterNormalizer(fs=SAMPLE_FREQUENCY), group='EOG'),
-    ChannelConfig(name='RIP Flow', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='RIP Sum', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='Abdomen', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    ChannelConfig(name='Chest', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RIP'),
-    #ChannelConfig(name='Nasal Pressure', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
-    #ChannelConfig(name='Airflow', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='RESP'), 
-    ChannelConfig(name='Saturation', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None), group='SPO2'), 
-    ChannelConfig(name='Left Leg', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='Right Leg', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None), group='LEG-EMG'), 
-    ChannelConfig(name='ECG', normalizer=SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45), group='ECG'), 
+    ChannelConfig('EEG', ['C4-M1', 'F4-M1', 'O2-M1', 'C3-M2', 'F3-M2', 'O1-M2'], EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+    ChannelConfig('EOG', ['E1-M2', 'E2-M1'], EEGFilterNormalizer(fs=SAMPLE_FREQUENCY)),
+    ChannelConfig('RIP', ['RIP Flow', 'RIP Sum', 'Abdomen', 'Chest'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None)),
+    ChannelConfig('SPO2', ['Saturation'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=10.0, band_order=4, notch_freq=None)),
+    ChannelConfig('LEG-EMG', ['Left Leg', 'Right Leg'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, lowcut=10.0, highcut=45.0, band_order=4, notch_freq=None)),
+    ChannelConfig('ECG', ['ECG'], SignalFilterNormalizer(fs=SAMPLE_FREQUENCY, highcut=45)),
 ]
 
 EVENT_MAPPING = {
-    'wach': 'wake',
+    'wake': 'wake',
     'n1': 'n1',
     'n2': 'n2',
     'n3': 'n3',
     'rem': 'rem',
     'arousal': 'arousal',
-    'a. gemischt': 'apnea',
-    'a. obstruktiv': 'apnea',
-    'a. zentral': 'apnea',
-    'apnoe': 'apnea',
-    'h. obstruktiv': 'hypopnea',
-    'h. zentral': 'hypopnea',
-    'hypopnea-gemischt': 'hypopnea',
-    'hypopnoe': 'hypopnea',
-    'lm': 'lm',
+    'mixed_apnea': 'apnea',
+    'obstructive_apnea': 'apnea',
+    'central_apnea': 'apnea',
+    'apnea': 'apnea',
+    'hypopnea': 'hypopnea',
+    'limb_movement': 'lm',
 }
 
 def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
@@ -85,12 +72,12 @@ def prepare_sleep_staging_patient(data_df, label_df, label_extra_df, **_kwargs):
     trimmed = trim_event(data_df, label_df, label_extra_df, keep_events=['wake'])
     if trimmed is None:
         return None
-    if SUBSAMPLE_WINDOW_PERCENT:
+    label_df, label_extra_df = trimmed
+    if label_df is not None and SUBSAMPLE_WINDOW_PERCENT:
         label_df = label_df.groupby('Label', group_keys=False).sample(frac=SUBSAMPLE_WINDOW_PERCENT)
         if label_extra_df:
             label_extra_df = label_extra_df.groupby('Label', group_keys=False).sample(frac=SUBSAMPLE_WINDOW_PERCENT)
 
-    label_df, label_extra_df = trimmed
     return data_df, label_df, label_extra_df
 
 def get_collate_ignore_list(dataset) -> list[str]:
@@ -118,14 +105,10 @@ def prepare_multiclass_sample(data, target, task_config, **item):
         new_item[f'mask_{modality_name}'] = mask
 
     # Build all different target annotations
-    t = MultiLabelTrainer.build_multitask_target(target, task_config)
-    for task_name, cfg, labels in zip(task_config.keys(), task_config.values(), t):
-        labels = labels[:cfg['n_steps']]
-        # Take middle slice
-        middle = len(labels) // 2
-        _target = torch.zeros((len(cfg['labels'])))
-        _target[int(labels[middle])] = 1
-        new_item[f'target_{task_name}'] = _target.float()
+    targets, _ = build_multitask_target(target, task_config)
+    for task_idx, (task_name, cfg) in enumerate(task_config.items()):
+        task_targets = targets[task_idx, :cfg['n_steps'], :len(cfg['labels'])]
+        new_item[f'target_{task_name}'] = task_targets[len(task_targets) // 2]
 
     return new_item
 
@@ -135,6 +118,7 @@ task_config = {
         'default': 'regular',
         'percentage': 0.5,
         'target_resolution': '10s',
+        'sequence_len': 3,
         'embeddings': ['RIP', 'SPO2'],
         'n_slices': 50,
         'class_weights': {0: 4, 1: 4, 2: 1},
@@ -146,6 +130,7 @@ task_config = {
         'default': 'no lm',
         'percentage': 0.5,
         'target_resolution': '1s',
+        'sequence_len': 30,
         'embeddings': ['LEG-EMG'],
         'class_weights': {0: 10, 1: 1},
         'n_slices': 10,
@@ -176,13 +161,14 @@ task_config = {
         'default': None,
         'percentage': 0.5,
         'target_resolution': '30s',
+        'sequence_len': 1,
         'embeddings': ['EEG', 'EOG'],
         'n_slices': 50,
         'loss_function': torch.nn.functional.cross_entropy,
         'loss_mode': 'inverse',
     },
 }
-normalized_task_config = MultiLabelTrainer.normalize_task_config(task_config)
+normalized_task_config = normalize_multitask_config(task_config)
 
 def get_datasets():
     dataset_path = join(os.environ['DATASET_DIR'], 'ruhrlandklinik/raw/train-test-2023')
@@ -193,7 +179,7 @@ def get_datasets():
     logger.context('TRAIN')
     train_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -208,7 +194,7 @@ def get_datasets():
     logger.context('VAL')
     val_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -223,7 +209,7 @@ def get_datasets():
     logger.context('TEST')
     test_ds = Ruhrlandklinik(
         channels=CHANNELS, 
-        event_mapping=EVENT_MAPPING,
+        annotation_labels=['wake', 'n1', 'n2', 'n3', 'rem', 'arousal', 'apnea', 'hypopnea', 'lm'], prepare_events=partial(prepare_sleep_events, mapping=EVENT_MAPPING, merge_labels=["limb_movement"], exclude_on_wake=["arousal", "apnea", "central_apnea", "obstructive_apnea", "mixed_apnea", "hypopnea", "limb_movement"], touching_counts_as_overlap=True),
         sample_frequency=SAMPLE_FREQUENCY,
         prepare_patient=prepare_sleep_staging_patient,
         prepare_sample=partial(prepare_multiclass_sample, task_config=normalized_task_config),
@@ -272,6 +258,22 @@ def get_dataloader(train_ds, val_ds, test_ds):
 
     return train_loader, val_loader, test_loader
 
+def setup_wandb_metrics(sink):
+    sink.wandb.define_metric('batch_train_step')
+    sink.wandb.define_metric('batch_val_step')
+    sink.wandb.define_metric('batch/loss/train', step_metric='batch_train_step')
+    sink.wandb.define_metric('batch/loss/val', step_metric='batch_val_step')
+
+    sink.wandb.define_metric('epoch_step')
+    sink.wandb.define_metric('epoch/train/*', step_metric='epoch_step')
+    sink.wandb.define_metric('epoch/val/*', step_metric='epoch_step')
+
+    for task_name in task_config:
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_micro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/f1_macro', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/accuracy', step_metric='epoch_step')
+        sink.wandb.define_metric(f'epoch/{task_name}/coehns_kappa', step_metric='epoch_step')
+
 def main():
 
     train_ds, val_ds, test_ds = get_datasets()
@@ -279,14 +281,15 @@ def main():
 
     model = MaskedAutoencoder(
         groups=train_ds.channel_groups,
-        normalize=False,
     )
     print('Number of parameters:', count_parameters(model))
     model_hp = model.get_hyperparameters()
 
-    print('Tracking to MLFLOW instance', os.environ['MLFLOW_URL'])
-    logger.add_sink(MlflowSink(tracking_uri=os.environ['MLFLOW_URL'], experiment='debug', artifact_uri=None))
-    logger.start_run(run_name='testrun-full-nonormalize-10pPatients', params=model_hp)
+    print('Tracking to WandB instance', os.environ['WANDB_BASE_URL'])
+    sink = WandbSink(tracking_uri=os.environ['WANDB_BASE_URL'], experiment='mae-ruhrland', artifact_uri=None)
+    logger.add_sink(sink)
+    logger.start_run(run_name='testrun', params=model_hp)
+    setup_wandb_metrics(sink)
 
     EPOCHS=31
     trainer = MaskedAutoencoderTrainer(
@@ -294,7 +297,7 @@ def main():
         epochs=EPOCHS,
         optimizer=lambda model: torch.optim.Adam(model.parameters(), lr=2e-3),
         #lr_scheduler = lambda optimizer: torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=EPOCHS),
-        classes=train_ds.get_classes(),
+        classes=[],  # Reconstruction has no single classifier output vocabulary.
         downstream_tasks=normalized_task_config,
         save_every=10,
         device=DEVICE,

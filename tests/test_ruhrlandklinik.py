@@ -1,6 +1,6 @@
 import pandas as pd
 
-from sleepwalker.datasets import Ruhrlandklinik
+from sleepwalker.datasets.Ruhrlandklinik import Ruhrlandklinik
 from sleepwalker.datasets.Ruhrlandklinik import get_channels
 
 
@@ -8,8 +8,8 @@ def make_dataset() -> Ruhrlandklinik:
     return Ruhrlandklinik(
         channels=[],
         sample_frequency=1,
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
 
 
@@ -98,15 +98,16 @@ def test_get_channels_grouped_keeps_candidates_but_exposes_grouped_inputs():
         sample_frequency=100,
     )
 
-    assert len(channels) == 9
+    assert len(channels) == 2
+    assert channels[0].logical_name == "EEG"
+    assert channels[0].physical_names == ["C3-M2", "C4-M1", "F3-M2", "F4-M1", "O1-M2", "O2-M1"]
 
     dataset = Ruhrlandklinik(
         channels=channels,
         sample_frequency=100,
         total_input="30s",
-        target_resolution="1s",
-        event_mapping={},
-        remove_unmapped_events=False,
+        annotation_labels=["wake", "n1", "n2", "n3", "rem", "unscored", "other"],
+
     )
 
     assert dataset.get_input_channels() == ["EEG", "Chin EMG"]

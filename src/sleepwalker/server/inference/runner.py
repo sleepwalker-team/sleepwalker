@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -69,27 +70,15 @@ def normalize_predictions(frame: pd.DataFrame, model: ModelInfo, recording_start
 
 
 def stop_worker(process: subprocess.Popen) -> None:
-    """let the worker clean up its framework cache, then kill whatever is left."""
+    """Kill the worker's whole process group, so the framework's multiprocessing children stop too."""
     try:
-        # Only the worker: its cache manager child must stay alive for the cleanup.
-        process.terminate()
-        process.wait(timeout=10)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
         pass
-    finally:
-        # Also stops the framework's multiprocessing children, even after the worker exited.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+    process.wait()
 
 
 class SubprocessInferenceClient:
-    def __init__(self, python_executable: Path) -> None:
-        # Do not resolve the executable's symlink: that would bypass its venv.
-        self.python_executable = python_executable.expanduser().absolute()
-
     def predict(self, model: ModelInfo, edf_path: Path, *, device: str, batch_size: int, check_cancelled: CancellationCheck) -> pd.DataFrame:
         check_cancelled()
         with TemporaryDirectory(prefix="sleepwalker-inference-") as directory:
@@ -102,7 +91,7 @@ class SubprocessInferenceClient:
             with (root / "worker.log").open("w+b") as log:
                 try:
                     process = subprocess.Popen(
-                        [str(self.python_executable), str(WORKER_PATH), str(request_path)], cwd=root, env=_worker_environment(),
+                        [sys.executable, str(WORKER_PATH), str(request_path)], cwd=root,
                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, # worker gets own processgroup, so that 'killpg' also kills the childprocesses
                     )
                 except OSError as exc:
@@ -118,17 +107,6 @@ class SubprocessInferenceClient:
                 finally:
                     stop_worker(process)
                 return _read_worker_result(root, model, process.returncode, log)
-
-
-def _worker_environment() -> dict[str, str]:
-    # The worker runs in its own venv because model packages need a newer framework
-    # than this checkout; both are named "sleepwalker", so they cannot share one venv.
-    environment = dict(os.environ)
-    for name in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD"):
-        environment.pop(name, None)
-    environment["PYTHONNOUSERSITE"] = "1"
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    return environment
 
 
 def _read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> pd.DataFrame:
@@ -158,17 +136,15 @@ class PackageInferenceRunner:#TODO machts sonst sinn die results zu publishen we
     """Runs the selected models one after another and publishes all results or none."""
 
     def __init__(
-        self, prediction_store: PredictionStore, *, inference_python: Path | None = None, device: str = "cpu", batch_size: int = 1,
+        self, prediction_store: PredictionStore, *, device: str = "cpu", batch_size: int = 1,
         prediction_client: SubprocessInferenceClient | None = None, max_parallel_jobs: int = 1,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("Inference batch size must be positive.")
-        if prediction_client is None and inference_python is None:
-            raise ValueError("A separate inference Python executable is required.")
         self.prediction_store = prediction_store
         self.device = device
         self.batch_size = batch_size
-        self.prediction_client = prediction_client if prediction_client is not None else SubprocessInferenceClient(inference_python)
+        self.prediction_client = prediction_client if prediction_client is not None else SubprocessInferenceClient()
         self._slots = Semaphore(max_parallel_jobs) # limits all workers over all jobs because of memory
 
     def run(

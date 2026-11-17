@@ -13,20 +13,17 @@ a restart only if it was exported as a workspace and imported again.
 
 ## Start
 
-The API and the models use **separate Python environments**, because the models
-need a newer framework than this checkout. See [Inference](#inference).
+From the repository root, in one venv with the framework installed:
 
 ```bash
-python3 -m venv /path/to/inference-venv
-/path/to/inference-venv/bin/python -m pip install -r src/sleepwalker/server/requirements-inference.txt
+python -m pip install -e . -r src/sleepwalker/server/requirements.txt
 
 python -m sleepwalker.server \
   --models src/sleepwalker/server/models \
-  --inference-python /path/to/inference-venv/bin/python \
   --device cuda --batch-size 1
 ```
 
-The inference requirements install a CUDA 13.0 build of Torch. Without a GPU, use
+`--device cuda` needs a CUDA build of Torch in the venv. Without a GPU, use
 `--device cpu`; that is also the default.
 
 Without `--models` the server runs without inference. It listens on
@@ -140,17 +137,12 @@ accept them as uploads. Model packages are not part of the repository, so a fres
 ## Inference
 
 `inference/runner.py` starts `inference/worker.py` as a separate process for each model,
-using the configured Python. The worker loads the package and calls its
+using the server's own Python. The worker loads the package and calls its
 `predict_patient`, so each package decides how it runs on a recording. The separate
-process has three purposes:
+process has two purposes:
 
-- **Compatibility:** the worker uses the framework version pinned in
-  `requirements-inference.txt`. `PYTHONPATH`, `LD_LIBRARY_PATH` and similar variables
-  are removed so that neither this checkout nor a system libtorch can interfere.
-- **Cancellation:** cancelling first sends `SIGTERM` to the worker, which lets the
-  framework remove its EDF cache in `/dev/shm`. After 10 seconds the whole process
-  group is killed. A worker stuck that long can leave its cache behind, and cancelling
-  while the framework is still creating the cache leaves an empty folder there.
+- **Cancellation:** cancelling kills the worker's whole process group, including the
+  framework's multiprocessing children.
 - **Memory:** all model memory is released when the worker exits.
 
 Request and result travel as JSON and CSV through a private temporary directory
@@ -262,9 +254,7 @@ pytest tests/test_server_*.py tests/test_job_*.py tests/test_catalog.py tests/te
   tests/test_workspace_import.py ui/tests/test_integration.py  # main server tests
 
 # Also runs the real models on synthetic EDFs:
-pytest tests/test_server_packaged_models.py \
-  --inference-python /path/to/inference-venv/bin/python \
-  --inference-models src/sleepwalker/server/models
+pytest tests/test_server_packaged_models.py --inference-models src/sleepwalker/server/models
 ```
 
 The second command checks technical compatibility, not predictive quality.

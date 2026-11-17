@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import sys
 import time
 
 import pytest
@@ -37,22 +36,15 @@ def worker_temporary_paths(tmp_path, monkeypatch):
     return paths
 
 
-def test_client_runs_without_api_pythonpath_and_cleans_transport_files(make_model_package, tmp_path, stub_worker, worker_temporary_paths, monkeypatch):
+def test_client_passes_request_and_cleans_transport_files(make_model_package, tmp_path, stub_worker, worker_temporary_paths):
     path, _ = make_model_package()
     stub_worker(
-        "assert 'PYTHONPATH' not in os.environ\n"
-        "assert 'PYTHONHOME' not in os.environ\n"
-        "assert 'LD_LIBRARY_PATH' not in os.environ\n"
-        "assert 'LD_PRELOAD' not in os.environ\n"
         "assert request['batch_size'] == 4 and request['device'] == 'cpu'\n"
         "assert request['edf_path'].endswith('recording with spaces.edf')\n"
         "(root / 'predictions.csv').write_text('time,task,valid,prob__wake,prob__n1\\n2025-01-01 00:05:00,sleep,True,0.9,0.1\\n')\n"
         "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': True}))\n"
     )
-    monkeypatch.setenv("PYTHONPATH", "/invalid/api/import/path")
-    monkeypatch.setenv("LD_LIBRARY_PATH", "/invalid/system/torch/lib")
-    monkeypatch.setenv("LD_PRELOAD", "/invalid/injected-library.so")
-    client = SubprocessInferenceClient(Path(sys.executable))
+    client = SubprocessInferenceClient()
     frame = client.predict(read_model_manifest(path), tmp_path / "recording with spaces.edf", device="cpu", batch_size=4, check_cancelled=lambda: None)
     assert frame["task"].tolist() == ["sleep"]
     assert frame["prob__wake"].tolist() == [0.9]
@@ -78,7 +70,7 @@ def test_client_hides_worker_errors_and_cleans_files(make_model_package, tmp_pat
         code += "(root / 'response.json').write_text(json.dumps({'version': 1, 'ok': True}))\n(root / 'predictions.csv').write_text('')\n"
     stub_worker(code)
     with pytest.raises(JobExecutionError) as error:
-        SubprocessInferenceClient(Path(sys.executable)).predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=lambda: None)
+        SubprocessInferenceClient().predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=lambda: None)
     assert error.value.code == ("MODEL_INCOMPATIBLE" if outcome == "typed_error" else "COMPUTE_UNAVAILABLE")
     assert "private/patient" not in str(error.value)
     assert all(not path.exists() for path in worker_temporary_paths)
@@ -103,7 +95,7 @@ def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp
     job = service.create(session_id="sess-test", job_type="inference")
 
     def operation(_report_progress, check_cancelled):
-        SubprocessInferenceClient(Path(sys.executable)).predict(model, tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
+        SubprocessInferenceClient().predict(model, tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
 
     JobExecutor(service).execute(job.id, operation)
     with TestClient(create_app(job_service=service, temporary_storage=TemporaryStorage(tmp_path / "server-storage"))) as client:
@@ -124,21 +116,6 @@ def test_worker_resource_error_reaches_public_job_status(make_model_package, tmp
     assert all(not path.exists() for path in worker_temporary_paths)
 
 
-def test_client_reports_missing_inference_python(make_model_package, tmp_path, worker_temporary_paths):
-    path, _ = make_model_package()
-    with pytest.raises(JobExecutionError) as error:
-        SubprocessInferenceClient(tmp_path / "missing-python").predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=lambda: None)
-    assert error.value.code == "COMPUTE_UNAVAILABLE"
-    assert all(not path.exists() for path in worker_temporary_paths)
-
-
-def test_client_preserves_virtual_environment_executable_symlink(tmp_path):
-    executable = tmp_path / "venv" / "bin" / "python"
-    executable.parent.mkdir(parents=True)
-    executable.symlink_to(sys.executable)
-    assert SubprocessInferenceClient(executable).python_executable == executable
-
-
 def test_cancellation_stops_worker_and_its_child_process(make_model_package, tmp_path, stub_worker, worker_temporary_paths):
     path, _ = make_model_package()
     marker = tmp_path / "processes.json"
@@ -155,7 +132,7 @@ def test_cancellation_stops_worker_and_its_child_process(make_model_package, tmp
             raise JobCancelledError
         assert time.monotonic() - started < 5, "Stub worker did not start"
     with pytest.raises(JobCancelledError):
-        SubprocessInferenceClient(Path(sys.executable)).predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
+        SubprocessInferenceClient().predict(read_model_manifest(path), tmp_path / "recording.edf", device="cpu", batch_size=1, check_cancelled=check_cancelled)
     # Do not inspect /proc/<pid>: a sandbox may expose host /proc but use a
     # different PID namespace. A stopped heartbeat proves the child stopped.
     time.sleep(0.1)

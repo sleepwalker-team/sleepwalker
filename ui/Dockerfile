@@ -1,13 +1,13 @@
 # Build from the repository root: docker build -f ui/Dockerfile -t sleepwalker-ui .
-# An existing inference-capable image can be supplied as BASE_IMAGE.
+# For GPU inference, supply a CUDA-capable image as BASE_IMAGE.
 ARG BASE_IMAGE=python:3.11-slim
 FROM ${BASE_IMAGE}
 WORKDIR /app
-COPY ui/requirements.txt /app/ui/requirements.txt
-COPY src/sleepwalker/server/requirements-plotly.txt /app/src/sleepwalker/server/requirements-plotly.txt
-RUN python -m pip install --no-cache-dir -r ui/requirements.txt
-COPY src/sleepwalker /app/sleepwalker
+COPY pyproject.toml README.md LICENSE /app/
+COPY LICENSES /app/LICENSES
+COPY src /app/src
 COPY ui /app/ui
+RUN python -m pip install --no-cache-dir . -r ui/requirements.txt
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 EXPOSE 6006
 ENTRYPOINT ["python", "-m", "ui"]

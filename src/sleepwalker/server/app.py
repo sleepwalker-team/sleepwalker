@@ -123,11 +123,11 @@ def create_app(
     return app
 
 
-def create_local_app(model_directory: Path, *, inference_python: Path, device: str = "cpu", batch_size: int = 1) -> FastAPI:
-    """Build the API with inference: models from a directory, run by a separate Python."""
+def create_local_app(model_directory: Path, *, device: str = "cpu", batch_size: int = 1) -> FastAPI:
+    """Build the API with inference: models from a directory, run in a worker subprocess."""
     prediction_store = PredictionStore()
     return create_app(
         model_catalog=ModelCatalog(model_directory),
         prediction_store=prediction_store,
-        inference_runner=PackageInferenceRunner(prediction_store, inference_python=inference_python, device=device, batch_size=batch_size),
+        inference_runner=PackageInferenceRunner(prediction_store, device=device, batch_size=batch_size),
     )

@@ -133,11 +133,6 @@ def test_runner_rejects_non_edf_before_starting_worker(tmp_path):
     assert client.calls == []
 
 
-def test_runner_requires_explicit_inference_environment():
-    with pytest.raises(ValueError, match="separate inference Python"):
-        PackageInferenceRunner(PredictionStore())
-
-
 @pytest.mark.parametrize("batch_size", [0, -1])
 def test_runner_rejects_invalid_batch_size(batch_size):
     with pytest.raises(ValueError, match="batch size"):

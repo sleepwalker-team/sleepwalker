@@ -16,20 +16,18 @@ Der gesamte UI-Code liegt in `ui/`; die API ist in [`sleepwalker/server/`](../sr
 Aus dem Hauptrepository (dem Verzeichnis mit `pyproject.toml`), mit Python 3.10 oder neuer:
 
 ```bash
-python -m pip install -r ui/requirements.txt
+python -m pip install -e . -r ui/requirements.txt
 python -m ui
 ```
 
 Browser: <http://localhost:6006/ui/>. Ohne Modellkonfiguration funktionieren die
 EDF-Signalansicht und das Öffnen vorhandener Workspaces.
 
-Für Inferenz dieselben Modellpakete und dieselbe separate Python-Umgebung wie
-beim bisherigen API-Start verwenden:
+Für Inferenz die Modellpakete angeben; die Modelle laufen in derselben Umgebung:
 
 ```bash
 python -m ui \
   --models src/sleepwalker/server/models \
-  --inference-python /absoluter/pfad/zur/inference-venv/bin/python \
   --device cpu \
   --batch-size 1
 ```
@@ -49,13 +47,9 @@ des bestehenden Servers. Für einen Host im LAN oder Cluster:
 python -m ui --host 0.0.0.0 --port 6006 --storage /tmp/sleepwalker-ui
 ```
 
-Modelloptionen können wie oben ergänzt werden. `--device cuda` verwendet die
-entsprechend eingerichtete GPU-Inferenzumgebung. Die mitgelieferte
-`requirements-inference.txt` richtet eine CPU-Umgebung mit `torch==2.13.0+cpu`
-ein; dafür muss `--device cpu` verwendet werden. Ein Start mit `--device cuda`
-und dieser CPU-Umgebung führt beim Modelllauf zu einem Fehler. Die Torch-Version
-der angegebenen separaten Inferenzumgebung ist maßgeblich, auch wenn im Rechner
-eine GPU vorhanden ist. Die GUI plant keine Clusterjobs.
+Modelloptionen können wie oben ergänzt werden. `--device cuda` braucht eine
+CUDA-Version von Torch in der Umgebung; mit einer CPU-Version schlägt der
+Modelllauf fehl, auch wenn im Rechner eine GPU vorhanden ist. Die GUI plant keine Clusterjobs.
 Eine intern erreichbare Instanz kann über einen bestehenden Tunnel oder
 Port-Forward im Browser geöffnet werden. Am Ziel muss ebenfalls `python -m ui`
 laufen; eine alleinstehende REST-API stellt den Python-Resampler nicht über HTTP
@@ -71,19 +65,16 @@ docker build -f ui/Dockerfile -t sleepwalker-ui .
 docker run --rm -p 6006:6006 sleepwalker-ui
 ```
 
-Das Standardimage enthält die API-/UI-Abhängigkeiten. Für Inferenz kann ein
-vorhandenes Image mit kompatibler separater Inferenzumgebung als `BASE_IMAGE`
-verwendet werden. Modelle einhängen und beim Start die Modelloptionen ergänzen;
-die Python-Pfade müssen dabei innerhalb des Containers gültig sein:
+Das Image enthält Framework, API und UI und kann damit auch Modelle ausführen.
+Für GPU-Inferenz ein CUDA-fähiges Image als `BASE_IMAGE` angeben. Modelle einhängen
+und beim Start die Modelloptionen ergänzen:
 
 ```bash
-docker build --build-arg BASE_IMAGE=mein-inferenz-image -f ui/Dockerfile -t sleepwalker-ui .
 docker run --rm -p 6006:6006 -v /pfad/zu/modellen:/models:ro sleepwalker-ui \
   --host 0.0.0.0 --port 6006 --storage /tmp/sleepwalker-ui \
-  --models /models --inference-python /opt/inference/bin/python --device cpu
+  --models /models --device cpu
 ```
 
-Die separate Modellumgebung wird durch diesen UI-Build nicht eingerichtet.
 Der Docker-Build wurde in dieser Arbeitsumgebung mangels Docker nicht ausgeführt.
 
 ## Bedienung
@@ -274,7 +265,7 @@ Geprüfter Stand vom 16. Oktober 2026: 114 GUI-/API-Integrationstests bestanden,
 vollständiger Chromium-Durchlauf einschließlich Kanalwechsel, Zoom, Korrekturen,
 Verlauf, Workspace-Export/-Import, Reload und Löschung bestanden. Zusätzlich lief
 das vorhandene Schlafstadienpaket über die GUI mit einer synthetischen EDF in der
-bestehenden separaten Inferenzumgebung. Die vor Beginn vorhandenen 76 Dateien im
+damals noch separaten Inferenzumgebung. Die vor Beginn vorhandenen 76 Dateien im
 Serververzeichnis sind bytegleich erhalten geblieben. Ein entfernter Cluster wurde
 in dieser Umgebung nicht praktisch getestet.
 

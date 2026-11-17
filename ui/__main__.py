@@ -13,17 +13,14 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6006)
     parser.add_argument("--models", type=Path, help="Directory of existing packaged models.")
-    parser.add_argument("--inference-python", type=Path, help="Python executable of the compatible inference environment.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--storage", type=Path, help="Dedicated temporary directory for this instance.")
     args = parser.parse_args()
-    if args.models and not args.inference_python:
-        parser.error("--models requires --inference-python")
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
     api = (
-        create_local_app(args.models, inference_python=args.inference_python, device=args.device, batch_size=args.batch_size)
+        create_local_app(args.models, device=args.device, batch_size=args.batch_size)
         if args.models else create_app()
     )
     if args.storage:

@@ -10,7 +10,7 @@ import torch
 
 @pytest.fixture
 def worker_module(monkeypatch):
-    # The worker imports the separately installed framework. Stub only those
+    # The worker imports the framework. Stub only those
     # imports here; exercise its real error handling without loading any model.
     deployment = ModuleType("sleepwalker.deployment")
     deployment.load_packaged_model = lambda *args, **kwargs: None

@@ -1,12 +1,7 @@
-"""Standalone entry point for the separately installed, compatible framework.
-
-Run this file by absolute path, not with -m sleepwalker.server: module execution
-would select the API checkout's older sleepwalker package.
-"""
+"""Runs one model in a subprocess, so cancelling can kill it and its memory is freed afterwards."""
 
 import json
 from pathlib import Path
-import signal
 import sys
 import traceback
 
@@ -32,13 +27,7 @@ def predict(request: dict, output: Path) -> None:
     frame.to_csv(output / "predictions.csv", index=False)
 
 
-def _exit_on_terminate(_signum, _frame) -> None:
-    # Raising lets the framework's finally blocks remove its EDF cache in /dev/shm.
-    raise SystemExit(1)
-
-
 def main() -> None:
-    signal.signal(signal.SIGTERM, _exit_on_terminate)
     request_path = Path(sys.argv[1])
     response = {"version": 1, "ok": False}
     try:

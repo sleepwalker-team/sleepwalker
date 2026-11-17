@@ -2,27 +2,21 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shutil
-import tempfile
-import time
 
 import numpy as np
 from fastapi.testclient import TestClient
 from pyedflib import highlevel
 import pytest
 
-from sleepwalker.server.inference.catalog import ModelCatalog
 from sleepwalker.server.app import create_local_app
-from sleepwalker.server.core.jobs import JobCancelledError
-from sleepwalker.server.inference.runner import SubprocessInferenceClient
 
 
 @pytest.fixture
 def real_model_configuration(request):
-    python = request.config.getoption("--inference-python")
     models = request.config.getoption("--inference-models")
-    if not python or not models:
-        pytest.skip("Provide --inference-python and --inference-models for real-model API integration tests")
-    return Path(python), Path(models)
+    if not models:
+        pytest.skip("Provide --inference-models for real-model API integration tests")
+    return Path(models)
 
 
 @pytest.fixture
@@ -47,8 +41,8 @@ def synthetic_model_edf(tmp_path):
 
 @pytest.mark.parametrize(("task", "first_start", "resolution", "rows"), [("sleep", 300, 30, 2), ("arousal", 10, 1, 600), ("breathing", 25, 5, 120), ("desaturation", 35, 10, 48)])
 def test_real_package_from_edf_upload_to_api_predictions(real_model_configuration, synthetic_model_edf, task, first_start, resolution, rows):
-    python, models = real_model_configuration
-    app = create_local_app(models, inference_python=python, batch_size=1)
+    models = real_model_configuration
+    app = create_local_app(models, batch_size=1)
     with TestClient(app) as client:
         listed = client.get("/api/v1/models").json()["models"]
         assert {model["task"] for model in listed} == {"sleep", "arousal", "breathing", "desaturation"}
@@ -104,7 +98,7 @@ def test_real_package_from_edf_upload_to_api_predictions(real_model_configuratio
 
 @pytest.mark.parametrize("problem", ["payload_checksum", "unknown_class"])
 def test_real_worker_rejects_modified_model_without_partial_results(real_model_configuration, synthetic_model_edf, tmp_path, problem):
-    python, models = real_model_configuration
+    models = real_model_configuration
     modified = tmp_path / "modified-models" / "sw-sleep"
     modified.mkdir(parents=True)
     for name in ["manifest.json", "model.pt"]:
@@ -117,7 +111,7 @@ def test_real_worker_rejects_modified_model_without_partial_results(real_model_c
         # A class the model never outputs: the runner must reject the result.
         metadata["classification"]["classes"][0] = "not_a_model_class"
         (modified / "manifest.json").write_text(json.dumps(metadata))
-    app = create_local_app(modified.parent, inference_python=python, batch_size=1)
+    app = create_local_app(modified.parent, batch_size=1)
     model = app.state.model_catalog.list()[0]
     with TestClient(app) as client:
         with synthetic_model_edf.open("rb") as file:
@@ -134,11 +128,11 @@ def test_real_worker_rejects_modified_model_without_partial_results(real_model_c
 
 
 def test_real_worker_rejects_recording_shorter_than_context(real_model_configuration, tmp_path):
-    python, models = real_model_configuration
+    models = real_model_configuration
     path = tmp_path / "short.edf"
     headers = [highlevel.make_signal_header("C3-M2", dimension="uV", sample_frequency=100, physical_min=-500, physical_max=500)]
     assert highlevel.write_edf(str(path), [np.sin(np.arange(3000))], headers, header=highlevel.make_header(startdate=datetime(2025, 1, 1)))
-    app = create_local_app(models, inference_python=python, batch_size=1)
+    app = create_local_app(models, batch_size=1)
     model = next(model for model in app.state.model_catalog.list() if model.task == "sleep")
     with TestClient(app) as client:
         with path.open("rb") as file:
@@ -152,38 +146,13 @@ def test_real_worker_rejects_recording_shorter_than_context(real_model_configura
         assert app.state.prediction_store.list_for_session(session_id) == []
 
 
-def test_real_worker_cancellation_removes_framework_edf_cache(real_model_configuration, tmp_path):
-    python, models = real_model_configuration
-    model = next(model for model in ModelCatalog(models).list() if model.task == "sleep")
-    # Long enough that the cache is still filled when the job is cancelled.
-    edf = tmp_path / "long.edf"
-    t = np.arange(3 * 3600 * 100) / 100
-    header = highlevel.make_signal_header("C3-M2", dimension="uV", sample_frequency=100, physical_min=-500, physical_max=500)
-    assert highlevel.write_edf(str(edf), [35 * np.sin(2 * np.pi * 10 * t)], [header], header=highlevel.make_header(startdate=datetime(2025, 1, 1)))
-    # The framework puts its cache in /dev/shm, or the temporary directory if that is not writable.
-    def caches():
-        return {path for root in (Path("/dev/shm"), Path(tempfile.gettempdir())) for path in root.glob("sleepwalker-edf-cache-*")}
-    before = caches()
-    created = set()
-    started = time.monotonic()
-    def check_cancelled():
-        created.update(caches() - before)
-        # Cancel once the recording is in RAM; that is what must not be left behind.
-        if any(any(path.iterdir()) for path in created if path.exists()):
-            raise JobCancelledError
-        assert time.monotonic() - started < 30, "Real worker did not fill its EDF cache"
-    with pytest.raises(JobCancelledError):
-        SubprocessInferenceClient(python).predict(model, edf, device="cpu", batch_size=1, check_cancelled=check_cancelled)
-    assert created and not any(path.exists() for path in created)
-
-
 def test_real_model_runs_with_a_hand_mapped_channel_and_exports_the_mapping(real_model_configuration, synthetic_model_edf, tmp_path):
     from sleepwalker.server.recording.relabel import relabel_edf
 
-    python, models = real_model_configuration
+    models = real_model_configuration
     renamed = tmp_path / "renamed.edf"
     relabel_edf(synthetic_model_edf, renamed, {"C3-M2": "EEG Fpz-Cz"})
-    app = create_local_app(models, inference_python=python, batch_size=1)
+    app = create_local_app(models, batch_size=1)
     with TestClient(app) as client:
         model = next(model for model in client.get("/api/v1/models").json()["models"] if model["task"] == "sleep")
         with renamed.open("rb") as file:

@@ -5,7 +5,6 @@ import pytest
 
 
 def pytest_addoption(parser):
-    parser.addoption("--inference-python", help="Separate framework Python for opt-in real-model API tests.")
     parser.addoption("--inference-models", help="Directory containing trusted real-model package subdirectories.")
 
 

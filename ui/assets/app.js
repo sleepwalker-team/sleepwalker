@@ -656,7 +656,7 @@ function watchJob(job) {
     renderJob(snapshot);
     if(!["succeeded","failed","cancelled"].includes(snapshot.state))return;
     terminal=true;stopWatchingJob();state.job=null;rememberSession();show("job-panel",false);$("export-start").disabled=false;$("infer-open").disabled=false;
-    if(snapshot.state==="failed") {const error=new Error(snapshot.error?.message||t("Der Job ist fehlgeschlagen."));error.code=snapshot.error?.code;error.details=snapshot.error?.details;throw error;}
+    if(snapshot.state==="failed") {if(job.type==="inference")await refreshTasks();const error=new Error(snapshot.error?.message||t("Der Job ist fehlgeschlagen."));error.code=snapshot.error?.code;error.details=snapshot.error?.details;throw error;}
     if(snapshot.state==="cancelled"){notice(t("Job abgebrochen. Die Session bleibt verfügbar."));if(job.type==="import")text("plot-loading",t("Workspace-Import abgebrochen. Session schließen und bei Bedarf erneut öffnen."));return;}
     if(job.type==="export") await finishExport();
     else if(job.type==="import") {

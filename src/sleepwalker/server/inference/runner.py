@@ -132,9 +132,8 @@ def _read_worker_result(root: Path, model: ModelInfo, returncode: int, log) -> p
         raise JobExecutionError("COMPUTE_UNAVAILABLE", "Inference worker did not return a valid response.", {"model_id": model.id}) from exc
 
 
-class PackageInferenceRunner:#TODO machts sonst sinn die results zu publishen wenn die fertig sind? worauf wartet man sonst?
-    """Runs the selected models one after another and publishes all results or none."""
-
+class PackageInferenceRunner:
+    """Runs the selected models one after another and publishes each result as soon as it is done. """
     def __init__(
         self, prediction_store: PredictionStore, *, device: str = "cpu", batch_size: int = 1,
         prediction_client: SubprocessInferenceClient | None = None, max_parallel_jobs: int = 1,
@@ -160,17 +159,22 @@ class PackageInferenceRunner:#TODO machts sonst sinn die results zu publishen we
         report_progress(JobPhase.LOADING, 0.0, "Waiting for a free inference slot")
         while not self._slots.acquire(timeout=0.1):
             check_cancelled()
+        failures = []
         try:
-            results = [
-                self._predict(session, model, channel_map.get(model.id), index / len(models), report_progress, check_cancelled)
-                for index, model in enumerate(models)
-            ]
+            for index, model in enumerate(models):
+                try:
+                    result = self._predict(session, model, channel_map.get(model.id), index / len(models), report_progress, check_cancelled)
+                except JobExecutionError as exc:
+                    failures.append((model.id, exc))
+                    continue
+                self.prediction_store.add(result)
+                session.model_provenance = [*session.model_provenance, _provenance(model, channel_map.get(model.id))]
         finally:
             self._slots.release()
 
-        check_cancelled()
-        self.prediction_store.add_many(results)
-        session.model_provenance = [*session.model_provenance, *(_provenance(model, channel_map.get(model.id)) for model in models)]
+        if failures:
+            model_id, first = failures[0]
+            raise JobExecutionError(first.code, first.message, {**(first.details or {}), "model_id": model_id, "failed_models": [model_id for model_id, _ in failures]})
 
     def _predict(
         self, session: Session, model: ModelInfo, mapping: dict[str, str] | None, progress: float,

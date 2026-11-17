@@ -92,19 +92,23 @@ def test_runner_rejects_incompatible_output_without_publishing(tmp_path, bad_cas
     assert store.list_for_session("sess-test") == []
 
 
-def test_runner_does_not_publish_partial_batch_when_second_model_fails(tmp_path):
-    class FailingSecondClient(FakeClient):
+def test_runner_keeps_results_of_other_models_when_one_fails(tmp_path):
+    class FailingFirstClient(FakeClient):
         def predict(self, model, *args, **kwargs):
-            if model.id == "second":
+            if model.id == "failing":
                 raise JobExecutionError("INFERENCE_FAILED", "Failed")
             return super().predict(model, *args, **kwargs)
-    first = create_model(tmp_path / "model")
-    second = replace(first, id="second", task="arousal")
+    working = create_model(tmp_path / "model")
+    failing = replace(working, id="failing", task="arousal")
+    session = create_session(tmp_path / "recording.edf")
     store = PredictionStore()
-    runner = PackageInferenceRunner(store, prediction_client=FailingSecondClient())
-    with pytest.raises(JobExecutionError):
-        runner.run(create_session(tmp_path / "recording.edf"), [first, second], lambda *_: None, lambda: None)
-    assert store.list_for_session("sess-test") == []
+    runner = PackageInferenceRunner(store, prediction_client=FailingFirstClient())
+    with pytest.raises(JobExecutionError) as error:
+        runner.run(session, [failing, working], lambda *_: None, lambda: None)
+    assert error.value.code == "INFERENCE_FAILED"
+    assert error.value.details == {"model_id": "failing", "failed_models": ["failing"]}
+    assert [result.model_id for result in store.list_for_session("sess-test")] == [working.id]
+    assert [model["id"] for model in session.model_provenance] == [working.id]
 
 
 def test_runner_discards_results_if_cancelled_during_worker(tmp_path):

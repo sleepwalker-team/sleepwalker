@@ -146,8 +146,10 @@ process has two purposes:
 - **Memory:** all model memory is released when the worker exits.
 
 Request and result travel as JSON and CSV through a private temporary directory
-that is removed even after a forced kill. All selected models must succeed before
-any result is published. One job runs at a time; others wait in `running`. The
+that is removed even after a forced kill. Each model's result is published as soon
+as it is done. If a model fails, the others still run; the job then fails with the
+first error and lists all failed models in `details.failed_models`, so a client can
+start just those again. One job runs at a time; others wait in `running`. The
 worker's traceback goes to the server log, never to clients.
 
 ### Channel mapping
